@@ -34,7 +34,6 @@ import os
 import glob
 import datetime
 import getpass
-import signal
 import subprocess
 import sys
 import shlex
@@ -600,6 +599,7 @@ class CCSApp:
         except curses.error:
             pass
         self.scr.keypad(True)
+        curses.raw()  # pass Ctrl-C through as key 3 instead of generating SIGINT
         self.scr.timeout(100)
         curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
 
@@ -837,14 +837,7 @@ class CCSApp:
     # ── Main loop ─────────────────────────────────────────────────
 
     def run(self):
-        # Use no-op handler so Ctrl-C comes through as key 3 in getch()
-        # (SIG_IGN silently drops the signal; a real handler lets curses see it)
-        old_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, lambda *_: None)
-        try:
-            self._run_loop()
-        finally:
-            signal.signal(signal.SIGINT, old_handler)
+        self._run_loop()
 
     def _run_loop(self):
         while True:
