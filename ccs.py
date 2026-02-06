@@ -633,8 +633,6 @@ class CCSApp:
             return None
         if self.mode != "normal":
             return None
-        if self.view != "sessions":
-            return None
         h, w = self.scr.getmaxyx()
         hdr_h = 5
         ftr_h = 1
@@ -643,22 +641,50 @@ class CCSApp:
         list_h = h - hdr_h - ftr_h - sep_h - preview_h
         list_top = hdr_h
         list_bot = list_top + list_h
-        if list_top <= my < list_bot and self.filtered:
-            row_idx = self.scroll + (my - list_top)
-            if row_idx < len(self.filtered):
-                if bstate & curses.BUTTON1_DOUBLE_CLICKED:
-                    self.cur = row_idx
-                    s = self.filtered[self.cur]
-                    profiles = self.mgr.load_profiles()
-                    active = next(
-                        (p for p in profiles if p.get("name") == self.active_profile_name),
-                        None,
-                    )
-                    extra = self._build_args_from_profile(active) if active else []
-                    use_tmux = active.get("tmux", True) if active else True
-                    if use_tmux:
-                        if not HAS_TMUX:
-                            self._set_status("tmux is not installed — install it or disable in profile")
+
+        # Click on tab bar (row 4) to switch views
+        if my == 4 and (bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED)):
+            # "Sessions" tab starts at x=2, "Tmux" tab starts after it
+            sess_label = " Sessions "
+            tmux_count = len(self.tmux_list)
+            tmux_label = f" Tmux ({tmux_count}) "
+            sess_end = 2 + len(sess_label)
+            tmux_start = sess_end + 1
+            tmux_end = tmux_start + len(tmux_label)
+            if 2 <= mx < sess_end and self.view != "sessions":
+                self.view = "sessions"
+                return None
+            elif tmux_start <= mx < tmux_end and self.view != "tmux":
+                self.view = "tmux"
+                self._refresh_tmux()
+                return None
+
+        if self.view == "sessions":
+            if list_top <= my < list_bot and self.filtered:
+                row_idx = self.scroll + (my - list_top)
+                if row_idx < len(self.filtered):
+                    if bstate & curses.BUTTON1_DOUBLE_CLICKED:
+                        self.cur = row_idx
+                        s = self.filtered[self.cur]
+                        profiles = self.mgr.load_profiles()
+                        active = next(
+                            (p for p in profiles if p.get("name") == self.active_profile_name),
+                            None,
+                        )
+                        extra = self._build_args_from_profile(active) if active else []
+                        use_tmux = active.get("tmux", True) if active else True
+                        if use_tmux:
+                            if not HAS_TMUX:
+                                self._set_status("tmux is not installed — install it or disable in profile")
+                                return None
+                            if s.cwd and not os.path.isdir(s.cwd):
+                                self.chdir_pending = ("resume", s.id, s.cwd, extra)
+                                self.mode = "chdir"
+                                self.ibuf = str(Path.home())
+                                self._set_status(f"Directory missing: {s.cwd}")
+                                return None
+                            self._tmux_launch(s, extra)
+                            self._refresh()
                             return None
                         if s.cwd and not os.path.isdir(s.cwd):
                             self.chdir_pending = ("resume", s.id, s.cwd, extra)
@@ -666,24 +692,32 @@ class CCSApp:
                             self.ibuf = str(Path.home())
                             self._set_status(f"Directory missing: {s.cwd}")
                             return None
-                        self._tmux_launch(s, extra)
-                        self._refresh()
-                        return None
-                    if s.cwd and not os.path.isdir(s.cwd):
-                        self.chdir_pending = ("resume", s.id, s.cwd, extra)
-                        self.mode = "chdir"
-                        self.ibuf = str(Path.home())
-                        self._set_status(f"Directory missing: {s.cwd}")
-                        return None
-                    self.exit_action = ("resume", s.id, s.cwd, extra)
-                    return "action"
-                elif bstate & curses.BUTTON1_CLICKED:
-                    self.cur = row_idx
-        if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
-            self.cur = max(0, self.cur - 3)
-        elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
-            if self.filtered:
-                self.cur = min(len(self.filtered) - 1, self.cur + 3)
+                        self.exit_action = ("resume", s.id, s.cwd, extra)
+                        return "action"
+                    elif bstate & curses.BUTTON1_CLICKED:
+                        self.cur = row_idx
+            if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+                self.cur = max(0, self.cur - 3)
+            elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+                if self.filtered:
+                    self.cur = min(len(self.filtered) - 1, self.cur + 3)
+
+        elif self.view == "tmux":
+            if list_top <= my < list_bot and self.tmux_list:
+                row_idx = my - list_top
+                if row_idx < len(self.tmux_list):
+                    if bstate & curses.BUTTON1_DOUBLE_CLICKED:
+                        self.tmux_cur = row_idx
+                        name, _ = self.tmux_list[self.tmux_cur]
+                        self._tmux_attach(name)
+                    elif bstate & curses.BUTTON1_CLICKED:
+                        self.tmux_cur = row_idx
+            if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+                self.tmux_cur = max(0, self.tmux_cur - 3)
+            elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+                if self.tmux_list:
+                    self.tmux_cur = min(len(self.tmux_list) - 1, self.tmux_cur + 3)
+
         return None
 
     def _refresh(self, force: bool = False):
@@ -863,7 +897,8 @@ class CCSApp:
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
         hints_map = {
-            "normal":  "⏎ Resume  R Last  Tab Tmux  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help  q Quit",
+            "normal":  "⏎ Resume  R Last  → Tmux  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help  q Quit",
+            "normal_tmux": "⏎ Attach  x Kill  ← Sessions  r Refresh  P Profiles  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
@@ -875,7 +910,8 @@ class CCSApp:
             "profile_edit": "Tab Expert/Structured  ↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
             "help":    "Press any key to close",
         }
-        hints = hints_map.get(self.mode, "")
+        hint_key = "normal_tmux" if self.mode == "normal" and self.view == "tmux" else self.mode
+        hints = hints_map.get(hint_key, "")
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1059,7 +1095,7 @@ class CCSApp:
         x += len(sess_label) + 1
         self._safe(y, x, tmux_label, tmux_attr)
         x += len(tmux_label) + 1
-        hint = "Tab: switch view"
+        hint = "←/→ switch view"
         self._safe(y, x + 1, hint, curses.color_pair(CP_DIM) | curses.A_DIM)
 
     def _draw_tmux_list(self, sy: int, height: int, w: int):
@@ -1240,7 +1276,7 @@ class CCSApp:
             ("    e              Start an ephemeral session", 0),
             ("", 0),
             ("  Tmux View", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    Tab            Switch Sessions / Tmux view", 0),
+            ("    ←/→ or Tab     Switch Sessions / Tmux view", 0),
             ("    Enter          Attach to tmux session", 0),
             ("    x              Kill tmux session", 0),
             ("", 0),
@@ -1830,12 +1866,12 @@ class CCSApp:
                 self.confirm_sel = 0
                 self.mode = "quit"
                 return None
-        elif k == 9:  # Tab — switch view
-            if self.view == "sessions":
-                self.view = "tmux"
-                self._refresh_tmux()
-            else:
-                self.view = "sessions"
+        elif k in (9, curses.KEY_RIGHT) and self.view == "sessions":  # Tab / → — switch to tmux
+            self.view = "tmux"
+            self._refresh_tmux()
+            return None
+        elif k in (9, curses.KEY_LEFT) and self.view == "tmux":  # Tab / ← — switch to sessions
+            self.view = "sessions"
             return None
         elif k == ord("?"):
             self.mode = "help"
@@ -2550,7 +2586,7 @@ def cmd_help():
   \033[36mn\033[0m                 New named session
   \033[36me\033[0m                 Ephemeral session
   \033[36m/\033[0m                 Search / filter
-  \033[36mTab\033[0m               Switch Sessions / Tmux view
+  \033[36m←/→\033[0m or \033[36mTab\033[0m       Switch Sessions / Tmux view
   \033[36mx\033[0m                 Kill tmux session (in Tmux view)
   \033[36mr\033[0m                 Refresh
   \033[36mq\033[0m                 Quit
