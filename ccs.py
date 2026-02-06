@@ -837,9 +837,10 @@ class CCSApp:
     # ── Main loop ─────────────────────────────────────────────────
 
     def run(self):
-        # Ignore SIGINT so Ctrl-C comes through as key 3
+        # Use no-op handler so Ctrl-C comes through as key 3 in getch()
+        # (SIG_IGN silently drops the signal; a real handler lets curses see it)
         old_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, lambda *_: None)
         try:
             self._run_loop()
         finally:
@@ -867,13 +868,14 @@ class CCSApp:
                     break
                 continue
 
-            # Ctrl-C: double-tap within 1 second to open quit confirmation
+            # Ctrl-C: double-tap within 1 second to quit
             if k == 3:
                 now = time.monotonic()
                 if now - self.last_ctrl_c < 1.0:
-                    self.confirm_sel = 0
-                    self.mode = "quit"
+                    break  # second Ctrl-C within 1s → exit immediately
                 self.last_ctrl_c = now
+                self.confirm_sel = 0
+                self.mode = "quit"
                 continue
 
             result = self._handle_input(k)
@@ -2550,7 +2552,7 @@ class CCSApp:
                 break
 
     def _input_quit(self, k: int) -> Optional[str]:
-        if k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
+        if k == ord("y") or k == 3 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
             return "quit"
         elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
             self.confirm_sel = 1 - self.confirm_sel
