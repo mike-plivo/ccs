@@ -13,6 +13,7 @@ Usage:
     ccs pin/unpin <id|tag>                 Pin/unpin a session
     ccs tag <id|tag> <tag>                 Set tag on session
     ccs untag <id|tag>                     Remove tag
+    ccs chdir <id|tag> <path>              Set session working directory
     ccs delete <id|tag>                    Delete a session
     ccs delete --empty                     Delete all empty sessions
     ccs search <query>                     Search sessions
@@ -45,6 +46,7 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 CCS_DIR = Path.home() / ".config" / "ccs"
 TAGS_FILE = CCS_DIR / "session_tags.json"
 PINS_FILE = CCS_DIR / "session_pins.json"
+CWDS_FILE = CCS_DIR / "session_cwds.json"
 EPHEMERAL_FILE = CCS_DIR / "ephemeral_sessions.txt"
 PROFILES_FILE = CCS_DIR / "ccs_profiles.json"
 ACTIVE_PROFILE_FILE = CCS_DIR / "ccs_active_profile.txt"
@@ -264,6 +266,7 @@ class SessionManager:
     def scan(self, sort_mode: str = "date") -> List[Session]:
         tags = self._load(TAGS_FILE, {})
         pins = set(self._load(PINS_FILE, []))
+        cwd_overrides = self._load(CWDS_FILE, {})
         out: List[Session] = []
         pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
 
@@ -301,6 +304,9 @@ class SessionManager:
             except Exception:
                 pass
 
+            if sid in cwd_overrides:
+                cwd = cwd_overrides[sid]
+
             out.append(Session(
                 id=sid, project_raw=praw, project_display=pdisp,
                 cwd=cwd, summary=summary, first_msg=fm,
@@ -334,6 +340,21 @@ class SessionManager:
     def remove_tag(self, sid: str):
         self.set_tag(sid, "")
 
+    def is_tag_unique(self, tag: str, exclude_sid: str = "") -> bool:
+        tags = self._load(TAGS_FILE, {})
+        return not any(sid != exclude_sid and t == tag for sid, t in tags.items())
+
+    def set_cwd(self, sid: str, path: str):
+        cwds = self._load(CWDS_FILE, {})
+        if path:
+            cwds[sid] = path
+        else:
+            cwds.pop(sid, None)
+        self._save(CWDS_FILE, cwds)
+
+    def remove_cwd(self, sid: str):
+        self.set_cwd(sid, "")
+
     def delete(self, s: Session):
         if os.path.exists(s.path):
             os.remove(s.path)
@@ -343,6 +364,9 @@ class SessionManager:
         pins = self._load(PINS_FILE, [])
         pins = [p for p in pins if p != s.id]
         self._save(PINS_FILE, pins)
+        cwds = self._load(CWDS_FILE, {})
+        cwds.pop(s.id, None)
+        self._save(CWDS_FILE, cwds)
 
     # ── Profile management ──────────────────────────────────────────
 
@@ -447,6 +471,7 @@ class CCSApp:
         self.empty_count = 0    # count for delete_empty confirmation
         self.sort_mode = "date"  # "date" | "name" | "project"
         self.marked: set = set()  # session IDs for bulk operations
+        self.chdir_pending = None  # ("resume", sid, cwd, extra) or ("set_cwd", sid, cwd, None)
 
         # Active profile & theme
         self.active_profile_name = self.mgr.load_active_profile_name()
@@ -548,6 +573,12 @@ class CCSApp:
                         None,
                     )
                     extra = self._build_args_from_profile(active) if active else []
+                    if s.cwd and not os.path.isdir(s.cwd):
+                        self.chdir_pending = ("resume", s.id, s.cwd, extra)
+                        self.mode = "chdir"
+                        self.ibuf = str(Path.home())
+                        self._set_status(f"Directory missing: {s.cwd}")
+                        return None
                     self.exit_action = ("resume", s.id, s.cwd, extra)
                     return "action"
                 elif bstate & curses.BUTTON1_CLICKED:
@@ -718,12 +749,13 @@ class CCSApp:
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
         hints_map = {
-            "normal":  "⏎ Resume  R Last  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help  q Quit",
+            "normal":  "⏎ Resume  R Last  s Sort  Space Mark  c CWD  P Profiles  d Del  n New  / Search  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
             "delete":  "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
             "delete_empty": "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
+            "chdir":   "Type directory path  ·  ⏎ Apply  ·  Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create  ·  Esc Cancel",
             "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
             "profile_edit": "Tab Expert/Structured  ↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
@@ -751,6 +783,9 @@ class CCSApp:
         elif self.mode == "new":
             self._safe(y, 1, " Name:", curses.color_pair(CP_HEADER) | curses.A_BOLD)
             self._safe(y, 8, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
+        elif self.mode == "chdir":
+            self._safe(y, 1, " CWD:", curses.color_pair(CP_WARN) | curses.A_BOLD)
+            self._safe(y, 7, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
         elif self.mode in ("quit", "delete", "delete_empty", "profiles", "profile_edit"):
             pass  # handled by overlay popups
         elif self.query:
@@ -924,7 +959,8 @@ class CCSApp:
         lines.append((f"  Project: {s.project_display}",
                        curses.color_pair(CP_PROJECT)))
         if s.cwd:
-            lines.append((f"  CWD:     {s.cwd}", curses.color_pair(CP_DIM) | curses.A_DIM))
+            cwd_suffix = " (override)" if self.mgr._load(CWDS_FILE, {}).get(s.id) else ""
+            lines.append((f"  CWD:     {s.cwd}{cwd_suffix}", curses.color_pair(CP_DIM) | curses.A_DIM))
         lines.append((f"  Modified: {s.ts}  ({s.age})", self._age_color(s.mtime)))
         lines.append((f"  Messages: {s.msg_count}",
                        curses.color_pair(CP_ACCENT)))
@@ -964,6 +1000,7 @@ class CCSApp:
             ("    ↓ / j          Move down", 0),
             ("    g              Jump to first", 0),
             ("    G              Jump to last", 0),
+            ("    Shift+↑/↓      Jump 10 rows", 0),
             ("    PgUp / PgDn    Page up / down", 0),
             ("", 0),
             ("  Actions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
@@ -972,8 +1009,9 @@ class CCSApp:
             ("    P              Profile picker / manager", 0),
             ("                   (Tab: expert/structured mode)", 0),
             ("    p              Toggle pin (bulk if marked)", 0),
-            ("    t              Tag a session", 0),
+            ("    t              Set / rename tag", 0),
             ("    T              Remove tag from session", 0),
+            ("    c              Change session CWD", 0),
             ("    d              Delete session (bulk if marked)", 0),
             ("    D              Delete all empty sessions", 0),
             ("", 0),
@@ -1469,6 +1507,7 @@ class CCSApp:
             "normal": self._input_normal,
             "search": self._input_search,
             "tag": self._input_tag,
+            "chdir": self._input_chdir,
             "delete": self._input_delete,
             "delete_empty": self._input_delete_empty,
             "new": self._input_new,
@@ -1526,8 +1565,14 @@ class CCSApp:
                     None,
                 )
                 extra = self._build_args_from_profile(active) if active else []
-                self.exit_action = ("resume", s.id, s.cwd, extra)
-                return "action"
+                if s.cwd and not os.path.isdir(s.cwd):
+                    self.chdir_pending = ("resume", s.id, s.cwd, extra)
+                    self.mode = "chdir"
+                    self.ibuf = str(Path.home())
+                    self._set_status(f"Directory missing: {s.cwd}")
+                else:
+                    self.exit_action = ("resume", s.id, s.cwd, extra)
+                    return "action"
         elif k == ord(" "):
             # Toggle mark
             if self.filtered:
@@ -1557,8 +1602,9 @@ class CCSApp:
                 self._refresh()
         elif k == ord("t"):
             if self.filtered:
+                s = self.filtered[self.cur]
                 self.mode = "tag"
-                self.ibuf = ""
+                self.ibuf = s.tag if s.tag else ""
         elif k == ord("T"):
             if self.filtered:
                 s = self.filtered[self.cur]
@@ -1568,6 +1614,12 @@ class CCSApp:
                     self._refresh()
                 else:
                     self._set_status("No tag to remove")
+        elif k == ord("c"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
+                self.mode = "chdir"
+                self.ibuf = s.cwd or str(Path.home())
         elif k == ord("d"):
             if self.marked:
                 self.delete_label = f"{len(self.marked)} marked sessions"
@@ -1604,8 +1656,14 @@ class CCSApp:
                     None,
                 )
                 extra = self._build_args_from_profile(active) if active else []
-                self.exit_action = ("resume", most_recent.id, most_recent.cwd, extra)
-                return "action"
+                if most_recent.cwd and not os.path.isdir(most_recent.cwd):
+                    self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
+                    self.mode = "chdir"
+                    self.ibuf = str(Path.home())
+                    self._set_status(f"Directory missing: {most_recent.cwd}")
+                else:
+                    self.exit_action = ("resume", most_recent.id, most_recent.cwd, extra)
+                    return "action"
             else:
                 self._set_status("No sessions to resume")
         elif k == ord("P"):
@@ -1653,8 +1711,12 @@ class CCSApp:
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.filtered and self.ibuf.strip():
                 s = self.filtered[self.cur]
-                self.mgr.set_tag(s.id, self.ibuf.strip())
-                self._set_status(f"Tagged: [{self.ibuf.strip()}]")
+                new_tag = self.ibuf.strip()
+                if not self.mgr.is_tag_unique(new_tag, s.id):
+                    self._set_status(f"Tag '{new_tag}' already used by another session")
+                    return None
+                self.mgr.set_tag(s.id, new_tag)
+                self._set_status(f"Tagged: [{new_tag}]")
                 self._refresh()
             self.mode = "normal"
         elif k in (curses.KEY_BACKSPACE, 127, 8):
@@ -1710,6 +1772,39 @@ class CCSApp:
                 self.exit_action = ("new", self.ibuf.strip())
                 return "action"
             self.mode = "normal"
+        elif k in (curses.KEY_BACKSPACE, 127, 8):
+            self.ibuf = self.ibuf[:-1]
+        elif 32 <= k <= 126:
+            self.ibuf += chr(k)
+        return None
+
+    def _input_chdir(self, k: int) -> Optional[str]:
+        if k == 27:  # Esc
+            self.chdir_pending = None
+            self.mode = "normal"
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            path = self.ibuf.strip()
+            if not path:
+                self.chdir_pending = None
+                self.mode = "normal"
+                return None
+            expanded = os.path.expanduser(path)
+            if not os.path.isdir(expanded):
+                self._set_status(f"Not a valid directory: {path}")
+                return None
+            action_type = self.chdir_pending[0]
+            sid = self.chdir_pending[1]
+            if action_type == "resume":
+                extra = self.chdir_pending[3]
+                self.chdir_pending = None
+                self.exit_action = ("resume", sid, expanded, extra)
+                return "action"
+            elif action_type == "set_cwd":
+                self.mgr.set_cwd(sid, expanded)
+                self._set_status(f"CWD set to: {expanded}")
+                self.chdir_pending = None
+                self._refresh()
+                self.mode = "normal"
         elif k in (curses.KEY_BACKSPACE, 127, 8):
             self.ibuf = self.ibuf[:-1]
         elif 32 <= k <= 126:
@@ -1991,6 +2086,7 @@ def cmd_help():
   ccs unpin <id|tag>                     Unpin a session
   ccs tag <id|tag> <tag>                 Set tag on session
   ccs untag <id|tag>                     Remove tag from session
+  ccs chdir <id|tag> <path>              Set session working directory
   ccs delete <id|tag>                    Delete a session
   ccs delete --empty                     Delete all empty sessions
   ccs search <query>                     Search sessions by text
@@ -2023,7 +2119,8 @@ def cmd_help():
   \033[36mH\033[0m                 Cycle theme
   \033[36ms\033[0m                 Cycle sort (date/name/project)
   \033[36mp\033[0m                 Toggle pin (bulk if marked)
-  \033[36mt\033[0m / \033[36mT\033[0m             Tag / remove tag
+  \033[36mt\033[0m / \033[36mT\033[0m             Set/rename tag / remove tag
+  \033[36mc\033[0m                 Change session working directory
   \033[36md\033[0m / \033[36mD\033[0m             Delete session / delete empties
   \033[36mSpace\033[0m             Mark/unmark session for bulk ops
   \033[36mu\033[0m                 Unmark all
@@ -2058,8 +2155,10 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
         if os.path.isdir(s.cwd):
             os.chdir(s.cwd)
         else:
-            print(f"\033[1;31m◆ Error:\033[0m Directory no longer exists: \033[33m{s.cwd}\033[0m")
-            sys.exit(1)
+            home = str(Path.home())
+            print(f"\033[1;33m◆ Warning:\033[0m Directory no longer exists: \033[33m{s.cwd}\033[0m")
+            print(f"  Falling back to: \033[36m{home}\033[0m")
+            os.chdir(home)
     opts = f" {' '.join(extra)}" if extra else ""
     print(f"\033[1;36m◆\033[0m Resuming session \033[2m({s.id[:8]}…)\033[0m{opts}")
     cmd = ["claude", "--resume", s.id] + extra
@@ -2115,6 +2214,9 @@ def cmd_unpin(mgr: SessionManager, query: str):
 
 def cmd_tag(mgr: SessionManager, query: str, tag: str):
     s = _find_session(mgr, query)
+    if not mgr.is_tag_unique(tag, s.id):
+        print(f"\033[31mTag '{tag}' is already used by another session\033[0m")
+        sys.exit(1)
     mgr.set_tag(s.id, tag)
     print(f"Tagged [{tag}]: {s.id[:12]}")
 
@@ -2126,6 +2228,16 @@ def cmd_untag(mgr: SessionManager, query: str):
         print(f"Removed tag from: {s.id[:12]}")
     else:
         print(f"No tag on: {s.id[:12]}")
+
+
+def cmd_chdir(mgr: SessionManager, query: str, path: str):
+    s = _find_session(mgr, query)
+    expanded = os.path.expanduser(path)
+    if not os.path.isdir(expanded):
+        print(f"\033[31mDirectory does not exist: {expanded}\033[0m")
+        sys.exit(1)
+    mgr.set_cwd(s.id, expanded)
+    print(f"CWD set to [{expanded}]: {s.tag or s.id[:12]}")
 
 
 def cmd_delete_session(mgr: SessionManager, query: str):
@@ -2331,9 +2443,10 @@ def main():
                 if os.path.isdir(cwd):
                     os.chdir(cwd)
                 else:
-                    print(f"\033[1;31m◆ Error:\033[0m Session directory no longer exists: \033[33m{cwd}\033[0m")
-                    print("  The session cannot be resumed from a missing directory.")
-                    sys.exit(1)
+                    home = str(Path.home())
+                    print(f"\033[1;33m◆ Warning:\033[0m Session directory no longer exists: \033[33m{cwd}\033[0m")
+                    print(f"  Falling back to: \033[36m{home}\033[0m")
+                    os.chdir(home)
             cmd = ["claude", "--resume", sid] + extra
             opts = f" {' '.join(extra)}" if extra else ""
             print(f"\033[1;36m◆\033[0m Resuming session \033[2m({sid[:8]}…)\033[0m{opts}")
@@ -2407,6 +2520,12 @@ def main():
             print("\033[31mUsage: ccs untag <id|tag>\033[0m")
             sys.exit(1)
         cmd_untag(mgr, args[1])
+
+    elif verb == "chdir":
+        if len(args) < 3:
+            print("\033[31mUsage: ccs chdir <id|tag> <path>\033[0m")
+            sys.exit(1)
+        cmd_chdir(mgr, args[1], args[2])
 
     elif verb == "delete":
         if len(args) >= 2 and args[1] == "--empty":
