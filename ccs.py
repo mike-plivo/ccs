@@ -302,7 +302,7 @@ class SessionManager:
                 summary = cached.get("summary", "")
                 fm = cached.get("first_msg", "")
                 fm_long = cached.get("first_msg_long", "")
-                cwd = cached.get("cwd", "")
+                cwd = cached.get("cwd", "").strip()
                 sums = cached.get("summaries", [])
                 msg_count = cached.get("msg_count", 0)
                 praw = cached.get("project_raw", praw)
@@ -327,7 +327,7 @@ class SessionManager:
                             elif msg_type in ("user", "assistant"):
                                 msg_count += 1
                                 if msg_type == "user" and not fm:
-                                    cwd = d.get("cwd", "")
+                                    cwd = d.get("cwd", "").strip()
                                     txt = self._extract_text(d.get("message", {}))
                                     if txt:
                                         fm = txt[:120].replace("\n", " ").replace("\t", " ")
