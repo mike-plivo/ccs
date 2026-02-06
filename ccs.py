@@ -947,7 +947,7 @@ class CCSApp:
 
         # Column widths
         ind_w = 3     # " ▸ " or " ● " or "   "
-        pin_w = 2     # "★ " or "⚡ " or "  "
+        pin_w = 3     # "★⚡" or "★  " or "⚡ " or "   " (⚡ is 2 cols wide)
         ts_w = 18     # "2025-01-15 14:30  "
         msg_w = 5     # "12m " or "  0m "
         tag_w = tag_col_w  # fixed across all visible rows
@@ -974,15 +974,15 @@ class CCSApp:
 
         msg_str = f"{s.msg_count:>3d}m " if s.msg_count else "     "
 
-        # Pin/tmux indicator (2-char column)
+        # Pin/tmux indicator (3 display-cols: ⚡ is 2 cols wide)
         if s.pinned and has_tmux:
-            pin_str = "★⚡"
+            pin_str = "★⚡"    # 1 + 2 = 3 cols
         elif s.pinned:
-            pin_str = "★ "
+            pin_str = "★  "    # 1 + 2 spaces = 3 cols
         elif has_tmux:
-            pin_str = "⚡ "
+            pin_str = "⚡ "    # 2 + 1 space = 3 cols
         else:
-            pin_str = "  "
+            pin_str = "   "    # 3 spaces
 
         # Mark indicator
         if marked:
@@ -1007,7 +1007,7 @@ class CCSApp:
             if s.pinned:
                 self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
             if has_tmux:
-                tx = 4 if s.pinned else 3
+                tx = 4 if s.pinned else 3  # after ★ (1 col) or at start
                 self._safe(y, tx, "⚡", curses.color_pair(CP_STATUS) | curses.A_BOLD)
             x += pin_w
             if s.tag and tag_w > 0:
@@ -1035,7 +1035,7 @@ class CCSApp:
                 self._safe(y, x, "★", curses.color_pair(CP_PIN) | curses.A_BOLD)
             if has_tmux:
                 self._safe(y, x + (1 if s.pinned else 0), "⚡",
-                           curses.color_pair(CP_STATUS) | curses.A_BOLD)
+                           curses.color_pair(CP_STATUS))
             x += pin_w
 
             # Tag
