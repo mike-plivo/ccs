@@ -754,7 +754,7 @@ class CCSApp:
         self.tmux_idle = new_idle
 
     def _get_git_info(self, cwd: str):
-        """Return (repo_name, [(hash, subject), ...]) or None if not a git repo."""
+        """Return (repo_name, branch, [(hash, subject), ...]) or None if not a git repo."""
         if not HAS_GIT or not cwd:
             return None
         if cwd in self._git_cache:
@@ -770,6 +770,15 @@ class CCSApp:
         except Exception:
             self._git_cache[cwd] = None
             return None
+        branch = ""
+        try:
+            r = subprocess.run(
+                ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=2)
+            if r.returncode == 0:
+                branch = r.stdout.strip()
+        except Exception:
+            pass
         commits = []
         try:
             r = subprocess.run(
@@ -781,7 +790,7 @@ class CCSApp:
                     commits.append((parts[0], parts[1] if len(parts) == 2 else ""))
         except Exception:
             pass
-        result = (repo_name, commits)
+        result = (repo_name, branch, commits)
         self._git_cache[cwd] = result
         return result
 
@@ -1216,8 +1225,9 @@ class CCSApp:
                                curses.color_pair(CP_STATUS) | curses.A_BOLD))
         git_info = self._get_git_info(s.cwd) if s.cwd else None
         if git_info:
-            repo_name, commits = git_info
-            lines.append((f"  Git:     {repo_name}", curses.color_pair(CP_ACCENT)))
+            repo_name, branch, commits = git_info
+            branch_str = f" ({branch})" if branch else ""
+            lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
             for sha, subject in commits:
                 cl = f"    {sha} {subject}"
                 if len(cl) > w - 4:
