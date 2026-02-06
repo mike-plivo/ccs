@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """
 ccs — Claude Code Session Manager
-A terminal UI for browsing, managing, and resuming Claude Code sessions.
+A terminal UI and CLI for browsing, managing, and resuming Claude Code sessions.
 
 Usage:
-    ccs              Interactive TUI to browse & resume sessions
-    ccs new <name>   Start a named persistent session
-    ccs tmp          Start an ephemeral session (auto-deleted)
-    ccs help         Show help
+    ccs                                    Interactive TUI
+    ccs list                               List all sessions
+    ccs resume <id|tag> [-p <profile>]     Resume session
+    ccs resume <id|tag> --claude <opts>    Resume with raw claude options
+    ccs new <name>                         New named session
+    ccs tmp                                Ephemeral session
+    ccs pin/unpin <id|tag>                 Pin/unpin a session
+    ccs tag <id|tag> <tag>                 Set tag on session
+    ccs untag <id|tag>                     Remove tag
+    ccs delete <id|tag>                    Delete a session
+    ccs delete --empty                     Delete all empty sessions
+    ccs search <query>                     Search sessions
+    ccs profile list|set|new|delete        Manage profiles
+    ccs theme list|set                     Manage themes
+    ccs help                               Show help
 """
 
 import curses
@@ -16,9 +27,11 @@ import os
 import glob
 import datetime
 import getpass
+import signal
 import subprocess
 import sys
 import shutil
+import time
 import uuid as uuid_mod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,9 +41,13 @@ from typing import List, Optional, Tuple
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
-TAGS_FILE = CLAUDE_DIR / "session_tags.json"
-PINS_FILE = CLAUDE_DIR / "session_pins.json"
-EPHEMERAL_FILE = CLAUDE_DIR / "ephemeral_sessions.txt"
+CCS_DIR = Path.home() / ".config" / "ccs"
+TAGS_FILE = CCS_DIR / "session_tags.json"
+PINS_FILE = CCS_DIR / "session_pins.json"
+EPHEMERAL_FILE = CCS_DIR / "ephemeral_sessions.txt"
+PROFILES_FILE = CCS_DIR / "ccs_profiles.json"
+ACTIVE_PROFILE_FILE = CCS_DIR / "ccs_active_profile.txt"
+THEME_FILE = CCS_DIR / "ccs_theme.txt"
 
 # ── Color pair IDs ────────────────────────────────────────────────────
 
@@ -49,10 +66,51 @@ CP_SEL_PIN = 12
 CP_SEL_TAG = 13
 CP_SEL_PROJ = 14
 CP_ACCENT = 15
+CP_PROFILE_BADGE = 16
+
+# ── Themes ───────────────────────────────────────────────────────────
+# Raw color values: 0=BLACK 1=RED 2=GREEN 3=YELLOW 4=BLUE 5=MAGENTA 6=CYAN 7=WHITE
+_BLK, _RED, _GRN, _YLW, _BLU, _MAG, _CYN, _WHT = 0, 1, 2, 3, 4, 5, 6, 7
+_DEF = -1  # terminal default
+
+THEME_NAMES = ["dark", "blue", "red", "green", "light"]
+DEFAULT_THEME = "dark"
+
+# Each theme: 16 (fg, bg) tuples for CP_HEADER(1) .. CP_PROFILE_BADGE(16)
+THEMES = {
+    "dark": [
+        (_CYN, _DEF), (_CYN, _DEF), (_YLW, _DEF), (_GRN, _DEF),
+        (_WHT, _BLU), (_WHT, _DEF), (_MAG, _DEF), (_RED, _DEF),
+        (_WHT, _DEF), (_YLW, _DEF), (_GRN, _DEF), (_YLW, _BLU),
+        (_GRN, _BLU), (_MAG, _BLU), (_CYN, _DEF), (_BLK, _GRN),
+    ],
+    "blue": [
+        (_BLU, _DEF), (_BLU, _DEF), (_YLW, _DEF), (_CYN, _DEF),
+        (_WHT, _BLU), (_CYN, _DEF), (_CYN, _DEF), (_RED, _DEF),
+        (_WHT, _DEF), (_CYN, _DEF), (_CYN, _DEF), (_YLW, _BLU),
+        (_CYN, _BLU), (_WHT, _BLU), (_BLU, _DEF), (_WHT, _BLU),
+    ],
+    "red": [
+        (_RED, _DEF), (_RED, _DEF), (_YLW, _DEF), (_GRN, _DEF),
+        (_WHT, _RED), (_WHT, _DEF), (_YLW, _DEF), (_RED, _DEF),
+        (_WHT, _DEF), (_YLW, _DEF), (_RED, _DEF), (_YLW, _RED),
+        (_GRN, _RED), (_YLW, _RED), (_RED, _DEF), (_WHT, _RED),
+    ],
+    "green": [
+        (_GRN, _DEF), (_GRN, _DEF), (_YLW, _DEF), (_GRN, _DEF),
+        (_BLK, _GRN), (_GRN, _DEF), (_GRN, _DEF), (_RED, _DEF),
+        (_GRN, _DEF), (_GRN, _DEF), (_GRN, _DEF), (_YLW, _GRN),
+        (_WHT, _GRN), (_BLK, _GRN), (_GRN, _DEF), (_BLK, _GRN),
+    ],
+    "light": [
+        (_BLU, _DEF), (_BLU, _DEF), (_RED, _DEF), (_GRN, _DEF),
+        (_WHT, _BLU), (_BLK, _DEF), (_MAG, _DEF), (_RED, _DEF),
+        (_BLK, _DEF), (_BLU, _DEF), (_GRN, _DEF), (_RED, _BLU),
+        (_GRN, _BLU), (_MAG, _BLU), (_BLU, _DEF), (_WHT, _BLU),
+    ],
+}
 
 # ── Launch option definitions ─────────────────────────────────────────
-
-PROFILES_FILE = CLAUDE_DIR / "ccs_profiles.json"
 
 MODELS = [
     ("default", ""),
@@ -78,8 +136,7 @@ TOGGLE_FLAGS = [
     ("--no-session-persistence",         "--no-session-persistence"),
 ]
 
-# Row types in launch overlay
-ROW_PROFILE = "profile"
+# Row types in profile editor
 ROW_MODEL = "model"
 ROW_PERMMODE = "permmode"
 ROW_TOGGLE = "toggle"
@@ -87,8 +144,6 @@ ROW_SYSPROMPT = "sysprompt"
 ROW_TOOLS = "tools"
 ROW_MCP = "mcp"
 ROW_CUSTOM = "custom"
-ROW_LAUNCH = "launch"
-ROW_SAVE = "save"
 ROW_PROF_NAME = "prof_name"
 ROW_PROF_SAVE = "prof_save"
 
@@ -147,7 +202,7 @@ class SessionManager:
         self._ensure()
 
     def _ensure(self):
-        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+        CCS_DIR.mkdir(parents=True, exist_ok=True)
         if not TAGS_FILE.exists():
             TAGS_FILE.write_text("{}")
         if not PINS_FILE.exists():
@@ -273,7 +328,17 @@ class SessionManager:
 
     def load_profiles(self) -> List[dict]:
         data = self._load(PROFILES_FILE, [])
-        return data if isinstance(data, list) else []
+        profiles = data if isinstance(data, list) else []
+        # Ensure "default" profile always exists
+        if not any(p.get("name") == "default" for p in profiles):
+            default_prof = {
+                "name": "default", "model": "", "permission_mode": "",
+                "flags": [], "system_prompt": "", "tools": "",
+                "mcp_config": "", "custom_args": "",
+            }
+            profiles.insert(0, default_prof)
+            self._save(PROFILES_FILE, profiles)
+        return profiles
 
     def save_profile(self, profile: dict):
         profiles = self.load_profiles()
@@ -284,9 +349,39 @@ class SessionManager:
         self._save(PROFILES_FILE, profiles)
 
     def delete_profile(self, name: str):
+        if name.lower() == "default":
+            return
         profiles = self.load_profiles()
         profiles = [p for p in profiles if p.get("name") != name]
         self._save(PROFILES_FILE, profiles)
+
+    def load_active_profile_name(self) -> str:
+        try:
+            if ACTIVE_PROFILE_FILE.exists():
+                name = ACTIVE_PROFILE_FILE.read_text().strip()
+                if name:
+                    return name
+        except Exception:
+            pass
+        return "default"
+
+    def save_active_profile_name(self, name: str):
+        ACTIVE_PROFILE_FILE.write_text(name)
+
+    # ── Theme management ─────────────────────────────────────────
+
+    def load_theme(self) -> str:
+        try:
+            if THEME_FILE.exists():
+                name = THEME_FILE.read_text().strip()
+                if name in THEME_NAMES:
+                    return name
+        except Exception:
+            pass
+        return DEFAULT_THEME
+
+    def save_theme(self, name: str):
+        THEME_FILE.write_text(name)
 
     def purge_ephemeral(self):
         if not EPHEMERAL_FILE.exists():
@@ -326,15 +421,16 @@ class CCSApp:
         self.cur = 0
         self.scroll = 0
         self.query = ""
-        self.mode = "normal"  # normal | search | tag | delete | delete_empty | new | launch | profiles | profile_edit | quick_profile | help
+        self.mode = "normal"  # normal | search | tag | delete | delete_empty | new | profiles | profile_edit | help | quit
         self.ibuf = ""
         self.delete_label = ""  # label shown in delete confirmation popup
         self.empty_count = 0    # count for delete_empty confirmation
 
-        # Launch options state
-        self.launch_session: Optional[Session] = None
-        self.launch_rows: List[Tuple[str, int]] = []  # (row_type, index)
-        self.launch_cur = 0
+        # Active profile & theme
+        self.active_profile_name = self.mgr.load_active_profile_name()
+        self.active_theme = self.mgr.load_theme()
+
+        # Profile editor state (shared with profile_edit mode)
         self.launch_model_idx = 0
         self.launch_perm_idx = 0
         self.launch_toggles: List[bool] = [False] * len(TOGGLE_FLAGS)
@@ -343,8 +439,6 @@ class CCSApp:
         self.launch_mcp = ""
         self.launch_custom = ""
         self.launch_editing: Optional[str] = None  # which text field is active
-        self.launch_profile_idx = 0  # 0 = (custom), 1+ = saved profiles
-        self.launch_save_name = ""   # buffer for saving a profile name
 
         # Profile manager state
         self.prof_cur = 0             # cursor in profile list
@@ -354,13 +448,10 @@ class CCSApp:
         self.prof_editing_existing: Optional[str] = None  # original name if editing
         self.prof_delete_confirm = False
 
-        # Quick profile picker state
-        self.qprof_cur = 0            # cursor in quick profile picker
-        self.qprof_delete_confirm = False
-
         self.status = ""
         self.status_ttl = 0
         self.exit_action: Optional[Tuple] = None
+        self.last_ctrl_c: float = 0.0
 
         self._init_colors()
         self._refresh()
@@ -368,27 +459,27 @@ class CCSApp:
     def _init_colors(self):
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(CP_HEADER, curses.COLOR_CYAN, -1)
-        curses.init_pair(CP_BORDER, curses.COLOR_CYAN, -1)
-        curses.init_pair(CP_PIN, curses.COLOR_YELLOW, -1)
-        curses.init_pair(CP_TAG, curses.COLOR_GREEN, -1)
-        curses.init_pair(CP_SELECTED, curses.COLOR_WHITE, curses.COLOR_BLUE)
-        curses.init_pair(CP_DIM, curses.COLOR_WHITE, -1)
-        curses.init_pair(CP_PROJECT, curses.COLOR_MAGENTA, -1)
-        curses.init_pair(CP_WARN, curses.COLOR_RED, -1)
-        curses.init_pair(CP_NORMAL, curses.COLOR_WHITE, -1)
-        curses.init_pair(CP_INPUT, curses.COLOR_YELLOW, -1)
-        curses.init_pair(CP_STATUS, curses.COLOR_GREEN, -1)
-        curses.init_pair(CP_SEL_PIN, curses.COLOR_YELLOW, curses.COLOR_BLUE)
-        curses.init_pair(CP_SEL_TAG, curses.COLOR_GREEN, curses.COLOR_BLUE)
-        curses.init_pair(CP_SEL_PROJ, curses.COLOR_MAGENTA, curses.COLOR_BLUE)
-        curses.init_pair(CP_ACCENT, curses.COLOR_CYAN, -1)
+        self._apply_theme(self.active_theme)
         try:
             curses.curs_set(0)
         except curses.error:
             pass
         self.scr.keypad(True)
         self.scr.timeout(100)
+
+    def _apply_theme(self, name: str):
+        """Apply a theme by reinitializing all 16 color pairs."""
+        color_map = [
+            curses.COLOR_BLACK, curses.COLOR_RED, curses.COLOR_GREEN,
+            curses.COLOR_YELLOW, curses.COLOR_BLUE, curses.COLOR_MAGENTA,
+            curses.COLOR_CYAN, curses.COLOR_WHITE,
+        ]
+        pairs = THEMES.get(name, THEMES[DEFAULT_THEME])
+        for i, (fg, bg) in enumerate(pairs):
+            cfn = color_map[fg] if fg >= 0 else -1
+            cbn = color_map[bg] if bg >= 0 else -1
+            curses.init_pair(i + 1, cfn, cbn)
+        self.active_theme = name
 
     def _refresh(self):
         self.sessions = self.mgr.scan()
@@ -435,6 +526,15 @@ class CCSApp:
     # ── Main loop ─────────────────────────────────────────────────
 
     def run(self):
+        # Ignore SIGINT so Ctrl-C comes through as key 3
+        old_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            self._run_loop()
+        finally:
+            signal.signal(signal.SIGINT, old_handler)
+
+    def _run_loop(self):
         while True:
             self._draw()
             k = self.scr.getch()
@@ -448,6 +548,15 @@ class CCSApp:
                 continue
             if k == curses.KEY_RESIZE:
                 self.scr.clear()
+                continue
+
+            # Ctrl-C: double-tap within 1 second to quit
+            if k == 3:
+                now = time.monotonic()
+                if now - self.last_ctrl_c < 1.0:
+                    break
+                self.last_ctrl_c = now
+                self._set_status("Press Ctrl-C again to quit")
                 continue
 
             result = self._handle_input(k)
@@ -479,7 +588,12 @@ class CCSApp:
         self._draw_preview(hdr_h + list_h + sep_h, preview_h, w)
         self._draw_footer(h - ftr_h, w)
 
-        if self.mode == "help":
+        if self.mode == "quit":
+            self._draw_confirm_overlay(h, w,
+                "Quit",
+                "Quit ccs?",
+                "")
+        elif self.mode == "help":
             self._draw_help_overlay(h, w)
         elif self.mode == "delete":
             self._draw_confirm_overlay(h, w,
@@ -491,10 +605,6 @@ class CCSApp:
                 "Delete Empty Sessions",
                 f"Delete {self.empty_count} empty session{'s' if self.empty_count != 1 else ''}?",
                 "All sessions with no messages will be removed.")
-        elif self.mode == "launch":
-            self._draw_launch_overlay(h, w)
-        elif self.mode == "quick_profile":
-            self._draw_quick_profile_overlay(h, w)
         elif self.mode == "profiles":
             self._draw_profiles_overlay(h, w)
         elif self.mode == "profile_edit":
@@ -515,21 +625,23 @@ class CCSApp:
         tx = max(2, (w - len(title)) // 2)
         self._safe(0, tx, title, hdr)
 
-        # │  hints  │
+        # │  [active profile]  hints  │
         self._safe(1, 0, "│", bdr)
         self._safe(1, w - 1, "│", bdr)
+        prof_badge = f" {self.active_profile_name} "
+        self._safe(1, 2, prof_badge,
+                   curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
         hints_map = {
-            "normal":  "⏎ Resume  o Options  O Quick Profile  P Profiles  p Pin  t Tag  d Del  / Search  ? Help  q Quit",
+            "normal":  "⏎ Resume  P Profiles  H Theme  p Pin  t Tag  d Del  n New  / Search  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
+            "quit":    "y Quit  ·  n / Esc Cancel",
             "delete":  "y Confirm  ·  n / Esc Cancel",
             "delete_empty": "y Confirm  ·  n / Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create  ·  Esc Cancel",
-            "launch":  "↑↓ Navigate  Space Toggle  ⏎ Launch  Esc Cancel",
-            "profiles": "↑↓ Navigate  n New  ⏎ Edit  d Delete  Esc Back",
+            "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
             "profile_edit": "↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
-            "quick_profile": "1-9 Quick pick  ↑↓ Navigate  ⏎ Launch  d Delete  Esc Cancel",
             "help":    "Press any key to close",
         }
         hints = hints_map.get(self.mode, "")
@@ -554,7 +666,7 @@ class CCSApp:
         elif self.mode == "new":
             self._safe(y, 1, " Name:", curses.color_pair(CP_HEADER) | curses.A_BOLD)
             self._safe(y, 8, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
-        elif self.mode in ("delete", "delete_empty", "profiles", "profile_edit"):
+        elif self.mode in ("quit", "delete", "delete_empty", "profiles", "profile_edit"):
             pass  # handled by overlay popups
         elif self.query:
             self._safe(y, 1, f" Filter: {self.query}", dim)
@@ -741,21 +853,20 @@ class CCSApp:
             ("    PgUp / PgDn    Page up / down", 0),
             ("", 0),
             ("  Actions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    Enter          Resume selected session", 0),
-            ("    o              Resume with options / profiles", 0),
-            ("    O              Quick launch with a profile", 0),
+            ("    Enter          Resume with active profile", 0),
+            ("    P              Profile picker / manager", 0),
             ("    p              Toggle pin (pinned sort to top)", 0),
             ("    t              Tag a session", 0),
             ("    T              Remove tag from session", 0),
             ("    d              Delete a session (default: N)", 0),
             ("    D              Delete all empty sessions", 0),
-            ("    P              Manage launch profiles", 0),
             ("", 0),
             ("  Sessions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    n              Create a new named session", 0),
             ("    e              Start an ephemeral session", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
+            ("    H              Cycle theme", 0),
             ("    /              Search / filter sessions", 0),
             ("    r              Refresh session list", 0),
             ("    Esc            Clear filter, or quit", 0),
@@ -842,22 +953,6 @@ class CCSApp:
         self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
         self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
 
-    def _build_launch_rows(self) -> List[Tuple[str, int]]:
-        """Build the list of (row_type, sub_index) for the launch overlay."""
-        rows: List[Tuple[str, int]] = []
-        rows.append((ROW_PROFILE, 0))
-        rows.append((ROW_MODEL, 0))
-        rows.append((ROW_PERMMODE, 0))
-        for i in range(len(TOGGLE_FLAGS)):
-            rows.append((ROW_TOGGLE, i))
-        rows.append((ROW_SYSPROMPT, 0))
-        rows.append((ROW_TOOLS, 0))
-        rows.append((ROW_MCP, 0))
-        rows.append((ROW_CUSTOM, 0))
-        rows.append((ROW_LAUNCH, 0))
-        rows.append((ROW_SAVE, 0))
-        return rows
-
     def _launch_apply_profile(self, profile: dict):
         """Load a saved profile's settings into the launch state."""
         # Model
@@ -898,119 +993,27 @@ class CCSApp:
             "custom_args": self.launch_custom,
         }
 
-    def _draw_launch_overlay(self, h: int, w: int):
-        """Draw the launch options popup with profile support."""
-        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
-        normal = curses.color_pair(CP_NORMAL)
-        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
-        accent = curses.color_pair(CP_ACCENT) | curses.A_BOLD
-        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
-
-        s = self.launch_session
-        slabel = (s.tag or s.label[:36]) if s else ""
-        profiles = self.mgr.load_profiles()
-        profile_names = ["(custom)"] + [p.get("name", "?") for p in profiles]
-
-        def is_sel(i):
-            return i == self.launch_cur
-
-        def ind(i):
-            return " ▸ " if is_sel(i) else "   "
-
-        def cb(val):
-            return "[x]" if val else "[ ]"
-
-        def text_field(label, value, row_type, idx):
-            editing = self.launch_editing == row_type
-            cursor = "▏" if editing else ""
-            return f"{label} {value}{cursor}"
-
-        # Build display lines: list of (text, attr)
-        display: List[Tuple[str, int]] = []
-        rows = self.launch_rows
-
-        for ri, (rtype, ridx) in enumerate(rows):
-            a = sel_attr if is_sel(ri) else normal
-            prefix = ind(ri)
-
-            if rtype == ROW_PROFILE:
-                pname = profile_names[self.launch_profile_idx] if self.launch_profile_idx < len(profile_names) else "(custom)"
-                display.append((f"{prefix}Profile: {pname}", accent if is_sel(ri) else tag_attr))
-            elif rtype == ROW_MODEL:
-                display.append((f"{prefix}Model:       {MODELS[self.launch_model_idx][0]}", a))
-            elif rtype == ROW_PERMMODE:
-                display.append((f"{prefix}Permissions: {PERMISSION_MODES[self.launch_perm_idx][0]}", a))
-            elif rtype == ROW_TOGGLE:
-                flag_name = TOGGLE_FLAGS[ridx][0]
-                display.append((f"{prefix}{flag_name:<38s} {cb(self.launch_toggles[ridx])}", a))
-            elif rtype == ROW_SYSPROMPT:
-                display.append((f"{prefix}{text_field('System prompt:', self.launch_sysprompt, ROW_SYSPROMPT, ri)}", a))
-            elif rtype == ROW_TOOLS:
-                display.append((f"{prefix}{text_field('Tools:', self.launch_tools, ROW_TOOLS, ri)}", a))
-            elif rtype == ROW_MCP:
-                display.append((f"{prefix}{text_field('MCP config:', self.launch_mcp, ROW_MCP, ri)}", a))
-            elif rtype == ROW_CUSTOM:
-                display.append((f"{prefix}{text_field('Custom args:', self.launch_custom, ROW_CUSTOM, ri)}", a))
-            elif rtype == ROW_LAUNCH:
-                la = curses.color_pair(CP_STATUS) | curses.A_BOLD if is_sel(ri) else accent
-                display.append((f"{prefix}>>> Launch <<<", la))
-            elif rtype == ROW_SAVE:
-                if self.launch_editing == ROW_SAVE:
-                    display.append((f"{prefix}Save as: {self.launch_save_name}▏", a))
-                else:
-                    display.append((f"{prefix}Save as profile...  (x = delete profile)", dim if not is_sel(ri) else a))
-
-        box_w = min(60, w - 4)
-        # +4 for: title, session line, blank, hints
-        box_h = min(len(display) + 5, h - 2)
-        sx = max(0, (w - box_w) // 2)
-        sy = max(0, (h - box_h) // 2)
-
-        # Top border
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
-        title = " Launch Options "
-        ttx = sx + max(1, (box_w - len(title)) // 2)
-        self._safe(sy, ttx, title, hdr)
-
-        # Clear content area
-        for i in range(box_h - 2):
-            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
-
-        # Session info
-        self._safe(sy + 1, sx + 2, f"Session: {slabel}"[:box_w - 4], dim)
-
-        # Scrollable rows area
-        row_area_h = box_h - 5  # minus title, session, blank, hints, bottom border
-        row_start = sy + 3
-
-        # Scroll within the overlay if needed
-        scroll = 0
-        if self.launch_cur >= scroll + row_area_h:
-            scroll = self.launch_cur - row_area_h + 1
-        if self.launch_cur < scroll:
-            scroll = self.launch_cur
-
-        for i in range(row_area_h):
-            di = scroll + i
-            if di >= len(display):
-                break
-            text, attr = display[di]
-            self._safe(row_start + i, sx + 1, text[:box_w - 3], attr)
-
-        # Hints
-        hints_y = sy + box_h - 2
-        hints = " Space toggle · ⏎ launch · S save · x del profile · Esc back "
-        hx = sx + max(1, (box_w - len(hints)) // 2)
-        self._safe(hints_y, hx, hints[:box_w - 3], dim)
-
-        # Bottom border
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+    @staticmethod
+    def _build_args_from_profile(profile: dict) -> List[str]:
+        """Build CLI args list from a profile dict."""
+        extra: List[str] = []
+        model = profile.get("model", "")
+        if model:
+            extra.extend(["--model", model])
+        perm = profile.get("permission_mode", "")
+        if perm:
+            extra.extend(["--permission-mode", perm])
+        for flag in profile.get("flags", []):
+            extra.append(flag)
+        if profile.get("system_prompt", "").strip():
+            extra.extend(["--system-prompt", profile["system_prompt"].strip()])
+        if profile.get("tools", "").strip():
+            extra.extend(["--tools", profile["tools"].strip()])
+        if profile.get("mcp_config", "").strip():
+            extra.extend(["--mcp-config", profile["mcp_config"].strip()])
+        if profile.get("custom_args", "").strip():
+            extra.extend(profile["custom_args"].strip().split())
+        return extra
 
     # ── Profile manager overlays ──────────────────────────────────
 
@@ -1038,7 +1041,7 @@ class CCSApp:
         return " · ".join(parts) if parts else "default settings"
 
     def _draw_profiles_overlay(self, h: int, w: int):
-        """Profile list overlay."""
+        """Unified profile picker / manager overlay."""
         bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
         hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
         dim = curses.color_pair(CP_DIM) | curses.A_DIM
@@ -1046,11 +1049,12 @@ class CCSApp:
         sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
         tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
         warn = curses.color_pair(CP_WARN) | curses.A_BOLD
+        badge = curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD
 
         profiles = self.mgr.load_profiles()
         box_w = min(62, w - 4)
         list_h = max(3, min(len(profiles) + 2, h - 10))
-        box_h = list_h + 5  # title + blank + list + blank + hints + border
+        box_h = list_h + 5
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
 
@@ -1073,8 +1077,14 @@ class CCSApp:
             self._safe(sy + 2, sx + 3, "No profiles yet.", dim)
             self._safe(sy + 3, sx + 3, "Press n to create your first profile.", dim)
         else:
+            scroll = 0
+            if self.prof_cur >= scroll + list_h:
+                scroll = self.prof_cur - list_h + 1
+            if self.prof_cur < scroll:
+                scroll = self.prof_cur
+
             for i in range(list_h):
-                idx = i
+                idx = scroll + i
                 if idx >= len(profiles):
                     break
                 p = profiles[idx]
@@ -1082,16 +1092,23 @@ class CCSApp:
                 y = sy + 2 + i
                 name = p.get("name", "?")
                 summary = self._profile_summary(p)
+                is_active = (name == self.active_profile_name)
+                marker = " * " if is_active else "   "
 
                 if is_sel:
-                    line = f" ▸ {name:<18s} {summary}"
+                    line = f" ▸{marker}{name:<16s} {summary}"
                     line = line.ljust(box_w - 3)[:box_w - 3]
                     self._safe(y, sx + 1, line, sel_attr)
+                    if is_active:
+                        self._safe(y, sx + 3, " * ", badge)
                 else:
-                    self._safe(y, sx + 1, "   ", normal)
-                    self._safe(y, sx + 4, name, tag_attr)
-                    self._safe(y, sx + 4 + 18 + 1, summary[:box_w - 26],
-                               curses.color_pair(CP_DIM))
+                    self._safe(y, sx + 1, "  ", normal)
+                    if is_active:
+                        self._safe(y, sx + 3, " * ", badge)
+                    else:
+                        self._safe(y, sx + 3, "   ", normal)
+                    self._safe(y, sx + 6, name, tag_attr)
+                    self._safe(y, sx + 6 + 16 + 1, summary[:box_w - 26], dim)
 
         # Delete confirmation
         if self.prof_delete_confirm and profiles:
@@ -1100,7 +1117,7 @@ class CCSApp:
                        f"Delete '{pname}'? y/N", warn)
 
         # Hints
-        hints = " n New  ⏎ Edit  d Delete  Esc Back "
+        hints = " ⏎ Set active  n New  e Edit  d Delete  Esc Back "
         self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
                    hints[:box_w - 3], dim)
 
@@ -1217,86 +1234,6 @@ class CCSApp:
         self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
                    hints[:box_w - 3], dim)
 
-    def _draw_quick_profile_overlay(self, h: int, w: int):
-        """Draw a compact profile picker popup for quick launch."""
-        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
-        normal = curses.color_pair(CP_NORMAL)
-        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
-        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
-
-        profiles = self.mgr.load_profiles()
-        if not profiles:
-            self.mode = "normal"
-            return
-
-        s = self.launch_session
-        slabel = (s.tag or s.label[:30]) if s else ""
-
-        box_w = min(56, w - 4)
-        list_h = min(len(profiles), h - 8)
-        box_h = list_h + 5  # title + session + blank + list + hints + border
-        sx = max(0, (w - box_w) // 2)
-        sy = max(0, (h - box_h) // 2)
-
-        # Box
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
-        title = " Quick Launch with Profile "
-        self._safe(sy, sx + max(1, (box_w - len(title)) // 2), title, hdr)
-
-        for i in range(box_h - 2):
-            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
-
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
-
-        # Session info
-        self._safe(sy + 1, sx + 2, f"Session: {slabel}"[:box_w - 4], dim)
-
-        # Profile list
-        scroll = 0
-        if self.qprof_cur >= scroll + list_h:
-            scroll = self.qprof_cur - list_h + 1
-        if self.qprof_cur < scroll:
-            scroll = self.qprof_cur
-
-        for i in range(list_h):
-            idx = scroll + i
-            if idx >= len(profiles):
-                break
-            p = profiles[idx]
-            is_sel = (idx == self.qprof_cur)
-            y = sy + 3 + i
-            name = p.get("name", "?")
-            summary = self._profile_summary(p)
-            num = str(idx + 1) if idx < 9 else " "
-
-            if is_sel:
-                line = f" ▸ {num} {name:<15s} {summary}"
-                line = line.ljust(box_w - 3)[:box_w - 3]
-                self._safe(y, sx + 1, line, sel_attr)
-            else:
-                self._safe(y, sx + 1, f"   {num} ", dim)
-                self._safe(y, sx + 6, name, tag_attr)
-                self._safe(y, sx + 6 + 15 + 1, summary[:box_w - 24],
-                           curses.color_pair(CP_DIM))
-
-        # Delete confirmation
-        if self.qprof_delete_confirm and profiles:
-            pname = profiles[self.qprof_cur].get("name", "?")
-            warn = curses.color_pair(CP_WARN) | curses.A_BOLD
-            self._safe(sy + box_h - 3, sx + 3,
-                       f"Delete '{pname}'? y/N", warn)
-
-        # Hints
-        hints = " 1-9 quick pick · ⏎ Launch · d Delete · Esc Cancel "
-        self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
-                   hints[:box_w - 3], dim)
-
     def _draw_footer(self, y: int, w: int):
         if self.status:
             self._safe(y, 1, f" {self.status} ",
@@ -1315,7 +1252,7 @@ class CCSApp:
                        curses.color_pair(CP_DIM) | curses.A_DIM)
 
         # Show mode indicator
-        if self.mode not in ("normal", "help", "delete", "delete_empty", "launch", "profiles", "profile_edit", "quick_profile"):
+        if self.mode not in ("normal", "help", "delete", "delete_empty", "quit", "profiles", "profile_edit"):
             mode_label = f" [{self.mode.upper()}] "
             mx = (w - len(mode_label)) // 2
             self._safe(y, mx, mode_label,
@@ -1352,24 +1289,25 @@ class CCSApp:
             "delete": self._input_delete,
             "delete_empty": self._input_delete_empty,
             "new": self._input_new,
-            "launch": self._input_launch,
             "profiles": self._input_profiles,
             "profile_edit": self._input_profile_edit,
-            "quick_profile": self._input_quick_profile,
             "help": self._input_help,
+            "quit": self._input_quit,
         }
         handler = dispatch.get(self.mode, self._input_normal)
         return handler(k)
 
     def _input_normal(self, k: int) -> Optional[str]:
         if k == ord("q"):
-            return "quit"
+            self.mode = "quit"
+            return None
         elif k == 27:  # Esc
             if self.query:
                 self.query = ""
                 self._apply_filter()
             else:
-                return "quit"
+                self.mode = "quit"
+                return None
 
         # Navigation
         elif k in (curses.KEY_UP, ord("k")):
@@ -1392,34 +1330,14 @@ class CCSApp:
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.filtered:
                 s = self.filtered[self.cur]
-                self.exit_action = ("resume", s.id, s.cwd, [])
-                return "action"
-        elif k == ord("o"):
-            if self.filtered:
-                s = self.filtered[self.cur]
-                self.launch_session = s
-                self.launch_rows = self._build_launch_rows()
-                self.launch_cur = len(self.launch_rows) - 2  # default to Launch row
-                self.launch_model_idx = 0
-                self.launch_perm_idx = 0
-                self.launch_toggles = [False] * len(TOGGLE_FLAGS)
-                self.launch_sysprompt = ""
-                self.launch_tools = ""
-                self.launch_mcp = ""
-                self.launch_custom = ""
-                self.launch_editing = None
-                self.launch_profile_idx = 0
-                self.launch_save_name = ""
-                self.mode = "launch"
-        elif k == ord("O"):
-            if self.filtered:
                 profiles = self.mgr.load_profiles()
-                if not profiles:
-                    self._set_status("No profiles yet — press P to create one")
-                else:
-                    self.launch_session = self.filtered[self.cur]
-                    self.qprof_cur = 0
-                    self.mode = "quick_profile"
+                active = next(
+                    (p for p in profiles if p.get("name") == self.active_profile_name),
+                    None,
+                )
+                extra = self._build_args_from_profile(active) if active else []
+                self.exit_action = ("resume", s.id, s.cwd, extra)
+                return "action"
         elif k == ord("p"):
             if self.filtered:
                 s = self.filtered[self.cur]
@@ -1464,6 +1382,13 @@ class CCSApp:
             self.prof_cur = 0
             self.prof_delete_confirm = False
             self.mode = "profiles"
+        elif k == ord("H"):
+            # Cycle theme
+            idx = THEME_NAMES.index(self.active_theme) if self.active_theme in THEME_NAMES else 0
+            idx = (idx + 1) % len(THEME_NAMES)
+            self._apply_theme(THEME_NAMES[idx])
+            self.mgr.save_theme(self.active_theme)
+            self._set_status(f"Theme: {self.active_theme}")
         elif k == ord("?"):
             self.mode = "help"
         elif k in (ord("r"), curses.KEY_F5):
@@ -1541,96 +1466,6 @@ class CCSApp:
             self.ibuf += chr(k)
         return None
 
-    def _input_launch(self, k: int) -> Optional[str]:
-        rows = self.launch_rows
-        cur_type = rows[self.launch_cur][0] if self.launch_cur < len(rows) else None
-
-        # ── Text field editing mode ───────────────────────────────
-        if self.launch_editing is not None:
-            if k == 27:
-                self.launch_editing = None
-            elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-                if self.launch_editing == ROW_SAVE and self.launch_save_name.strip():
-                    prof = self._launch_to_profile_dict(self.launch_save_name.strip())
-                    self.mgr.save_profile(prof)
-                    self._set_status(f"Saved profile: {self.launch_save_name.strip()}")
-                    self.launch_save_name = ""
-                self.launch_editing = None
-            elif k in (curses.KEY_BACKSPACE, 127, 8):
-                self._launch_edit_backspace()
-            elif 32 <= k <= 126:
-                self._launch_edit_char(chr(k))
-            return None
-
-        # ── Normal overlay navigation ─────────────────────────────
-        if k == 27:  # Esc
-            self.mode = "normal"
-        elif k in (curses.KEY_UP, ord("k")):
-            self.launch_cur = max(0, self.launch_cur - 1)
-        elif k in (curses.KEY_DOWN, ord("j")):
-            self.launch_cur = min(len(rows) - 1, self.launch_cur + 1)
-
-        elif k == ord(" "):
-            self._launch_toggle_current()
-
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if cur_type in (ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
-                self.launch_editing = cur_type
-            elif cur_type == ROW_SAVE:
-                self.launch_editing = ROW_SAVE
-                self.launch_save_name = ""
-            elif cur_type == ROW_PROFILE:
-                self._launch_toggle_current()
-            elif cur_type in (ROW_MODEL, ROW_PERMMODE, ROW_TOGGLE):
-                self._launch_toggle_current()
-            else:
-                return self._do_launch()
-
-        elif k == ord("x"):
-            # Delete the currently selected profile
-            profiles = self.mgr.load_profiles()
-            if self.launch_profile_idx > 0 and self.launch_profile_idx <= len(profiles):
-                pname = profiles[self.launch_profile_idx - 1].get("name", "")
-                self.mgr.delete_profile(pname)
-                self.launch_profile_idx = 0
-                self._set_status(f"Deleted profile: {pname}")
-
-        return None
-
-    def _launch_toggle_current(self):
-        """Toggle/cycle the currently selected launch row."""
-        rows = self.launch_rows
-        rtype, ridx = rows[self.launch_cur]
-        profiles = self.mgr.load_profiles()
-        profile_count = 1 + len(profiles)  # (custom) + saved
-
-        if rtype == ROW_PROFILE:
-            self.launch_profile_idx = (self.launch_profile_idx + 1) % profile_count
-            if self.launch_profile_idx > 0:
-                self._launch_apply_profile(profiles[self.launch_profile_idx - 1])
-        elif rtype == ROW_MODEL:
-            self.launch_model_idx = (self.launch_model_idx + 1) % len(MODELS)
-            self.launch_profile_idx = 0
-        elif rtype == ROW_PERMMODE:
-            self.launch_perm_idx = (self.launch_perm_idx + 1) % len(PERMISSION_MODES)
-            self.launch_profile_idx = 0
-        elif rtype == ROW_TOGGLE:
-            self.launch_toggles[ridx] = not self.launch_toggles[ridx]
-            self.launch_profile_idx = 0
-        elif rtype == ROW_SYSPROMPT:
-            self.launch_editing = ROW_SYSPROMPT
-        elif rtype == ROW_TOOLS:
-            self.launch_editing = ROW_TOOLS
-        elif rtype == ROW_MCP:
-            self.launch_editing = ROW_MCP
-        elif rtype == ROW_CUSTOM:
-            self.launch_editing = ROW_CUSTOM
-        elif rtype == ROW_SAVE:
-            self.launch_editing = ROW_SAVE
-            self.launch_save_name = ""
-        elif rtype == ROW_LAUNCH:
-            pass  # handled by Enter
-
     def _launch_edit_backspace(self):
         if self.launch_editing == ROW_SYSPROMPT:
             self.launch_sysprompt = self.launch_sysprompt[:-1]
@@ -1640,8 +1475,6 @@ class CCSApp:
             self.launch_mcp = self.launch_mcp[:-1]
         elif self.launch_editing == ROW_CUSTOM:
             self.launch_custom = self.launch_custom[:-1]
-        elif self.launch_editing == ROW_SAVE:
-            self.launch_save_name = self.launch_save_name[:-1]
 
     def _launch_edit_char(self, ch: str):
         if self.launch_editing == ROW_SYSPROMPT:
@@ -1652,37 +1485,6 @@ class CCSApp:
             self.launch_mcp += ch
         elif self.launch_editing == ROW_CUSTOM:
             self.launch_custom += ch
-        elif self.launch_editing == ROW_SAVE:
-            self.launch_save_name += ch
-
-    def _do_launch(self) -> str:
-        """Build CLI args from launch options and set exit action."""
-        s = self.launch_session
-        extra: List[str] = []
-
-        model_id = MODELS[self.launch_model_idx][1]
-        if model_id:
-            extra.extend(["--model", model_id])
-
-        perm_id = PERMISSION_MODES[self.launch_perm_idx][1]
-        if perm_id:
-            extra.extend(["--permission-mode", perm_id])
-
-        for i, (_, cli_flag) in enumerate(TOGGLE_FLAGS):
-            if self.launch_toggles[i]:
-                extra.append(cli_flag)
-
-        if self.launch_sysprompt.strip():
-            extra.extend(["--system-prompt", self.launch_sysprompt.strip()])
-        if self.launch_tools.strip():
-            extra.extend(["--tools", self.launch_tools.strip()])
-        if self.launch_mcp.strip():
-            extra.extend(["--mcp-config", self.launch_mcp.strip()])
-        if self.launch_custom.strip():
-            extra.extend(self.launch_custom.strip().split())
-
-        self.exit_action = ("resume", s.id, s.cwd, extra)
-        return "action"
 
     # ── Profile manager input ────────────────────────────────────
 
@@ -1697,6 +1499,10 @@ class CCSApp:
                 self._set_status(f"Deleted profile: {pname}")
                 if self.prof_cur >= len(profiles) - 1:
                     self.prof_cur = max(0, self.prof_cur - 1)
+                # If deleted profile was active, revert to default
+                if self.active_profile_name == pname:
+                    self.active_profile_name = "default"
+                    self.mgr.save_active_profile_name("default")
             self.prof_delete_confirm = False
             return None
 
@@ -1709,12 +1515,21 @@ class CCSApp:
             if profiles:
                 self.prof_cur = min(len(profiles) - 1, self.prof_cur + 1)
 
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            # Set as active profile
+            if profiles:
+                pname = profiles[self.prof_cur].get("name", "")
+                self.active_profile_name = pname
+                self.mgr.save_active_profile_name(pname)
+                self._set_status(f"Active profile: {pname}")
+                self.mode = "normal"
+
         elif k == ord("n"):
             # New profile
             self._prof_open_editor(None)
 
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            # Edit selected
+        elif k == ord("e"):
+            # Edit selected profile
             if profiles:
                 self._prof_open_editor(profiles[self.prof_cur])
 
@@ -1830,54 +1645,10 @@ class CCSApp:
                 self.prof_cur = i
                 break
 
-    def _input_quick_profile(self, k: int) -> Optional[str]:
-        profiles = self.mgr.load_profiles()
-        if not profiles:
-            self.mode = "normal"
-            return None
-
-        # Delete confirmation sub-mode
-        if self.qprof_delete_confirm:
-            if k == ord("y") and profiles:
-                p = profiles[self.qprof_cur]
-                pname = p.get("name", "")
-                if pname.lower() == "default":
-                    self._set_status("Cannot delete the default profile")
-                else:
-                    self.mgr.delete_profile(pname)
-                    self._set_status(f"Deleted profile: {pname}")
-                    profiles = self.mgr.load_profiles()
-                    if self.qprof_cur >= len(profiles):
-                        self.qprof_cur = max(0, len(profiles) - 1)
-                    if not profiles:
-                        self.mode = "normal"
-            self.qprof_delete_confirm = False
-            return None
-
-        if k == 27:  # Esc
-            self.mode = "normal"
-        elif k in (curses.KEY_UP, ord("k")):
-            self.qprof_cur = max(0, self.qprof_cur - 1)
-        elif k in (curses.KEY_DOWN, ord("j")):
-            self.qprof_cur = min(len(profiles) - 1, self.qprof_cur + 1)
-        elif k == ord("d"):
-            if profiles:
-                p = profiles[self.qprof_cur]
-                if p.get("name", "").lower() == "default":
-                    self._set_status("Cannot delete the default profile")
-                else:
-                    self.qprof_delete_confirm = True
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            # Launch with the selected profile
-            profile = profiles[self.qprof_cur]
-            self._launch_apply_profile(profile)
-            return self._do_launch()
-        elif ord("1") <= k <= ord("9"):
-            # Number keys for instant selection
-            idx = k - ord("1")
-            if idx < len(profiles):
-                self._launch_apply_profile(profiles[idx])
-                return self._do_launch()
+    def _input_quit(self, k: int) -> Optional[str]:
+        if k == ord("y"):
+            return "quit"
+        self.mode = "normal"
         return None
 
     def _input_help(self, k: int) -> Optional[str]:
@@ -1895,39 +1666,124 @@ def run_tui(stdscr) -> Optional[Tuple]:
     return app.exit_action
 
 
+# ── CLI helpers ──────────────────────────────────────────────────────
+
+
+def _find_session(mgr: SessionManager, query: str) -> Session:
+    """Resolve a session by exact tag or ID prefix. Exits on ambiguity."""
+    sessions = mgr.scan()
+    # Exact tag match
+    by_tag = [s for s in sessions if s.tag and s.tag == query]
+    if len(by_tag) == 1:
+        return by_tag[0]
+    if len(by_tag) > 1:
+        print(f"\033[31mAmbiguous tag '{query}' — matches {len(by_tag)} sessions\033[0m")
+        sys.exit(1)
+    # ID prefix match
+    by_id = [s for s in sessions if s.id.startswith(query)]
+    if len(by_id) == 1:
+        return by_id[0]
+    if len(by_id) > 1:
+        print(f"\033[31mAmbiguous ID prefix '{query}' — matches {len(by_id)} sessions\033[0m")
+        sys.exit(1)
+    print(f"\033[31mNo session found matching '{query}'\033[0m")
+    sys.exit(1)
+
+
+def _get_profile_extra(mgr: SessionManager, profile_name: Optional[str] = None) -> List[str]:
+    """Get CLI args from a profile (active by default)."""
+    profiles = mgr.load_profiles()
+    name = profile_name or mgr.load_active_profile_name()
+    prof = next((p for p in profiles if p.get("name") == name), None)
+    if prof:
+        return CCSApp._build_args_from_profile(prof)
+    return []
+
+
 # ── CLI commands ─────────────────────────────────────────────────────
 
 
 def cmd_help():
-    print("""
-\033[1;36m◆ ccs — Claude Code Session Manager\033[0m
+    print("""\033[1;36m◆ ccs — Claude Code Session Manager\033[0m
 
 \033[1mUsage:\033[0m
-  ccs              Interactive TUI to browse & resume sessions
-  ccs new <name>   Start a named persistent session
-  ccs tmp          Start an ephemeral session (auto-deleted)
-  ccs help         Show this help
+  ccs                                    Interactive TUI
+  ccs list                               List all sessions
+  ccs resume <id|tag> [-p <profile>]     Resume session
+  ccs resume <id|tag> --claude <opts>    Resume with raw claude options
+  ccs new <name>                         New named session
+  ccs tmp                                Ephemeral session
+  ccs pin <id|tag>                       Pin a session
+  ccs unpin <id|tag>                     Unpin a session
+  ccs tag <id|tag> <tag>                 Set tag on session
+  ccs untag <id|tag>                     Remove tag from session
+  ccs delete <id|tag>                    Delete a session
+  ccs delete --empty                     Delete all empty sessions
+  ccs search <query>                     Search sessions by text
+  ccs profile list                       List profiles
+  ccs profile set <name>                 Set active profile
+  ccs profile new <name> [flags]         Create profile from CLI flags
+  ccs profile delete <name>              Delete a profile
+  ccs theme list                         List themes
+  ccs theme set <name>                   Set theme
+  ccs help                               Show this help
+
+\033[1mProfile creation flags:\033[0m
+  --model <model>                        Model name
+  --permission-mode <mode>               Permission mode
+  --verbose                              Verbose flag
+  --dangerously-skip-permissions         Skip permissions flag
+  --print                                Print flag
+  --continue                             Continue flag
+  --no-session-persistence               No session persistence
+  --system-prompt <prompt>               System prompt
+  --tools <tools>                        Tools
+  --mcp-config <path>                    MCP config path
 
 \033[1mTUI Keybindings:\033[0m
   \033[36m↑/↓\033[0m or \033[36mj/k\033[0m       Navigate sessions
-  \033[36mEnter\033[0m             Resume selected session
-  \033[36mo\033[0m                 Resume with options / profiles
-  \033[36mO\033[0m                 Quick launch with a profile
-  \033[36mp\033[0m                 Toggle pin (pinned sort to top)
-  \033[36mt\033[0m                 Tag a session
-  \033[36mT\033[0m                 Remove tag from session
-  \033[36md\033[0m                 Delete a session
-  \033[36mD\033[0m                 Delete all empty sessions
-  \033[36mP\033[0m                 Manage launch profiles
-  \033[36mn\033[0m                 Create a new named session
-  \033[36me\033[0m                 Start an ephemeral session
-  \033[36m/\033[0m                 Search / filter sessions
-  \033[36mr\033[0m                 Refresh session list
-  \033[36mg\033[0m / \033[36mG\033[0m             Jump to first / last
-  \033[36mPgUp\033[0m / \033[36mPgDn\033[0m       Page up / down
-  \033[36mEsc\033[0m               Clear filter, or quit
-  \033[36mq\033[0m                 Quit
-""")
+  \033[36mEnter\033[0m             Resume with active profile
+  \033[36mP\033[0m                 Profile picker / manager
+  \033[36mH\033[0m                 Cycle theme
+  \033[36mp\033[0m                 Toggle pin
+  \033[36mt\033[0m / \033[36mT\033[0m             Tag / remove tag
+  \033[36md\033[0m / \033[36mD\033[0m             Delete session / delete empties
+  \033[36mn\033[0m                 New named session
+  \033[36me\033[0m                 Ephemeral session
+  \033[36m/\033[0m                 Search / filter
+  \033[36mr\033[0m                 Refresh
+  \033[36mq\033[0m                 Quit""")
+
+
+def cmd_list(mgr: SessionManager):
+    sessions = mgr.scan()
+    if not sessions:
+        print("No sessions found.")
+        return
+    for s in sessions:
+        pin = "★ " if s.pinned else "  "
+        tag = f"[{s.tag}] " if s.tag else ""
+        label = s.label[:60]
+        print(f"  {pin}{tag}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
+
+
+def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
+               claude_args: Optional[List[str]]):
+    s = _find_session(mgr, query)
+    if claude_args is not None:
+        extra = claude_args
+    else:
+        extra = _get_profile_extra(mgr, profile_name)
+    if s.cwd:
+        if os.path.isdir(s.cwd):
+            os.chdir(s.cwd)
+        else:
+            print(f"\033[1;31m◆ Error:\033[0m Directory no longer exists: \033[33m{s.cwd}\033[0m")
+            sys.exit(1)
+    opts = f" {' '.join(extra)}" if extra else ""
+    print(f"\033[1;36m◆\033[0m Resuming session \033[2m({s.id[:8]}…)\033[0m{opts}")
+    cmd = ["claude", "--resume", s.id] + extra
+    os.execvp("claude", cmd)
 
 
 def cmd_new(mgr: SessionManager, name: str, extra: List[str]):
@@ -1953,6 +1809,191 @@ def cmd_tmp(mgr: SessionManager, extra: List[str]):
         pass
     finally:
         mgr.purge_ephemeral()
+
+
+def cmd_pin(mgr: SessionManager, query: str):
+    s = _find_session(mgr, query)
+    pins = mgr._load(PINS_FILE, [])
+    if s.id not in pins:
+        pins.append(s.id)
+        mgr._save(PINS_FILE, pins)
+        print(f"★ Pinned: {s.tag or s.id[:12]}")
+    else:
+        print(f"Already pinned: {s.tag or s.id[:12]}")
+
+
+def cmd_unpin(mgr: SessionManager, query: str):
+    s = _find_session(mgr, query)
+    pins = mgr._load(PINS_FILE, [])
+    if s.id in pins:
+        pins.remove(s.id)
+        mgr._save(PINS_FILE, pins)
+        print(f"Unpinned: {s.tag or s.id[:12]}")
+    else:
+        print(f"Not pinned: {s.tag or s.id[:12]}")
+
+
+def cmd_tag(mgr: SessionManager, query: str, tag: str):
+    s = _find_session(mgr, query)
+    mgr.set_tag(s.id, tag)
+    print(f"Tagged [{tag}]: {s.id[:12]}")
+
+
+def cmd_untag(mgr: SessionManager, query: str):
+    s = _find_session(mgr, query)
+    if s.tag:
+        mgr.remove_tag(s.id)
+        print(f"Removed tag from: {s.id[:12]}")
+    else:
+        print(f"No tag on: {s.id[:12]}")
+
+
+def cmd_delete_session(mgr: SessionManager, query: str):
+    s = _find_session(mgr, query)
+    label = s.tag or s.label[:40] or s.id[:12]
+    print(f"Delete '{label}'? [y/N] ", end="", flush=True)
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer == "y":
+        mgr.delete(s)
+        print(f"Deleted: {label}")
+    else:
+        print("Cancelled.")
+
+
+def cmd_delete_empty(mgr: SessionManager):
+    sessions = mgr.scan()
+    empty = [s for s in sessions if not s.first_msg and not s.summary]
+    if not empty:
+        print("No empty sessions to delete.")
+        return
+    print(f"Delete {len(empty)} empty session{'s' if len(empty) != 1 else ''}? [y/N] ",
+          end="", flush=True)
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer == "y":
+        for s in empty:
+            mgr.delete(s)
+        print(f"Deleted {len(empty)} empty session{'s' if len(empty) != 1 else ''}.")
+    else:
+        print("Cancelled.")
+
+
+def cmd_search(mgr: SessionManager, query: str):
+    sessions = mgr.scan()
+    q = query.lower()
+    matches = [
+        s for s in sessions
+        if q in s.label.lower()
+        or q in s.project_display.lower()
+        or q in s.tag.lower()
+        or q in s.id.lower()
+        or q in s.cwd.lower()
+    ]
+    if not matches:
+        print(f"No sessions matching '{query}'.")
+        return
+    print(f"{len(matches)} match{'es' if len(matches) != 1 else ''}:")
+    for s in matches:
+        pin = "★ " if s.pinned else "  "
+        tag = f"[{s.tag}] " if s.tag else ""
+        label = s.label[:60]
+        print(f"  {pin}{tag}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
+
+
+def cmd_profile_list(mgr: SessionManager):
+    profiles = mgr.load_profiles()
+    active = mgr.load_active_profile_name()
+    if not profiles:
+        print("No profiles.")
+        return
+    for p in profiles:
+        name = p.get("name", "?")
+        marker = " *" if name == active else "  "
+        summary = CCSApp._profile_summary(p)
+        print(f"  {marker} {name:<16s}  {summary}")
+
+
+def cmd_profile_set(mgr: SessionManager, name: str):
+    profiles = mgr.load_profiles()
+    if not any(p.get("name") == name for p in profiles):
+        print(f"\033[31mProfile '{name}' not found.\033[0m")
+        sys.exit(1)
+    mgr.save_active_profile_name(name)
+    print(f"Active profile: {name}")
+
+
+def cmd_profile_new(mgr: SessionManager, name: str, cli_args: List[str]):
+    """Create a profile from CLI flags."""
+    profile = {
+        "name": name, "model": "", "permission_mode": "",
+        "flags": [], "system_prompt": "", "tools": "",
+        "mcp_config": "", "custom_args": "",
+    }
+    i = 0
+    flags_list = []
+    while i < len(cli_args):
+        a = cli_args[i]
+        if a == "--model" and i + 1 < len(cli_args):
+            profile["model"] = cli_args[i + 1]
+            i += 2
+        elif a == "--permission-mode" and i + 1 < len(cli_args):
+            profile["permission_mode"] = cli_args[i + 1]
+            i += 2
+        elif a == "--system-prompt" and i + 1 < len(cli_args):
+            profile["system_prompt"] = cli_args[i + 1]
+            i += 2
+        elif a == "--tools" and i + 1 < len(cli_args):
+            profile["tools"] = cli_args[i + 1]
+            i += 2
+        elif a == "--mcp-config" and i + 1 < len(cli_args):
+            profile["mcp_config"] = cli_args[i + 1]
+            i += 2
+        elif a in ("--verbose", "--dangerously-skip-permissions",
+                    "--print", "--continue", "--no-session-persistence"):
+            flags_list.append(a)
+            i += 1
+        else:
+            # Unknown flag → custom args
+            profile["custom_args"] = " ".join(cli_args[i:])
+            break
+    profile["flags"] = flags_list
+    mgr.save_profile(profile)
+    print(f"Created profile: {name}")
+
+
+def cmd_profile_delete(mgr: SessionManager, name: str):
+    if name.lower() == "default":
+        print("\033[31mCannot delete the default profile.\033[0m")
+        sys.exit(1)
+    profiles = mgr.load_profiles()
+    if not any(p.get("name") == name for p in profiles):
+        print(f"\033[31mProfile '{name}' not found.\033[0m")
+        sys.exit(1)
+    mgr.delete_profile(name)
+    # Revert active if deleted
+    if mgr.load_active_profile_name() == name:
+        mgr.save_active_profile_name("default")
+    print(f"Deleted profile: {name}")
+
+
+def cmd_theme_list(mgr: SessionManager):
+    current = mgr.load_theme()
+    for t in THEME_NAMES:
+        marker = " *" if t == current else "  "
+        print(f"  {marker} {t}")
+
+
+def cmd_theme_set(mgr: SessionManager, name: str):
+    if name not in THEME_NAMES:
+        print(f"\033[31mUnknown theme '{name}'. Available: {', '.join(THEME_NAMES)}\033[0m")
+        sys.exit(1)
+    mgr.save_theme(name)
+    print(f"Theme set to: {name}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -1991,20 +2032,127 @@ def main():
         elif action[0] == "tmp":
             cmd_tmp(mgr, [])
 
-    elif args[0] == "help" or args[0] in ("-h", "--help"):
+        return
+
+    verb = args[0]
+
+    if verb in ("help", "-h", "--help"):
         cmd_help()
 
-    elif args[0] == "new":
+    elif verb == "list":
+        cmd_list(mgr)
+
+    elif verb == "resume":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs resume <id|tag> [-p <profile>] [--claude <opts>]\033[0m")
+            sys.exit(1)
+        query = args[1]
+        profile_name = None
+        claude_args = None
+        i = 2
+        while i < len(args):
+            if args[i] == "-p" and i + 1 < len(args):
+                profile_name = args[i + 1]
+                i += 2
+            elif args[i] == "--claude":
+                claude_args = args[i + 1:]
+                break
+            else:
+                i += 1
+        cmd_resume(mgr, query, profile_name, claude_args)
+
+    elif verb == "new":
         if len(args) < 2:
             print("\033[31mUsage: ccs new <name>\033[0m")
             sys.exit(1)
         cmd_new(mgr, args[1], args[2:])
 
-    elif args[0] == "tmp":
+    elif verb == "tmp":
         cmd_tmp(mgr, args[1:])
 
+    elif verb == "pin":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs pin <id|tag>\033[0m")
+            sys.exit(1)
+        cmd_pin(mgr, args[1])
+
+    elif verb == "unpin":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs unpin <id|tag>\033[0m")
+            sys.exit(1)
+        cmd_unpin(mgr, args[1])
+
+    elif verb == "tag":
+        if len(args) < 3:
+            print("\033[31mUsage: ccs tag <id|tag> <newtag>\033[0m")
+            sys.exit(1)
+        cmd_tag(mgr, args[1], args[2])
+
+    elif verb == "untag":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs untag <id|tag>\033[0m")
+            sys.exit(1)
+        cmd_untag(mgr, args[1])
+
+    elif verb == "delete":
+        if len(args) >= 2 and args[1] == "--empty":
+            cmd_delete_empty(mgr)
+        elif len(args) >= 2:
+            cmd_delete_session(mgr, args[1])
+        else:
+            print("\033[31mUsage: ccs delete <id|tag> | ccs delete --empty\033[0m")
+            sys.exit(1)
+
+    elif verb == "search":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs search <query>\033[0m")
+            sys.exit(1)
+        cmd_search(mgr, " ".join(args[1:]))
+
+    elif verb == "profile":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs profile list|set|new|delete\033[0m")
+            sys.exit(1)
+        sub = args[1]
+        if sub == "list":
+            cmd_profile_list(mgr)
+        elif sub == "set":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs profile set <name>\033[0m")
+                sys.exit(1)
+            cmd_profile_set(mgr, args[2])
+        elif sub == "new":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs profile new <name> [--model ...] [flags]\033[0m")
+                sys.exit(1)
+            cmd_profile_new(mgr, args[2], args[3:])
+        elif sub == "delete":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs profile delete <name>\033[0m")
+                sys.exit(1)
+            cmd_profile_delete(mgr, args[2])
+        else:
+            print(f"\033[31mUnknown profile command: {sub}\033[0m")
+            sys.exit(1)
+
+    elif verb == "theme":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs theme list|set\033[0m")
+            sys.exit(1)
+        sub = args[1]
+        if sub == "list":
+            cmd_theme_list(mgr)
+        elif sub == "set":
+            if len(args) < 3:
+                print(f"\033[31mUsage: ccs theme set <{'|'.join(THEME_NAMES)}>\033[0m")
+                sys.exit(1)
+            cmd_theme_set(mgr, args[2])
+        else:
+            print(f"\033[31mUnknown theme command: {sub}\033[0m")
+            sys.exit(1)
+
     else:
-        print(f"\033[31mUnknown command: {args[0]}\033[0m")
+        print(f"\033[31mUnknown command: {verb}\033[0m")
         print("Run 'ccs help' for usage information.")
         sys.exit(1)
 
