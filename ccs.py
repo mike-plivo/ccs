@@ -60,6 +60,7 @@ THEME_FILE = CCS_DIR / "ccs_theme.txt"
 CACHE_FILE = CCS_DIR / "session_cache.json"
 TMUX_FILE = CCS_DIR / "tmux_sessions.json"
 HAS_TMUX = shutil.which("tmux") is not None
+HAS_GIT = shutil.which("git") is not None
 TMUX_PREFIX = "ccs-"
 TMUX_IDLE_SECS = 30   # seconds of no output before marking session idle
 TMUX_POLL_INTERVAL = 5  # seconds between activity polls
@@ -579,6 +580,7 @@ class CCSApp:
         self.tmux_idle: set = set()  # session IDs that are idle (no recent output)
         self.tmux_idle_prev: set = set()  # previous idle set, for detecting transitions
         self.tmux_last_poll: float = 0.0  # monotonic time of last tmux activity poll
+        self._git_cache: dict = {}  # cwd string → (repo_name, [(hash, subject)]) or None
 
         self.status = ""
         self.status_ttl = 0
@@ -704,6 +706,7 @@ class CCSApp:
                 -s.mtime,
             ))
         self._apply_filter()
+        self._git_cache.clear()
         self.tmux_last_poll = 0  # force immediate poll
         self._poll_tmux_activity()
 
@@ -749,6 +752,38 @@ class CCSApp:
                 names.append(s.tag or s.id[:12] if s else sid[:12])
             self._set_status(f"Idle: {', '.join(names)}")
         self.tmux_idle = new_idle
+
+    def _get_git_info(self, cwd: str):
+        """Return (repo_name, [(hash, subject), ...]) or None if not a git repo."""
+        if not HAS_GIT or not cwd:
+            return None
+        if cwd in self._git_cache:
+            return self._git_cache[cwd]
+        try:
+            r = subprocess.run(
+                ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=2)
+            if r.returncode != 0:
+                self._git_cache[cwd] = None
+                return None
+            repo_name = os.path.basename(r.stdout.strip())
+        except Exception:
+            self._git_cache[cwd] = None
+            return None
+        commits = []
+        try:
+            r = subprocess.run(
+                ["git", "-C", cwd, "log", "--oneline", "-5", "--no-color"],
+                capture_output=True, text=True, timeout=2)
+            if r.returncode == 0:
+                for line in r.stdout.strip().splitlines():
+                    parts = line.split(" ", 1)
+                    commits.append((parts[0], parts[1] if len(parts) == 2 else ""))
+        except Exception:
+            pass
+        result = (repo_name, commits)
+        self._git_cache[cwd] = result
+        return result
 
     def _apply_filter(self):
         if not self.query:
@@ -1179,6 +1214,15 @@ class CCSApp:
             else:
                 lines.append((f"  Tmux:    ⚡ {tmux_name} (K to kill)",
                                curses.color_pair(CP_STATUS) | curses.A_BOLD))
+        git_info = self._get_git_info(s.cwd) if s.cwd else None
+        if git_info:
+            repo_name, commits = git_info
+            lines.append((f"  Git:     {repo_name}", curses.color_pair(CP_ACCENT)))
+            for sha, subject in commits:
+                cl = f"    {sha} {subject}"
+                if len(cl) > w - 4:
+                    cl = cl[:w - 7] + "..."
+                lines.append((cl, curses.color_pair(CP_DIM)))
         lines.append(("", 0))
 
         # First message
