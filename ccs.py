@@ -963,7 +963,7 @@ class CCSApp:
         ind_w = 3     # " ▸ " or " ● " or "   "
         pin_w = 3     # "★⚡" or "★  " or "⚡ " or "   " (⚡ is 2 cols wide)
         ts_w = 18     # "2025-01-15 14:30  "
-        msg_w = 5     # "12m " or "  0m "
+        msg_w = 6     # " 12m  " or "      "
         tag_w = tag_col_w  # fixed across all visible rows
         proj_w = min(28, max(12, (w - ind_w - pin_w - tag_w - ts_w - msg_w - 4) // 3))
 
@@ -986,7 +986,14 @@ class CCSApp:
         if len(desc) > desc_w:
             desc = desc[:desc_w - 1] + "…"
 
-        msg_str = f"{s.msg_count:>3d}m " if s.msg_count else "     "
+        if s.msg_count >= 10000:
+            msg_str = f"{s.msg_count // 1000:>3d}k  "
+        elif s.msg_count >= 1000:
+            msg_str = f"{s.msg_count // 1000}.{(s.msg_count % 1000) // 100}k  "
+        elif s.msg_count:
+            msg_str = f"{s.msg_count:>3d}m  "
+        else:
+            msg_str = "      "
 
         # Pin/tmux indicator (3 display-cols: ⚡ is 2 cols wide)
         if s.pinned and has_tmux:
