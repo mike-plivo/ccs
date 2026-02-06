@@ -61,6 +61,8 @@ CACHE_FILE = CCS_DIR / "session_cache.json"
 TMUX_FILE = CCS_DIR / "tmux_sessions.json"
 HAS_TMUX = shutil.which("tmux") is not None
 TMUX_PREFIX = "ccs-"
+TMUX_IDLE_SECS = 30   # seconds of no output before marking session idle
+TMUX_POLL_INTERVAL = 5  # seconds between activity polls
 
 # ── Color pair IDs ────────────────────────────────────────────────────
 
@@ -574,6 +576,9 @@ class CCSApp:
 
         # Tmux state: session ID → tmux name for active tmux sessions
         self.tmux_sids: dict = {}
+        self.tmux_idle: set = set()  # session IDs that are idle (no recent output)
+        self.tmux_idle_prev: set = set()  # previous idle set, for detecting transitions
+        self.tmux_last_poll: float = 0.0  # monotonic time of last tmux activity poll
 
         self.status = ""
         self.status_ttl = 0
@@ -699,6 +704,51 @@ class CCSApp:
                 -s.mtime,
             ))
         self._apply_filter()
+        self.tmux_last_poll = 0  # force immediate poll
+        self._poll_tmux_activity()
+
+    def _poll_tmux_activity(self):
+        """Check tmux session activity timestamps and update idle state."""
+        if not HAS_TMUX or not self.tmux_sids:
+            self.tmux_idle = set()
+            return
+        now_mono = time.monotonic()
+        if now_mono - self.tmux_last_poll < TMUX_POLL_INTERVAL:
+            return
+        self.tmux_last_poll = now_mono
+        try:
+            r = subprocess.run(
+                ["tmux", "list-sessions", "-F",
+                 "#{session_name} #{session_activity}"],
+                capture_output=True, text=True, timeout=2)
+            if r.returncode != 0:
+                return
+        except Exception:
+            return
+        now = time.time()
+        activity: dict = {}  # tmux_name → last_activity_timestamp
+        for line in r.stdout.strip().splitlines():
+            parts = line.rsplit(" ", 1)
+            if len(parts) == 2:
+                try:
+                    activity[parts[0]] = float(parts[1])
+                except ValueError:
+                    pass
+        self.tmux_idle_prev = self.tmux_idle.copy()
+        new_idle: set = set()
+        for sid, tmux_name in self.tmux_sids.items():
+            ts = activity.get(tmux_name)
+            if ts is not None and (now - ts) > TMUX_IDLE_SECS:
+                new_idle.add(sid)
+        # Notify on newly idle sessions
+        newly_idle = new_idle - self.tmux_idle_prev
+        if newly_idle:
+            names = []
+            for sid in newly_idle:
+                s = next((s for s in self.sessions if s.id == sid), None)
+                names.append(s.tag or s.id[:12] if s else sid[:12])
+            self._set_status(f"Idle: {', '.join(names)}")
+        self.tmux_idle = new_idle
 
     def _apply_filter(self):
         if not self.query:
@@ -762,6 +812,7 @@ class CCSApp:
                     self.status = ""
 
             if k == -1:
+                self._poll_tmux_activity()
                 continue
             if k == curses.KEY_RESIZE:
                 self.scr.clear()
@@ -958,6 +1009,7 @@ class CCSApp:
         """Draw a single session row with color-coded segments."""
         marked = s.id in self.marked
         has_tmux = s.id in self.tmux_sids
+        is_idle = s.id in self.tmux_idle
 
         # Column widths
         ind_w = 3     # " ▸ " or " ● " or "   "
@@ -995,15 +1047,16 @@ class CCSApp:
         else:
             msg_str = "      "
 
-        # Pin/tmux indicator (3 display-cols: ⚡ is 2 cols wide)
+        # Pin/tmux indicator (3 display-cols: ⚡/💤 are 2 cols wide)
+        tmux_ch = "💤" if is_idle else "⚡"
         if s.pinned and has_tmux:
-            pin_str = "★⚡"    # 1 + 2 = 3 cols
+            pin_str = f"★{tmux_ch}"   # 1 + 2 = 3 cols
         elif s.pinned:
-            pin_str = "★  "    # 1 + 2 spaces = 3 cols
+            pin_str = "★  "            # 1 + 2 spaces = 3 cols
         elif has_tmux:
-            pin_str = "⚡ "    # 2 + 1 space = 3 cols
+            pin_str = f"{tmux_ch} "    # 2 + 1 space = 3 cols
         else:
-            pin_str = "   "    # 3 spaces
+            pin_str = "   "            # 3 spaces
 
         # Mark indicator
         if marked:
@@ -1029,7 +1082,8 @@ class CCSApp:
                 self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
             if has_tmux:
                 tx = 4 if s.pinned else 3  # after ★ (1 col) or at start
-                self._safe(y, tx, "⚡", curses.color_pair(CP_STATUS) | curses.A_BOLD)
+                tmux_attr = curses.color_pair(CP_DIM) if is_idle else curses.color_pair(CP_STATUS) | curses.A_BOLD
+                self._safe(y, tx, tmux_ch, tmux_attr)
             x += pin_w
             if s.tag and tag_w > 0:
                 disp_tag = f"[{s.tag}]"
@@ -1055,8 +1109,8 @@ class CCSApp:
             if s.pinned:
                 self._safe(y, x, "★", curses.color_pair(CP_PIN) | curses.A_BOLD)
             if has_tmux:
-                self._safe(y, x + (1 if s.pinned else 0), "⚡",
-                           curses.color_pair(CP_STATUS))
+                tmux_attr = curses.color_pair(CP_DIM) if is_idle else curses.color_pair(CP_STATUS)
+                self._safe(y, x + (1 if s.pinned else 0), tmux_ch, tmux_attr)
             x += pin_w
 
             # Tag
@@ -1119,8 +1173,12 @@ class CCSApp:
                        curses.color_pair(CP_ACCENT)))
         if s.id in self.tmux_sids:
             tmux_name = self.tmux_sids[s.id]
-            lines.append((f"  Tmux:    ⚡ {tmux_name} (K to kill)",
-                           curses.color_pair(CP_STATUS) | curses.A_BOLD))
+            if s.id in self.tmux_idle:
+                lines.append((f"  Tmux:    💤 {tmux_name} idle (K to kill)",
+                               curses.color_pair(CP_DIM)))
+            else:
+                lines.append((f"  Tmux:    ⚡ {tmux_name} (K to kill)",
+                               curses.color_pair(CP_STATUS) | curses.A_BOLD))
         lines.append(("", 0))
 
         # First message
