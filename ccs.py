@@ -895,7 +895,7 @@ class CCSApp:
         hints_map = {
             "normal":  "⏎ Resume  R Last  → Tmux  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help  q Quit",
             "normal_tmux": "⏎ Attach  x Kill  ← Sessions  r Refresh  P Profiles  ? Help  q Quit",
-            "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
+            "search":  "Type to filter  ·  ↑/↓ Navigate  ·  ⏎ Done  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
             "delete":  "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
@@ -2115,6 +2115,11 @@ class CCSApp:
             self.mode = "normal"
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             self.mode = "normal"
+        elif k in (curses.KEY_UP,):
+            self.cur = max(0, self.cur - 1)
+        elif k in (curses.KEY_DOWN,):
+            if self.filtered:
+                self.cur = min(len(self.filtered) - 1, self.cur + 1)
         elif k in (curses.KEY_BACKSPACE, 127, 8):
             self.query = self.query[:-1]
             self._apply_filter()
