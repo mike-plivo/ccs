@@ -145,6 +145,7 @@ ROW_TOOLS = "tools"
 ROW_MCP = "mcp"
 ROW_CUSTOM = "custom"
 ROW_PROF_NAME = "prof_name"
+ROW_EXPERT = "expert"
 ROW_PROF_SAVE = "prof_save"
 
 # ── Data ──────────────────────────────────────────────────────────────
@@ -438,6 +439,7 @@ class CCSApp:
         self.launch_tools = ""
         self.launch_mcp = ""
         self.launch_custom = ""
+        self.launch_expert_args = ""  # raw CLI args for expert mode
         self.launch_editing: Optional[str] = None  # which text field is active
 
         # Profile manager state
@@ -446,6 +448,7 @@ class CCSApp:
         self.prof_edit_cur = 0        # cursor in profile editor
         self.prof_edit_name = ""      # name field in editor
         self.prof_editing_existing: Optional[str] = None  # original name if editing
+        self.prof_expert_mode = False  # True = expert (raw CLI), False = structured
         self.prof_delete_confirm = False
 
         self.status = ""
@@ -641,7 +644,7 @@ class CCSApp:
             "delete_empty": "y Confirm  ·  n / Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create  ·  Esc Cancel",
             "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
-            "profile_edit": "↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
+            "profile_edit": "Tab Expert/Structured  ↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
             "help":    "Press any key to close",
         }
         hints = hints_map.get(self.mode, "")
@@ -855,6 +858,7 @@ class CCSApp:
             ("  Actions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    Enter          Resume with active profile", 0),
             ("    P              Profile picker / manager", 0),
+            ("                   (Tab: expert/structured mode)", 0),
             ("    p              Toggle pin (pinned sort to top)", 0),
             ("    t              Tag a session", 0),
             ("    T              Remove tag from session", 0),
@@ -978,9 +982,18 @@ class CCSApp:
         self.launch_tools = profile.get("tools", "")
         self.launch_mcp = profile.get("mcp_config", "")
         self.launch_custom = profile.get("custom_args", "")
+        self.launch_expert_args = profile.get("expert_args", "")
 
     def _launch_to_profile_dict(self, name: str) -> dict:
         """Serialize current launch state to a profile dict."""
+        if self.prof_expert_mode:
+            return {
+                "name": name,
+                "model": "", "permission_mode": "", "flags": [],
+                "system_prompt": "", "tools": "", "mcp_config": "",
+                "custom_args": "",
+                "expert_args": self.launch_expert_args,
+            }
         flags = [TOGGLE_FLAGS[i][1] for i, v in enumerate(self.launch_toggles) if v]
         return {
             "name": name,
@@ -991,11 +1004,15 @@ class CCSApp:
             "tools": self.launch_tools,
             "mcp_config": self.launch_mcp,
             "custom_args": self.launch_custom,
+            "expert_args": "",
         }
 
     @staticmethod
     def _build_args_from_profile(profile: dict) -> List[str]:
         """Build CLI args list from a profile dict."""
+        expert = profile.get("expert_args", "").strip()
+        if expert:
+            return expert.split()
         extra: List[str] = []
         model = profile.get("model", "")
         if model:
@@ -1020,6 +1037,10 @@ class CCSApp:
     @staticmethod
     def _profile_summary(p: dict) -> str:
         """One-line summary of a profile's settings."""
+        expert = p.get("expert_args", "").strip()
+        if expert:
+            label = expert[:50] + ("..." if len(expert) > 50 else "")
+            return f"[expert] {label}"
         parts: List[str] = []
         model = p.get("model", "")
         for name, mid in MODELS:
@@ -1124,14 +1145,17 @@ class CCSApp:
     def _build_profile_edit_rows(self) -> List[Tuple[str, int]]:
         rows: List[Tuple[str, int]] = []
         rows.append((ROW_PROF_NAME, 0))
-        rows.append((ROW_MODEL, 0))
-        rows.append((ROW_PERMMODE, 0))
-        for i in range(len(TOGGLE_FLAGS)):
-            rows.append((ROW_TOGGLE, i))
-        rows.append((ROW_SYSPROMPT, 0))
-        rows.append((ROW_TOOLS, 0))
-        rows.append((ROW_MCP, 0))
-        rows.append((ROW_CUSTOM, 0))
+        if self.prof_expert_mode:
+            rows.append((ROW_EXPERT, 0))
+        else:
+            rows.append((ROW_MODEL, 0))
+            rows.append((ROW_PERMMODE, 0))
+            for i in range(len(TOGGLE_FLAGS)):
+                rows.append((ROW_TOGGLE, i))
+            rows.append((ROW_SYSPROMPT, 0))
+            rows.append((ROW_TOOLS, 0))
+            rows.append((ROW_MCP, 0))
+            rows.append((ROW_CUSTOM, 0))
         rows.append((ROW_PROF_SAVE, 0))
         return rows
 
@@ -1144,10 +1168,12 @@ class CCSApp:
         sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
         accent = curses.color_pair(CP_ACCENT) | curses.A_BOLD
         tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
+        warn = curses.color_pair(CP_WARN) | curses.A_BOLD
 
         rows = self.prof_edit_rows
         is_new = self.prof_editing_existing is None
-        title_text = " New Profile " if is_new else " Edit Profile "
+        mode_label = "Expert" if self.prof_expert_mode else "Structured"
+        title_text = f" {'New' if is_new else 'Edit'} Profile ({mode_label}) "
 
         def is_sel(i):
             return i == self.prof_edit_cur
@@ -1168,6 +1194,10 @@ class CCSApp:
                 cursor = "▏" if editing else ""
                 display.append((f"{prefix}Name: {self.prof_edit_name}{cursor}",
                                 accent if is_sel(ri) else tag_attr))
+            elif rtype == ROW_EXPERT:
+                editing = self.launch_editing == ROW_EXPERT
+                cursor = "▏" if editing else ""
+                display.append((f"{prefix}claude {self.launch_expert_args}{cursor}", a))
             elif rtype == ROW_MODEL:
                 display.append((f"{prefix}Model:       {MODELS[self.launch_model_idx][0]}", a))
             elif rtype == ROW_PERMMODE:
@@ -1196,7 +1226,7 @@ class CCSApp:
                 la = curses.color_pair(CP_STATUS) | curses.A_BOLD if is_sel(ri) else accent
                 display.append((f"{prefix}>>> Save <<<", la))
 
-        box_w = min(60, w - 4)
+        box_w = min(64, w - 4)
         box_h = min(len(display) + 4, h - 2)
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
@@ -1230,7 +1260,10 @@ class CCSApp:
             self._safe(sy + 1 + i, sx + 1, text[:box_w - 3], attr)
 
         # Hints
-        hints = " Space toggle · ⏎ edit/save · Esc cancel "
+        if self.prof_expert_mode:
+            hints = " Tab structured · ⏎ edit/save · Esc cancel "
+        else:
+            hints = " Tab expert · Space toggle · ⏎ edit/save · Esc cancel "
         self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
                    hints[:box_w - 3], dim)
 
@@ -1545,19 +1578,19 @@ class CCSApp:
 
     def _prof_open_editor(self, profile: Optional[dict]):
         """Open the profile editor, optionally pre-filled from an existing profile."""
-        self.prof_edit_rows = self._build_profile_edit_rows()
-        self.prof_edit_cur = 0  # start on Name
         self.launch_editing = None
 
         if profile:
-            # Edit existing
+            # Edit existing — detect expert mode
             self.prof_editing_existing = profile.get("name", "")
             self.prof_edit_name = profile.get("name", "")
+            self.prof_expert_mode = bool(profile.get("expert_args", "").strip())
             self._launch_apply_profile(profile)
         else:
             # New - blank slate
             self.prof_editing_existing = None
             self.prof_edit_name = ""
+            self.prof_expert_mode = False
             self.launch_model_idx = 0
             self.launch_perm_idx = 0
             self.launch_toggles = [False] * len(TOGGLE_FLAGS)
@@ -1565,9 +1598,12 @@ class CCSApp:
             self.launch_tools = ""
             self.launch_mcp = ""
             self.launch_custom = ""
+            self.launch_expert_args = ""
             # Start with name field editing immediately
             self.launch_editing = ROW_PROF_NAME
 
+        self.prof_edit_rows = self._build_profile_edit_rows()
+        self.prof_edit_cur = 0
         self.mode = "profile_edit"
 
     def _input_profile_edit(self, k: int) -> Optional[str]:
@@ -1583,11 +1619,15 @@ class CCSApp:
             elif k in (curses.KEY_BACKSPACE, 127, 8):
                 if self.launch_editing == ROW_PROF_NAME:
                     self.prof_edit_name = self.prof_edit_name[:-1]
+                elif self.launch_editing == ROW_EXPERT:
+                    self.launch_expert_args = self.launch_expert_args[:-1]
                 else:
                     self._launch_edit_backspace()
             elif 32 <= k <= 126:
                 if self.launch_editing == ROW_PROF_NAME:
                     self.prof_edit_name += chr(k)
+                elif self.launch_editing == ROW_EXPERT:
+                    self.launch_expert_args += chr(k)
                 else:
                     self._launch_edit_char(chr(k))
             return None
@@ -1595,6 +1635,14 @@ class CCSApp:
         # ── Normal navigation ─────────────────────────────────────
         if k == 27:  # Esc → back to profiles list
             self.mode = "profiles"
+
+        elif k == 9:  # Tab → toggle expert/structured mode
+            self.launch_editing = None
+            self.prof_expert_mode = not self.prof_expert_mode
+            self.prof_edit_rows = self._build_profile_edit_rows()
+            if self.prof_edit_cur >= len(self.prof_edit_rows):
+                self.prof_edit_cur = len(self.prof_edit_rows) - 1
+
         elif k in (curses.KEY_UP, ord("k")):
             self.prof_edit_cur = max(0, self.prof_edit_cur - 1)
         elif k in (curses.KEY_DOWN, ord("j")):
@@ -1606,7 +1654,7 @@ class CCSApp:
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if cur_type == ROW_PROF_SAVE:
                 self._prof_do_save()
-            elif cur_type in (ROW_PROF_NAME, ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
+            elif cur_type in (ROW_PROF_NAME, ROW_EXPERT, ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
                 self.launch_editing = cur_type
             else:
                 self._prof_edit_toggle_current()
@@ -1621,8 +1669,8 @@ class CCSApp:
             self.launch_perm_idx = (self.launch_perm_idx + 1) % len(PERMISSION_MODES)
         elif rtype == ROW_TOGGLE:
             self.launch_toggles[ridx] = not self.launch_toggles[ridx]
-        elif rtype == ROW_PROF_NAME:
-            self.launch_editing = ROW_PROF_NAME
+        elif rtype in (ROW_PROF_NAME, ROW_EXPERT):
+            self.launch_editing = rtype
         elif rtype in (ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
             self.launch_editing = rtype
 
