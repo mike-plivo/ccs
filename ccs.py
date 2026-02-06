@@ -567,8 +567,8 @@ class CCSApp:
         self.prof_expert_mode = False  # True = expert (raw CLI), False = structured
         self.prof_delete_confirm = False
 
-        # Tmux state: set of session IDs with active tmux sessions
-        self.tmux_sids: set = set()
+        # Tmux state: session ID → tmux name for active tmux sessions
+        self.tmux_sids: dict = {}
 
         self.status = ""
         self.status_ttl = 0
@@ -682,9 +682,10 @@ class CCSApp:
         self._apply_filter()
         if HAS_TMUX:
             alive = self.mgr.tmux_sessions()
-            self.tmux_sids = {info.get("session_id") for info in alive.values()}
+            self.tmux_sids = {info.get("session_id"): name
+                              for name, info in alive.items()}
         else:
-            self.tmux_sids = set()
+            self.tmux_sids = {}
 
     def _apply_filter(self):
         if not self.query:
@@ -1071,7 +1072,8 @@ class CCSApp:
         lines.append((f"  Messages: {s.msg_count}",
                        curses.color_pair(CP_ACCENT)))
         if s.id in self.tmux_sids:
-            lines.append((f"  Tmux:    ▶ running (K to kill)",
+            tmux_name = self.tmux_sids[s.id]
+            lines.append((f"  Tmux:    ▶ {tmux_name} (K to kill)",
                            curses.color_pair(CP_STATUS) | curses.A_BOLD))
         lines.append(("", 0))
 
@@ -1885,7 +1887,7 @@ class CCSApp:
                     subprocess.run(["tmux", "kill-session", "-t", tmux_name],
                                    capture_output=True)
                     self.mgr.tmux_unregister(tmux_name)
-                    self.tmux_sids.discard(s.id)
+                    self.tmux_sids.pop(s.id, None)
                     self._set_status(f"Killed tmux: {s.tag or s.id[:12]}")
                 else:
                     self._set_status("No active tmux session for this session")
