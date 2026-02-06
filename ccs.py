@@ -1013,7 +1013,7 @@ class CCSApp:
 
         # Column widths
         ind_w = 3     # " ▸ " or " ● " or "   "
-        pin_w = 3     # "★⚡" or "★  " or "⚡ " or "   " (⚡ is 2 cols wide)
+        pin_w = 3     # "★🚀" or "★  " or "🚀 " or "   " (🚀 is 2 cols wide)
         ts_w = 18     # "2025-01-15 14:30  "
         msg_w = 6     # " 12m  " or "      "
         tag_w = tag_col_w  # fixed across all visible rows
@@ -1047,8 +1047,8 @@ class CCSApp:
         else:
             msg_str = "      "
 
-        # Pin/tmux indicator (3 display-cols: ⚡/😴 are 2 cols wide)
-        tmux_ch = "😴" if is_idle else "⚡"
+        # Pin/tmux indicator (3 display-cols: 🚀/💤 are 2 cols wide)
+        tmux_ch = "💤" if is_idle else "🚀"
         if s.pinned and has_tmux:
             pin_str = f"★{tmux_ch}"   # 1 + 2 = 3 cols
         elif s.pinned:
@@ -1174,10 +1174,10 @@ class CCSApp:
         if s.id in self.tmux_sids:
             tmux_name = self.tmux_sids[s.id]
             if s.id in self.tmux_idle:
-                lines.append((f"  Tmux:    😴 {tmux_name} idle (K to kill)",
+                lines.append((f"  Tmux:    💤 {tmux_name} idle (K to kill)",
                                curses.color_pair(CP_DIM)))
             else:
-                lines.append((f"  Tmux:    ⚡ {tmux_name} (K to kill)",
+                lines.append((f"  Tmux:    🚀 {tmux_name} (K to kill)",
                                curses.color_pair(CP_STATUS) | curses.A_BOLD))
         lines.append(("", 0))
 
@@ -1241,7 +1241,7 @@ class CCSApp:
             ("", 0),
             ("  Tmux", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
-            ("    ⚡ indicator    Session has active tmux", 0),
+            ("    🚀 indicator    Session has active tmux", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
