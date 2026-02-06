@@ -50,7 +50,9 @@ CP_SEL_TAG = 13
 CP_SEL_PROJ = 14
 CP_ACCENT = 15
 
-# ── Launch option presets ─────────────────────────────────────────────
+# ── Launch option definitions ─────────────────────────────────────────
+
+PROFILES_FILE = CLAUDE_DIR / "ccs_profiles.json"
 
 MODELS = [
     ("default", ""),
@@ -59,14 +61,36 @@ MODELS = [
     ("haiku", "claude-haiku-4-5-20251001"),
 ]
 
-# Launch overlay row indices
-LR_MODEL = 0
-LR_VERBOSE = 1
-LR_NOPERMS = 2
-LR_PRINT = 3
-LR_CUSTOM = 4
-LR_LAUNCH = 5
-LR_COUNT = 6
+PERMISSION_MODES = [
+    ("default", ""),
+    ("plan", "plan"),
+    ("acceptEdits", "acceptEdits"),
+    ("dontAsk", "dontAsk"),
+    ("bypassPermissions", "bypassPermissions"),
+]
+
+# Toggleable flags: (display_name, cli_flag)
+TOGGLE_FLAGS = [
+    ("--verbose",                        "--verbose"),
+    ("--dangerously-skip-permissions",   "--dangerously-skip-permissions"),
+    ("--print",                          "--print"),
+    ("--continue",                       "--continue"),
+    ("--no-session-persistence",         "--no-session-persistence"),
+]
+
+# Row types in launch overlay
+ROW_PROFILE = "profile"
+ROW_MODEL = "model"
+ROW_PERMMODE = "permmode"
+ROW_TOGGLE = "toggle"
+ROW_SYSPROMPT = "sysprompt"
+ROW_TOOLS = "tools"
+ROW_MCP = "mcp"
+ROW_CUSTOM = "custom"
+ROW_LAUNCH = "launch"
+ROW_SAVE = "save"
+ROW_PROF_NAME = "prof_name"
+ROW_PROF_SAVE = "prof_save"
 
 # ── Data ──────────────────────────────────────────────────────────────
 
@@ -245,6 +269,25 @@ class SessionManager:
         pins = [p for p in pins if p != s.id]
         self._save(PINS_FILE, pins)
 
+    # ── Profile management ──────────────────────────────────────────
+
+    def load_profiles(self) -> List[dict]:
+        data = self._load(PROFILES_FILE, [])
+        return data if isinstance(data, list) else []
+
+    def save_profile(self, profile: dict):
+        profiles = self.load_profiles()
+        # Replace if same name exists
+        profiles = [p for p in profiles if p.get("name") != profile["name"]]
+        profiles.append(profile)
+        profiles.sort(key=lambda p: p.get("name", ""))
+        self._save(PROFILES_FILE, profiles)
+
+    def delete_profile(self, name: str):
+        profiles = self.load_profiles()
+        profiles = [p for p in profiles if p.get("name") != name]
+        self._save(PROFILES_FILE, profiles)
+
     def purge_ephemeral(self):
         if not EPHEMERAL_FILE.exists():
             return
@@ -283,20 +326,34 @@ class CCSApp:
         self.cur = 0
         self.scroll = 0
         self.query = ""
-        self.mode = "normal"  # normal | search | tag | delete | delete_empty | new | launch | help
+        self.mode = "normal"  # normal | search | tag | delete | delete_empty | new | launch | profiles | profile_edit | help
         self.ibuf = ""
         self.delete_label = ""  # label shown in delete confirmation popup
         self.empty_count = 0    # count for delete_empty confirmation
 
         # Launch options state
         self.launch_session: Optional[Session] = None
-        self.launch_cur = 0           # selected row in launch overlay
-        self.launch_model_idx = 0     # index into MODELS
-        self.launch_verbose = False
-        self.launch_noperms = False
-        self.launch_print = False
+        self.launch_rows: List[Tuple[str, int]] = []  # (row_type, index)
+        self.launch_cur = 0
+        self.launch_model_idx = 0
+        self.launch_perm_idx = 0
+        self.launch_toggles: List[bool] = [False] * len(TOGGLE_FLAGS)
+        self.launch_sysprompt = ""
+        self.launch_tools = ""
+        self.launch_mcp = ""
         self.launch_custom = ""
-        self.launch_editing = False   # typing in custom args field
+        self.launch_editing: Optional[str] = None  # which text field is active
+        self.launch_profile_idx = 0  # 0 = (custom), 1+ = saved profiles
+        self.launch_save_name = ""   # buffer for saving a profile name
+
+        # Profile manager state
+        self.prof_cur = 0             # cursor in profile list
+        self.prof_edit_rows: List[Tuple[str, int]] = []
+        self.prof_edit_cur = 0        # cursor in profile editor
+        self.prof_edit_name = ""      # name field in editor
+        self.prof_editing_existing: Optional[str] = None  # original name if editing
+        self.prof_delete_confirm = False
+
         self.status = ""
         self.status_ttl = 0
         self.exit_action: Optional[Tuple] = None
@@ -432,6 +489,10 @@ class CCSApp:
                 "All sessions with no messages will be removed.")
         elif self.mode == "launch":
             self._draw_launch_overlay(h, w)
+        elif self.mode == "profiles":
+            self._draw_profiles_overlay(h, w)
+        elif self.mode == "profile_edit":
+            self._draw_profile_edit_overlay(h, w)
 
         self.scr.refresh()
 
@@ -453,13 +514,15 @@ class CCSApp:
         self._safe(1, w - 1, "│", bdr)
 
         hints_map = {
-            "normal":  "⏎ Resume  o Options  p Pin  t Tag  d Del  D Purge  n New  / Search  ? Help  q Quit",
+            "normal":  "⏎ Resume  o Options  P Profiles  p Pin  t Tag  d Del  n New  / Search  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "delete":  "y Confirm  ·  n / Esc Cancel",
             "delete_empty": "y Confirm  ·  n / Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create  ·  Esc Cancel",
             "launch":  "↑↓ Navigate  Space Toggle  ⏎ Launch  Esc Cancel",
+            "profiles": "↑↓ Navigate  n New  ⏎ Edit  d Delete  Esc Back",
+            "profile_edit": "↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
             "help":    "Press any key to close",
         }
         hints = hints_map.get(self.mode, "")
@@ -484,8 +547,8 @@ class CCSApp:
         elif self.mode == "new":
             self._safe(y, 1, " Name:", curses.color_pair(CP_HEADER) | curses.A_BOLD)
             self._safe(y, 8, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
-        elif self.mode in ("delete", "delete_empty"):
-            pass  # confirmation shown as centered popup overlay
+        elif self.mode in ("delete", "delete_empty", "profiles", "profile_edit"):
+            pass  # handled by overlay popups
         elif self.query:
             self._safe(y, 1, f" Filter: {self.query}", dim)
             cx = 10 + len(self.query) + 2
@@ -672,12 +735,13 @@ class CCSApp:
             ("", 0),
             ("  Actions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    Enter          Resume selected session", 0),
-            ("    o              Resume with options (model, flags)", 0),
+            ("    o              Resume with options / profiles", 0),
             ("    p              Toggle pin (pinned sort to top)", 0),
             ("    t              Tag a session", 0),
             ("    T              Remove tag from session", 0),
             ("    d              Delete a session (default: N)", 0),
             ("    D              Delete all empty sessions", 0),
+            ("    P              Manage launch profiles", 0),
             ("", 0),
             ("  Sessions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    n              Create a new named session", 0),
@@ -770,49 +834,129 @@ class CCSApp:
         self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
         self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
 
+    def _build_launch_rows(self) -> List[Tuple[str, int]]:
+        """Build the list of (row_type, sub_index) for the launch overlay."""
+        rows: List[Tuple[str, int]] = []
+        rows.append((ROW_PROFILE, 0))
+        rows.append((ROW_MODEL, 0))
+        rows.append((ROW_PERMMODE, 0))
+        for i in range(len(TOGGLE_FLAGS)):
+            rows.append((ROW_TOGGLE, i))
+        rows.append((ROW_SYSPROMPT, 0))
+        rows.append((ROW_TOOLS, 0))
+        rows.append((ROW_MCP, 0))
+        rows.append((ROW_CUSTOM, 0))
+        rows.append((ROW_LAUNCH, 0))
+        rows.append((ROW_SAVE, 0))
+        return rows
+
+    def _launch_apply_profile(self, profile: dict):
+        """Load a saved profile's settings into the launch state."""
+        # Model
+        model = profile.get("model", "")
+        self.launch_model_idx = 0
+        for i, (_, mid) in enumerate(MODELS):
+            if mid == model:
+                self.launch_model_idx = i
+                break
+        # Permission mode
+        perm = profile.get("permission_mode", "")
+        self.launch_perm_idx = 0
+        for i, (_, pid) in enumerate(PERMISSION_MODES):
+            if pid == perm:
+                self.launch_perm_idx = i
+                break
+        # Toggles
+        flags = profile.get("flags", [])
+        for i, (_, cli_flag) in enumerate(TOGGLE_FLAGS):
+            self.launch_toggles[i] = cli_flag in flags
+        # Text fields
+        self.launch_sysprompt = profile.get("system_prompt", "")
+        self.launch_tools = profile.get("tools", "")
+        self.launch_mcp = profile.get("mcp_config", "")
+        self.launch_custom = profile.get("custom_args", "")
+
+    def _launch_to_profile_dict(self, name: str) -> dict:
+        """Serialize current launch state to a profile dict."""
+        flags = [TOGGLE_FLAGS[i][1] for i, v in enumerate(self.launch_toggles) if v]
+        return {
+            "name": name,
+            "model": MODELS[self.launch_model_idx][1],
+            "permission_mode": PERMISSION_MODES[self.launch_perm_idx][1],
+            "flags": flags,
+            "system_prompt": self.launch_sysprompt,
+            "tools": self.launch_tools,
+            "mcp_config": self.launch_mcp,
+            "custom_args": self.launch_custom,
+        }
+
     def _draw_launch_overlay(self, h: int, w: int):
-        """Draw the launch options popup."""
+        """Draw the launch options popup with profile support."""
         bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
         hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
         dim = curses.color_pair(CP_DIM) | curses.A_DIM
         normal = curses.color_pair(CP_NORMAL)
-        sel = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
         accent = curses.color_pair(CP_ACCENT) | curses.A_BOLD
+        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
 
         s = self.launch_session
-        model_name = MODELS[self.launch_model_idx][0]
+        slabel = (s.tag or s.label[:36]) if s else ""
+        profiles = self.mgr.load_profiles()
+        profile_names = ["(custom)"] + [p.get("name", "?") for p in profiles]
 
-        # Build rows: (text, attr, is_selected)
-        def row_attr(r):
-            return sel if self.launch_cur == r else normal
+        def is_sel(i):
+            return i == self.launch_cur
 
-        def indicator(r):
-            return " ▸ " if self.launch_cur == r else "   "
+        def ind(i):
+            return " ▸ " if is_sel(i) else "   "
 
-        def checkbox(val):
+        def cb(val):
             return "[x]" if val else "[ ]"
 
-        rows = []
-        # Row 0: Model
-        rows.append((f"{indicator(LR_MODEL)}Model:  {model_name}", row_attr(LR_MODEL)))
-        # Row 1: verbose
-        rows.append((f"{indicator(LR_VERBOSE)}--verbose             {checkbox(self.launch_verbose)}", row_attr(LR_VERBOSE)))
-        # Row 2: no-permissions
-        rows.append((f"{indicator(LR_NOPERMS)}--no-permissions      {checkbox(self.launch_noperms)}", row_attr(LR_NOPERMS)))
-        # Row 3: print
-        rows.append((f"{indicator(LR_PRINT)}--print               {checkbox(self.launch_print)}", row_attr(LR_PRINT)))
-        # Row 4: custom args
-        cursor_ch = "▏" if (self.launch_cur == LR_CUSTOM and self.launch_editing) else ""
-        rows.append((f"{indicator(LR_CUSTOM)}Custom: {self.launch_custom}{cursor_ch}", row_attr(LR_CUSTOM)))
-        # Row 5: Launch button
-        launch_attr = curses.color_pair(CP_STATUS) | curses.A_BOLD if self.launch_cur == LR_LAUNCH else accent
-        rows.append((f"{indicator(LR_LAUNCH)}>>> Launch <<<", launch_attr))
+        def text_field(label, value, row_type, idx):
+            editing = self.launch_editing == row_type
+            cursor = "▏" if editing else ""
+            return f"{label} {value}{cursor}"
 
-        # Session label
-        slabel = s.tag or s.label[:40] if s else ""
+        # Build display lines: list of (text, attr)
+        display: List[Tuple[str, int]] = []
+        rows = self.launch_rows
 
-        box_w = min(50, w - 4)
-        box_h = len(rows) + 6  # title + session + blank + rows + blank + hints
+        for ri, (rtype, ridx) in enumerate(rows):
+            a = sel_attr if is_sel(ri) else normal
+            prefix = ind(ri)
+
+            if rtype == ROW_PROFILE:
+                pname = profile_names[self.launch_profile_idx] if self.launch_profile_idx < len(profile_names) else "(custom)"
+                display.append((f"{prefix}Profile: {pname}", accent if is_sel(ri) else tag_attr))
+            elif rtype == ROW_MODEL:
+                display.append((f"{prefix}Model:       {MODELS[self.launch_model_idx][0]}", a))
+            elif rtype == ROW_PERMMODE:
+                display.append((f"{prefix}Permissions: {PERMISSION_MODES[self.launch_perm_idx][0]}", a))
+            elif rtype == ROW_TOGGLE:
+                flag_name = TOGGLE_FLAGS[ridx][0]
+                display.append((f"{prefix}{flag_name:<38s} {cb(self.launch_toggles[ridx])}", a))
+            elif rtype == ROW_SYSPROMPT:
+                display.append((f"{prefix}{text_field('System prompt:', self.launch_sysprompt, ROW_SYSPROMPT, ri)}", a))
+            elif rtype == ROW_TOOLS:
+                display.append((f"{prefix}{text_field('Tools:', self.launch_tools, ROW_TOOLS, ri)}", a))
+            elif rtype == ROW_MCP:
+                display.append((f"{prefix}{text_field('MCP config:', self.launch_mcp, ROW_MCP, ri)}", a))
+            elif rtype == ROW_CUSTOM:
+                display.append((f"{prefix}{text_field('Custom args:', self.launch_custom, ROW_CUSTOM, ri)}", a))
+            elif rtype == ROW_LAUNCH:
+                la = curses.color_pair(CP_STATUS) | curses.A_BOLD if is_sel(ri) else accent
+                display.append((f"{prefix}>>> Launch <<<", la))
+            elif rtype == ROW_SAVE:
+                if self.launch_editing == ROW_SAVE:
+                    display.append((f"{prefix}Save as: {self.launch_save_name}▏", a))
+                else:
+                    display.append((f"{prefix}Save as profile...  (x = delete profile)", dim if not is_sel(ri) else a))
+
+        box_w = min(60, w - 4)
+        # +4 for: title, session line, blank, hints
+        box_h = min(len(display) + 5, h - 2)
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
 
@@ -824,28 +968,246 @@ class CCSApp:
         ttx = sx + max(1, (box_w - len(title)) // 2)
         self._safe(sy, ttx, title, hdr)
 
-        # Content area
+        # Clear content area
         for i in range(box_h - 2):
-            y = sy + 1 + i
-            self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
+            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
 
-        # Session name
+        # Session info
         self._safe(sy + 1, sx + 2, f"Session: {slabel}"[:box_w - 4], dim)
-        self._safe(sy + 2, sx + 1, "", normal)  # blank line
 
-        # Option rows
-        for i, (text, attr) in enumerate(rows):
-            self._safe(sy + 3 + i, sx + 1, text[:box_w - 3], attr)
+        # Scrollable rows area
+        row_area_h = box_h - 5  # minus title, session, blank, hints, bottom border
+        row_start = sy + 3
+
+        # Scroll within the overlay if needed
+        scroll = 0
+        if self.launch_cur >= scroll + row_area_h:
+            scroll = self.launch_cur - row_area_h + 1
+        if self.launch_cur < scroll:
+            scroll = self.launch_cur
+
+        for i in range(row_area_h):
+            di = scroll + i
+            if di >= len(display):
+                break
+            text, attr = display[di]
+            self._safe(row_start + i, sx + 1, text[:box_w - 3], attr)
 
         # Hints
-        hints = " Space toggle · ⏎ launch · Esc cancel "
+        hints_y = sy + box_h - 2
+        hints = " Space toggle · ⏎ launch · S save · x del profile · Esc back "
         hx = sx + max(1, (box_w - len(hints)) // 2)
-        self._safe(sy + 3 + len(rows), hx, hints[:box_w - 3], dim)
+        self._safe(hints_y, hx, hints[:box_w - 3], dim)
 
         # Bottom border
         self._safe(sy + box_h - 1, sx, "└", bdr)
         self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
         self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+
+    # ── Profile manager overlays ──────────────────────────────────
+
+    @staticmethod
+    def _profile_summary(p: dict) -> str:
+        """One-line summary of a profile's settings."""
+        parts: List[str] = []
+        model = p.get("model", "")
+        for name, mid in MODELS:
+            if mid == model and name != "default":
+                parts.append(name)
+                break
+        perm = p.get("permission_mode", "")
+        if perm:
+            parts.append(perm)
+        for flag in p.get("flags", []):
+            short = flag.lstrip("-")
+            if len(short) > 20:
+                short = short[:18] + ".."
+            parts.append(short)
+        if p.get("system_prompt"):
+            parts.append("sys-prompt")
+        if p.get("custom_args"):
+            parts.append("+" + p["custom_args"][:15])
+        return " · ".join(parts) if parts else "default settings"
+
+    def _draw_profiles_overlay(self, h: int, w: int):
+        """Profile list overlay."""
+        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
+        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
+        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        normal = curses.color_pair(CP_NORMAL)
+        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
+        warn = curses.color_pair(CP_WARN) | curses.A_BOLD
+
+        profiles = self.mgr.load_profiles()
+        box_w = min(62, w - 4)
+        list_h = max(3, min(len(profiles) + 2, h - 10))
+        box_h = list_h + 5  # title + blank + list + blank + hints + border
+        sx = max(0, (w - box_w) // 2)
+        sy = max(0, (h - box_h) // 2)
+
+        # Box
+        self._safe(sy, sx, "┌", bdr)
+        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy, sx + box_w - 1, "┐", bdr)
+        title = " Profiles "
+        self._safe(sy, sx + max(1, (box_w - len(title)) // 2), title, hdr)
+
+        for i in range(box_h - 2):
+            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
+
+        self._safe(sy + box_h - 1, sx, "└", bdr)
+        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+
+        # Content
+        if not profiles:
+            self._safe(sy + 2, sx + 3, "No profiles yet.", dim)
+            self._safe(sy + 3, sx + 3, "Press n to create your first profile.", dim)
+        else:
+            for i in range(list_h):
+                idx = i
+                if idx >= len(profiles):
+                    break
+                p = profiles[idx]
+                is_sel = (idx == self.prof_cur)
+                y = sy + 2 + i
+                name = p.get("name", "?")
+                summary = self._profile_summary(p)
+
+                if is_sel:
+                    line = f" ▸ {name:<18s} {summary}"
+                    line = line.ljust(box_w - 3)[:box_w - 3]
+                    self._safe(y, sx + 1, line, sel_attr)
+                else:
+                    self._safe(y, sx + 1, "   ", normal)
+                    self._safe(y, sx + 4, name, tag_attr)
+                    self._safe(y, sx + 4 + 18 + 1, summary[:box_w - 26],
+                               curses.color_pair(CP_DIM))
+
+        # Delete confirmation
+        if self.prof_delete_confirm and profiles:
+            pname = profiles[self.prof_cur].get("name", "?")
+            self._safe(sy + box_h - 3, sx + 3,
+                       f"Delete '{pname}'? y/N", warn)
+
+        # Hints
+        hints = " n New  ⏎ Edit  d Delete  Esc Back "
+        self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
+                   hints[:box_w - 3], dim)
+
+    def _build_profile_edit_rows(self) -> List[Tuple[str, int]]:
+        rows: List[Tuple[str, int]] = []
+        rows.append((ROW_PROF_NAME, 0))
+        rows.append((ROW_MODEL, 0))
+        rows.append((ROW_PERMMODE, 0))
+        for i in range(len(TOGGLE_FLAGS)):
+            rows.append((ROW_TOGGLE, i))
+        rows.append((ROW_SYSPROMPT, 0))
+        rows.append((ROW_TOOLS, 0))
+        rows.append((ROW_MCP, 0))
+        rows.append((ROW_CUSTOM, 0))
+        rows.append((ROW_PROF_SAVE, 0))
+        return rows
+
+    def _draw_profile_edit_overlay(self, h: int, w: int):
+        """Profile editor overlay."""
+        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
+        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
+        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        normal = curses.color_pair(CP_NORMAL)
+        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        accent = curses.color_pair(CP_ACCENT) | curses.A_BOLD
+        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
+
+        rows = self.prof_edit_rows
+        is_new = self.prof_editing_existing is None
+        title_text = " New Profile " if is_new else " Edit Profile "
+
+        def is_sel(i):
+            return i == self.prof_edit_cur
+
+        def ind(i):
+            return " ▸ " if is_sel(i) else "   "
+
+        def cb(val):
+            return "[x]" if val else "[ ]"
+
+        display: List[Tuple[str, int]] = []
+        for ri, (rtype, ridx) in enumerate(rows):
+            a = sel_attr if is_sel(ri) else normal
+            prefix = ind(ri)
+
+            if rtype == ROW_PROF_NAME:
+                editing = self.launch_editing == ROW_PROF_NAME
+                cursor = "▏" if editing else ""
+                display.append((f"{prefix}Name: {self.prof_edit_name}{cursor}",
+                                accent if is_sel(ri) else tag_attr))
+            elif rtype == ROW_MODEL:
+                display.append((f"{prefix}Model:       {MODELS[self.launch_model_idx][0]}", a))
+            elif rtype == ROW_PERMMODE:
+                display.append((f"{prefix}Permissions: {PERMISSION_MODES[self.launch_perm_idx][0]}", a))
+            elif rtype == ROW_TOGGLE:
+                flag_name = TOGGLE_FLAGS[ridx][0]
+                display.append((f"{prefix}{flag_name:<38s} {cb(self.launch_toggles[ridx])}", a))
+            elif rtype == ROW_SYSPROMPT:
+                editing = self.launch_editing == ROW_SYSPROMPT
+                cursor = "▏" if editing else ""
+                v = self.launch_sysprompt
+                display.append((f"{prefix}System prompt: {v}{cursor}", a))
+            elif rtype == ROW_TOOLS:
+                editing = self.launch_editing == ROW_TOOLS
+                cursor = "▏" if editing else ""
+                display.append((f"{prefix}Tools: {self.launch_tools}{cursor}", a))
+            elif rtype == ROW_MCP:
+                editing = self.launch_editing == ROW_MCP
+                cursor = "▏" if editing else ""
+                display.append((f"{prefix}MCP config: {self.launch_mcp}{cursor}", a))
+            elif rtype == ROW_CUSTOM:
+                editing = self.launch_editing == ROW_CUSTOM
+                cursor = "▏" if editing else ""
+                display.append((f"{prefix}Custom args: {self.launch_custom}{cursor}", a))
+            elif rtype == ROW_PROF_SAVE:
+                la = curses.color_pair(CP_STATUS) | curses.A_BOLD if is_sel(ri) else accent
+                display.append((f"{prefix}>>> Save <<<", la))
+
+        box_w = min(60, w - 4)
+        box_h = min(len(display) + 4, h - 2)
+        sx = max(0, (w - box_w) // 2)
+        sy = max(0, (h - box_h) // 2)
+
+        # Box
+        self._safe(sy, sx, "┌", bdr)
+        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy, sx + box_w - 1, "┐", bdr)
+        self._safe(sy, sx + max(1, (box_w - len(title_text)) // 2), title_text, hdr)
+
+        for i in range(box_h - 2):
+            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
+
+        self._safe(sy + box_h - 1, sx, "└", bdr)
+        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+
+        # Content (scrollable)
+        row_area_h = box_h - 3
+        scroll = 0
+        if self.prof_edit_cur >= scroll + row_area_h:
+            scroll = self.prof_edit_cur - row_area_h + 1
+        if self.prof_edit_cur < scroll:
+            scroll = self.prof_edit_cur
+
+        for i in range(row_area_h):
+            di = scroll + i
+            if di >= len(display):
+                break
+            text, attr = display[di]
+            self._safe(sy + 1 + i, sx + 1, text[:box_w - 3], attr)
+
+        # Hints
+        hints = " Space toggle · ⏎ edit/save · Esc cancel "
+        self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
+                   hints[:box_w - 3], dim)
 
     def _draw_footer(self, y: int, w: int):
         if self.status:
@@ -865,7 +1227,7 @@ class CCSApp:
                        curses.color_pair(CP_DIM) | curses.A_DIM)
 
         # Show mode indicator
-        if self.mode not in ("normal", "help", "delete", "delete_empty", "launch"):
+        if self.mode not in ("normal", "help", "delete", "delete_empty", "launch", "profiles", "profile_edit"):
             mode_label = f" [{self.mode.upper()}] "
             mx = (w - len(mode_label)) // 2
             self._safe(y, mx, mode_label,
@@ -903,6 +1265,8 @@ class CCSApp:
             "delete_empty": self._input_delete_empty,
             "new": self._input_new,
             "launch": self._input_launch,
+            "profiles": self._input_profiles,
+            "profile_edit": self._input_profile_edit,
             "help": self._input_help,
         }
         handler = dispatch.get(self.mode, self._input_normal)
@@ -945,13 +1309,18 @@ class CCSApp:
             if self.filtered:
                 s = self.filtered[self.cur]
                 self.launch_session = s
-                self.launch_cur = LR_LAUNCH
+                self.launch_rows = self._build_launch_rows()
+                self.launch_cur = len(self.launch_rows) - 2  # default to Launch row
                 self.launch_model_idx = 0
-                self.launch_verbose = False
-                self.launch_noperms = False
-                self.launch_print = False
+                self.launch_perm_idx = 0
+                self.launch_toggles = [False] * len(TOGGLE_FLAGS)
+                self.launch_sysprompt = ""
+                self.launch_tools = ""
+                self.launch_mcp = ""
                 self.launch_custom = ""
-                self.launch_editing = False
+                self.launch_editing = None
+                self.launch_profile_idx = 0
+                self.launch_save_name = ""
                 self.mode = "launch"
         elif k == ord("p"):
             if self.filtered:
@@ -993,6 +1362,10 @@ class CCSApp:
             return "action"
         elif k == ord("/"):
             self.mode = "search"
+        elif k == ord("P"):
+            self.prof_cur = 0
+            self.prof_delete_confirm = False
+            self.mode = "profiles"
         elif k == ord("?"):
             self.mode = "help"
         elif k in (ord("r"), curses.KEY_F5):
@@ -1071,48 +1444,118 @@ class CCSApp:
         return None
 
     def _input_launch(self, k: int) -> Optional[str]:
-        if self.launch_editing:
-            # Typing into the custom args field
-            if k == 27:  # Esc exits editing
-                self.launch_editing = False
+        rows = self.launch_rows
+        cur_type = rows[self.launch_cur][0] if self.launch_cur < len(rows) else None
+
+        # ── Text field editing mode ───────────────────────────────
+        if self.launch_editing is not None:
+            if k == 27:
+                self.launch_editing = None
             elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-                self.launch_editing = False
+                if self.launch_editing == ROW_SAVE and self.launch_save_name.strip():
+                    prof = self._launch_to_profile_dict(self.launch_save_name.strip())
+                    self.mgr.save_profile(prof)
+                    self._set_status(f"Saved profile: {self.launch_save_name.strip()}")
+                    self.launch_save_name = ""
+                self.launch_editing = None
             elif k in (curses.KEY_BACKSPACE, 127, 8):
-                self.launch_custom = self.launch_custom[:-1]
+                self._launch_edit_backspace()
             elif 32 <= k <= 126:
-                self.launch_custom += chr(k)
+                self._launch_edit_char(chr(k))
             return None
 
-        # Normal navigation in the overlay
+        # ── Normal overlay navigation ─────────────────────────────
         if k == 27:  # Esc
             self.mode = "normal"
         elif k in (curses.KEY_UP, ord("k")):
             self.launch_cur = max(0, self.launch_cur - 1)
         elif k in (curses.KEY_DOWN, ord("j")):
-            self.launch_cur = min(LR_COUNT - 1, self.launch_cur + 1)
+            self.launch_cur = min(len(rows) - 1, self.launch_cur + 1)
 
         elif k == ord(" "):
-            # Toggle / cycle the current row
-            if self.launch_cur == LR_MODEL:
-                self.launch_model_idx = (self.launch_model_idx + 1) % len(MODELS)
-            elif self.launch_cur == LR_VERBOSE:
-                self.launch_verbose = not self.launch_verbose
-            elif self.launch_cur == LR_NOPERMS:
-                self.launch_noperms = not self.launch_noperms
-            elif self.launch_cur == LR_PRINT:
-                self.launch_print = not self.launch_print
-            elif self.launch_cur == LR_CUSTOM:
-                self.launch_editing = True
-            elif self.launch_cur == LR_LAUNCH:
-                return self._do_launch()
+            self._launch_toggle_current()
 
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if self.launch_cur == LR_CUSTOM:
-                self.launch_editing = True
+            if cur_type in (ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
+                self.launch_editing = cur_type
+            elif cur_type == ROW_SAVE:
+                self.launch_editing = ROW_SAVE
+                self.launch_save_name = ""
+            elif cur_type == ROW_PROFILE:
+                self._launch_toggle_current()
+            elif cur_type in (ROW_MODEL, ROW_PERMMODE, ROW_TOGGLE):
+                self._launch_toggle_current()
             else:
                 return self._do_launch()
 
+        elif k == ord("x"):
+            # Delete the currently selected profile
+            profiles = self.mgr.load_profiles()
+            if self.launch_profile_idx > 0 and self.launch_profile_idx <= len(profiles):
+                pname = profiles[self.launch_profile_idx - 1].get("name", "")
+                self.mgr.delete_profile(pname)
+                self.launch_profile_idx = 0
+                self._set_status(f"Deleted profile: {pname}")
+
         return None
+
+    def _launch_toggle_current(self):
+        """Toggle/cycle the currently selected launch row."""
+        rows = self.launch_rows
+        rtype, ridx = rows[self.launch_cur]
+        profiles = self.mgr.load_profiles()
+        profile_count = 1 + len(profiles)  # (custom) + saved
+
+        if rtype == ROW_PROFILE:
+            self.launch_profile_idx = (self.launch_profile_idx + 1) % profile_count
+            if self.launch_profile_idx > 0:
+                self._launch_apply_profile(profiles[self.launch_profile_idx - 1])
+        elif rtype == ROW_MODEL:
+            self.launch_model_idx = (self.launch_model_idx + 1) % len(MODELS)
+            self.launch_profile_idx = 0
+        elif rtype == ROW_PERMMODE:
+            self.launch_perm_idx = (self.launch_perm_idx + 1) % len(PERMISSION_MODES)
+            self.launch_profile_idx = 0
+        elif rtype == ROW_TOGGLE:
+            self.launch_toggles[ridx] = not self.launch_toggles[ridx]
+            self.launch_profile_idx = 0
+        elif rtype == ROW_SYSPROMPT:
+            self.launch_editing = ROW_SYSPROMPT
+        elif rtype == ROW_TOOLS:
+            self.launch_editing = ROW_TOOLS
+        elif rtype == ROW_MCP:
+            self.launch_editing = ROW_MCP
+        elif rtype == ROW_CUSTOM:
+            self.launch_editing = ROW_CUSTOM
+        elif rtype == ROW_SAVE:
+            self.launch_editing = ROW_SAVE
+            self.launch_save_name = ""
+        elif rtype == ROW_LAUNCH:
+            pass  # handled by Enter
+
+    def _launch_edit_backspace(self):
+        if self.launch_editing == ROW_SYSPROMPT:
+            self.launch_sysprompt = self.launch_sysprompt[:-1]
+        elif self.launch_editing == ROW_TOOLS:
+            self.launch_tools = self.launch_tools[:-1]
+        elif self.launch_editing == ROW_MCP:
+            self.launch_mcp = self.launch_mcp[:-1]
+        elif self.launch_editing == ROW_CUSTOM:
+            self.launch_custom = self.launch_custom[:-1]
+        elif self.launch_editing == ROW_SAVE:
+            self.launch_save_name = self.launch_save_name[:-1]
+
+    def _launch_edit_char(self, ch: str):
+        if self.launch_editing == ROW_SYSPROMPT:
+            self.launch_sysprompt += ch
+        elif self.launch_editing == ROW_TOOLS:
+            self.launch_tools += ch
+        elif self.launch_editing == ROW_MCP:
+            self.launch_mcp += ch
+        elif self.launch_editing == ROW_CUSTOM:
+            self.launch_custom += ch
+        elif self.launch_editing == ROW_SAVE:
+            self.launch_save_name += ch
 
     def _do_launch(self) -> str:
         """Build CLI args from launch options and set exit action."""
@@ -1122,17 +1565,168 @@ class CCSApp:
         model_id = MODELS[self.launch_model_idx][1]
         if model_id:
             extra.extend(["--model", model_id])
-        if self.launch_verbose:
-            extra.append("--verbose")
-        if self.launch_noperms:
-            extra.append("--dangerously-skip-permissions")
-        if self.launch_print:
-            extra.append("--print")
+
+        perm_id = PERMISSION_MODES[self.launch_perm_idx][1]
+        if perm_id:
+            extra.extend(["--permission-mode", perm_id])
+
+        for i, (_, cli_flag) in enumerate(TOGGLE_FLAGS):
+            if self.launch_toggles[i]:
+                extra.append(cli_flag)
+
+        if self.launch_sysprompt.strip():
+            extra.extend(["--system-prompt", self.launch_sysprompt.strip()])
+        if self.launch_tools.strip():
+            extra.extend(["--tools", self.launch_tools.strip()])
+        if self.launch_mcp.strip():
+            extra.extend(["--mcp-config", self.launch_mcp.strip()])
         if self.launch_custom.strip():
             extra.extend(self.launch_custom.strip().split())
 
         self.exit_action = ("resume", s.id, s.cwd, extra)
         return "action"
+
+    # ── Profile manager input ────────────────────────────────────
+
+    def _input_profiles(self, k: int) -> Optional[str]:
+        profiles = self.mgr.load_profiles()
+
+        # Delete confirmation sub-mode
+        if self.prof_delete_confirm:
+            if k == ord("y") and profiles:
+                pname = profiles[self.prof_cur].get("name", "")
+                self.mgr.delete_profile(pname)
+                self._set_status(f"Deleted profile: {pname}")
+                if self.prof_cur >= len(profiles) - 1:
+                    self.prof_cur = max(0, self.prof_cur - 1)
+            self.prof_delete_confirm = False
+            return None
+
+        if k == 27:  # Esc
+            self.mode = "normal"
+        elif k in (curses.KEY_UP, ord("k")):
+            if profiles:
+                self.prof_cur = max(0, self.prof_cur - 1)
+        elif k in (curses.KEY_DOWN, ord("j")):
+            if profiles:
+                self.prof_cur = min(len(profiles) - 1, self.prof_cur + 1)
+
+        elif k == ord("n"):
+            # New profile
+            self._prof_open_editor(None)
+
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            # Edit selected
+            if profiles:
+                self._prof_open_editor(profiles[self.prof_cur])
+
+        elif k == ord("d"):
+            if profiles:
+                self.prof_delete_confirm = True
+
+        return None
+
+    def _prof_open_editor(self, profile: Optional[dict]):
+        """Open the profile editor, optionally pre-filled from an existing profile."""
+        self.prof_edit_rows = self._build_profile_edit_rows()
+        self.prof_edit_cur = 0  # start on Name
+        self.launch_editing = None
+
+        if profile:
+            # Edit existing
+            self.prof_editing_existing = profile.get("name", "")
+            self.prof_edit_name = profile.get("name", "")
+            self._launch_apply_profile(profile)
+        else:
+            # New - blank slate
+            self.prof_editing_existing = None
+            self.prof_edit_name = ""
+            self.launch_model_idx = 0
+            self.launch_perm_idx = 0
+            self.launch_toggles = [False] * len(TOGGLE_FLAGS)
+            self.launch_sysprompt = ""
+            self.launch_tools = ""
+            self.launch_mcp = ""
+            self.launch_custom = ""
+            # Start with name field editing immediately
+            self.launch_editing = ROW_PROF_NAME
+
+        self.mode = "profile_edit"
+
+    def _input_profile_edit(self, k: int) -> Optional[str]:
+        rows = self.prof_edit_rows
+        cur_type = rows[self.prof_edit_cur][0] if self.prof_edit_cur < len(rows) else None
+
+        # ── Text field editing ────────────────────────────────────
+        if self.launch_editing is not None:
+            if k == 27:
+                self.launch_editing = None
+            elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+                self.launch_editing = None
+            elif k in (curses.KEY_BACKSPACE, 127, 8):
+                if self.launch_editing == ROW_PROF_NAME:
+                    self.prof_edit_name = self.prof_edit_name[:-1]
+                else:
+                    self._launch_edit_backspace()
+            elif 32 <= k <= 126:
+                if self.launch_editing == ROW_PROF_NAME:
+                    self.prof_edit_name += chr(k)
+                else:
+                    self._launch_edit_char(chr(k))
+            return None
+
+        # ── Normal navigation ─────────────────────────────────────
+        if k == 27:  # Esc → back to profiles list
+            self.mode = "profiles"
+        elif k in (curses.KEY_UP, ord("k")):
+            self.prof_edit_cur = max(0, self.prof_edit_cur - 1)
+        elif k in (curses.KEY_DOWN, ord("j")):
+            self.prof_edit_cur = min(len(rows) - 1, self.prof_edit_cur + 1)
+
+        elif k == ord(" "):
+            self._prof_edit_toggle_current()
+
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if cur_type == ROW_PROF_SAVE:
+                self._prof_do_save()
+            elif cur_type in (ROW_PROF_NAME, ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
+                self.launch_editing = cur_type
+            else:
+                self._prof_edit_toggle_current()
+
+        return None
+
+    def _prof_edit_toggle_current(self):
+        rtype, ridx = self.prof_edit_rows[self.prof_edit_cur]
+        if rtype == ROW_MODEL:
+            self.launch_model_idx = (self.launch_model_idx + 1) % len(MODELS)
+        elif rtype == ROW_PERMMODE:
+            self.launch_perm_idx = (self.launch_perm_idx + 1) % len(PERMISSION_MODES)
+        elif rtype == ROW_TOGGLE:
+            self.launch_toggles[ridx] = not self.launch_toggles[ridx]
+        elif rtype == ROW_PROF_NAME:
+            self.launch_editing = ROW_PROF_NAME
+        elif rtype in (ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
+            self.launch_editing = rtype
+
+    def _prof_do_save(self):
+        name = self.prof_edit_name.strip()
+        if not name:
+            self._set_status("Profile name cannot be empty")
+            return
+        # If renaming, delete the old one
+        if self.prof_editing_existing and self.prof_editing_existing != name:
+            self.mgr.delete_profile(self.prof_editing_existing)
+        prof = self._launch_to_profile_dict(name)
+        self.mgr.save_profile(prof)
+        self._set_status(f"Saved profile: {name}")
+        self.mode = "profiles"
+        # Update cursor to point at the saved profile
+        profiles = self.mgr.load_profiles()
+        for i, p in enumerate(profiles):
+            if p.get("name") == name:
+                self.prof_cur = i
+                break
 
     def _input_help(self, k: int) -> Optional[str]:
         # Any key closes the help overlay
@@ -1165,12 +1759,13 @@ def cmd_help():
 \033[1mTUI Keybindings:\033[0m
   \033[36m↑/↓\033[0m or \033[36mj/k\033[0m       Navigate sessions
   \033[36mEnter\033[0m             Resume selected session
-  \033[36mo\033[0m                 Resume with options (model, flags)
+  \033[36mo\033[0m                 Resume with options / profiles
   \033[36mp\033[0m                 Toggle pin (pinned sort to top)
   \033[36mt\033[0m                 Tag a session
   \033[36mT\033[0m                 Remove tag from session
   \033[36md\033[0m                 Delete a session
   \033[36mD\033[0m                 Delete all empty sessions
+  \033[36mP\033[0m                 Manage launch profiles
   \033[36mn\033[0m                 Create a new named session
   \033[36me\033[0m                 Start an ephemeral session
   \033[36m/\033[0m                 Search / filter sessions
