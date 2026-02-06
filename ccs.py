@@ -1647,7 +1647,16 @@ class CCSApp:
         os.system(f"tmux attach-session -t {shlex.quote(tmux_name)}")
         self.scr.refresh()
         curses.doupdate()
+        # Clean up if the session ended while we were attached
+        alive = self.mgr.tmux_sessions()
+        if tmux_name not in alive:
+            self.mgr.tmux_unregister(tmux_name)
         self._refresh()
+
+    @staticmethod
+    def _tmux_wrap_cmd(cmd_str: str) -> str:
+        """Wrap a command so it shows a brief message before tmux session closes."""
+        return (f'{cmd_str}; echo ""; echo "Session ended. Returning to ccs..."; sleep 1')
 
     def _tmux_launch(self, s: Session, extra: List[str]):
         tmux_name = TMUX_PREFIX + s.id[:8]
@@ -1660,9 +1669,8 @@ class CCSApp:
         cmd_parts = ["claude", "--resume", s.id] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if s.cwd and os.path.isdir(s.cwd):
-            full_cmd = f"cd {shlex.quote(s.cwd)} && {cmd_str}"
-        else:
-            full_cmd = cmd_str
+            cmd_str = f"cd {shlex.quote(s.cwd)} && {cmd_str}"
+        full_cmd = self._tmux_wrap_cmd(cmd_str)
         subprocess.run(["tmux", "new-session", "-d", "-s", tmux_name,
                         "-x", "200", "-y", "50",
                         "bash", "-c", full_cmd])
@@ -1678,9 +1686,10 @@ class CCSApp:
         self.mgr._save(TAGS_FILE, tags)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        full_cmd = self._tmux_wrap_cmd(cmd_str)
         subprocess.run(["tmux", "new-session", "-d", "-s", tmux_name,
                         "-x", "200", "-y", "50",
-                        "bash", "-c", cmd_str])
+                        "bash", "-c", full_cmd])
         self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
         self._tmux_attach(tmux_name)
 
@@ -1691,9 +1700,10 @@ class CCSApp:
             f.write(uid + "\n")
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        full_cmd = self._tmux_wrap_cmd(cmd_str)
         subprocess.run(["tmux", "new-session", "-d", "-s", tmux_name,
                         "-x", "200", "-y", "50",
-                        "bash", "-c", cmd_str])
+                        "bash", "-c", full_cmd])
         self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
         self._tmux_attach(tmux_name)
 
