@@ -326,7 +326,7 @@ class CCSApp:
         self.cur = 0
         self.scroll = 0
         self.query = ""
-        self.mode = "normal"  # normal | search | tag | delete | delete_empty | new | launch | profiles | profile_edit | help
+        self.mode = "normal"  # normal | search | tag | delete | delete_empty | new | launch | profiles | profile_edit | quick_profile | help
         self.ibuf = ""
         self.delete_label = ""  # label shown in delete confirmation popup
         self.empty_count = 0    # count for delete_empty confirmation
@@ -353,6 +353,10 @@ class CCSApp:
         self.prof_edit_name = ""      # name field in editor
         self.prof_editing_existing: Optional[str] = None  # original name if editing
         self.prof_delete_confirm = False
+
+        # Quick profile picker state
+        self.qprof_cur = 0            # cursor in quick profile picker
+        self.qprof_delete_confirm = False
 
         self.status = ""
         self.status_ttl = 0
@@ -489,6 +493,8 @@ class CCSApp:
                 "All sessions with no messages will be removed.")
         elif self.mode == "launch":
             self._draw_launch_overlay(h, w)
+        elif self.mode == "quick_profile":
+            self._draw_quick_profile_overlay(h, w)
         elif self.mode == "profiles":
             self._draw_profiles_overlay(h, w)
         elif self.mode == "profile_edit":
@@ -514,7 +520,7 @@ class CCSApp:
         self._safe(1, w - 1, "│", bdr)
 
         hints_map = {
-            "normal":  "⏎ Resume  o Options  P Profiles  p Pin  t Tag  d Del  n New  / Search  ? Help  q Quit",
+            "normal":  "⏎ Resume  o Options  O Quick Profile  P Profiles  p Pin  t Tag  d Del  / Search  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "delete":  "y Confirm  ·  n / Esc Cancel",
@@ -523,6 +529,7 @@ class CCSApp:
             "launch":  "↑↓ Navigate  Space Toggle  ⏎ Launch  Esc Cancel",
             "profiles": "↑↓ Navigate  n New  ⏎ Edit  d Delete  Esc Back",
             "profile_edit": "↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
+            "quick_profile": "1-9 Quick pick  ↑↓ Navigate  ⏎ Launch  d Delete  Esc Cancel",
             "help":    "Press any key to close",
         }
         hints = hints_map.get(self.mode, "")
@@ -736,6 +743,7 @@ class CCSApp:
             ("  Actions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    Enter          Resume selected session", 0),
             ("    o              Resume with options / profiles", 0),
+            ("    O              Quick launch with a profile", 0),
             ("    p              Toggle pin (pinned sort to top)", 0),
             ("    t              Tag a session", 0),
             ("    T              Remove tag from session", 0),
@@ -1209,6 +1217,86 @@ class CCSApp:
         self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
                    hints[:box_w - 3], dim)
 
+    def _draw_quick_profile_overlay(self, h: int, w: int):
+        """Draw a compact profile picker popup for quick launch."""
+        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
+        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
+        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        normal = curses.color_pair(CP_NORMAL)
+        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
+
+        profiles = self.mgr.load_profiles()
+        if not profiles:
+            self.mode = "normal"
+            return
+
+        s = self.launch_session
+        slabel = (s.tag or s.label[:30]) if s else ""
+
+        box_w = min(56, w - 4)
+        list_h = min(len(profiles), h - 8)
+        box_h = list_h + 5  # title + session + blank + list + hints + border
+        sx = max(0, (w - box_w) // 2)
+        sy = max(0, (h - box_h) // 2)
+
+        # Box
+        self._safe(sy, sx, "┌", bdr)
+        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy, sx + box_w - 1, "┐", bdr)
+        title = " Quick Launch with Profile "
+        self._safe(sy, sx + max(1, (box_w - len(title)) // 2), title, hdr)
+
+        for i in range(box_h - 2):
+            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
+
+        self._safe(sy + box_h - 1, sx, "└", bdr)
+        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+
+        # Session info
+        self._safe(sy + 1, sx + 2, f"Session: {slabel}"[:box_w - 4], dim)
+
+        # Profile list
+        scroll = 0
+        if self.qprof_cur >= scroll + list_h:
+            scroll = self.qprof_cur - list_h + 1
+        if self.qprof_cur < scroll:
+            scroll = self.qprof_cur
+
+        for i in range(list_h):
+            idx = scroll + i
+            if idx >= len(profiles):
+                break
+            p = profiles[idx]
+            is_sel = (idx == self.qprof_cur)
+            y = sy + 3 + i
+            name = p.get("name", "?")
+            summary = self._profile_summary(p)
+            num = str(idx + 1) if idx < 9 else " "
+
+            if is_sel:
+                line = f" ▸ {num} {name:<15s} {summary}"
+                line = line.ljust(box_w - 3)[:box_w - 3]
+                self._safe(y, sx + 1, line, sel_attr)
+            else:
+                self._safe(y, sx + 1, f"   {num} ", dim)
+                self._safe(y, sx + 6, name, tag_attr)
+                self._safe(y, sx + 6 + 15 + 1, summary[:box_w - 24],
+                           curses.color_pair(CP_DIM))
+
+        # Delete confirmation
+        if self.qprof_delete_confirm and profiles:
+            pname = profiles[self.qprof_cur].get("name", "?")
+            warn = curses.color_pair(CP_WARN) | curses.A_BOLD
+            self._safe(sy + box_h - 3, sx + 3,
+                       f"Delete '{pname}'? y/N", warn)
+
+        # Hints
+        hints = " 1-9 quick pick · ⏎ Launch · d Delete · Esc Cancel "
+        self._safe(sy + box_h - 2, sx + max(1, (box_w - len(hints)) // 2),
+                   hints[:box_w - 3], dim)
+
     def _draw_footer(self, y: int, w: int):
         if self.status:
             self._safe(y, 1, f" {self.status} ",
@@ -1227,7 +1315,7 @@ class CCSApp:
                        curses.color_pair(CP_DIM) | curses.A_DIM)
 
         # Show mode indicator
-        if self.mode not in ("normal", "help", "delete", "delete_empty", "launch", "profiles", "profile_edit"):
+        if self.mode not in ("normal", "help", "delete", "delete_empty", "launch", "profiles", "profile_edit", "quick_profile"):
             mode_label = f" [{self.mode.upper()}] "
             mx = (w - len(mode_label)) // 2
             self._safe(y, mx, mode_label,
@@ -1267,6 +1355,7 @@ class CCSApp:
             "launch": self._input_launch,
             "profiles": self._input_profiles,
             "profile_edit": self._input_profile_edit,
+            "quick_profile": self._input_quick_profile,
             "help": self._input_help,
         }
         handler = dispatch.get(self.mode, self._input_normal)
@@ -1322,6 +1411,15 @@ class CCSApp:
                 self.launch_profile_idx = 0
                 self.launch_save_name = ""
                 self.mode = "launch"
+        elif k == ord("O"):
+            if self.filtered:
+                profiles = self.mgr.load_profiles()
+                if not profiles:
+                    self._set_status("No profiles yet — press P to create one")
+                else:
+                    self.launch_session = self.filtered[self.cur]
+                    self.qprof_cur = 0
+                    self.mode = "quick_profile"
         elif k == ord("p"):
             if self.filtered:
                 s = self.filtered[self.cur]
@@ -1622,7 +1720,11 @@ class CCSApp:
 
         elif k == ord("d"):
             if profiles:
-                self.prof_delete_confirm = True
+                pname = profiles[self.prof_cur].get("name", "")
+                if pname.lower() == "default":
+                    self._set_status("Cannot delete the default profile")
+                else:
+                    self.prof_delete_confirm = True
 
         return None
 
@@ -1728,6 +1830,56 @@ class CCSApp:
                 self.prof_cur = i
                 break
 
+    def _input_quick_profile(self, k: int) -> Optional[str]:
+        profiles = self.mgr.load_profiles()
+        if not profiles:
+            self.mode = "normal"
+            return None
+
+        # Delete confirmation sub-mode
+        if self.qprof_delete_confirm:
+            if k == ord("y") and profiles:
+                p = profiles[self.qprof_cur]
+                pname = p.get("name", "")
+                if pname.lower() == "default":
+                    self._set_status("Cannot delete the default profile")
+                else:
+                    self.mgr.delete_profile(pname)
+                    self._set_status(f"Deleted profile: {pname}")
+                    profiles = self.mgr.load_profiles()
+                    if self.qprof_cur >= len(profiles):
+                        self.qprof_cur = max(0, len(profiles) - 1)
+                    if not profiles:
+                        self.mode = "normal"
+            self.qprof_delete_confirm = False
+            return None
+
+        if k == 27:  # Esc
+            self.mode = "normal"
+        elif k in (curses.KEY_UP, ord("k")):
+            self.qprof_cur = max(0, self.qprof_cur - 1)
+        elif k in (curses.KEY_DOWN, ord("j")):
+            self.qprof_cur = min(len(profiles) - 1, self.qprof_cur + 1)
+        elif k == ord("d"):
+            if profiles:
+                p = profiles[self.qprof_cur]
+                if p.get("name", "").lower() == "default":
+                    self._set_status("Cannot delete the default profile")
+                else:
+                    self.qprof_delete_confirm = True
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            # Launch with the selected profile
+            profile = profiles[self.qprof_cur]
+            self._launch_apply_profile(profile)
+            return self._do_launch()
+        elif ord("1") <= k <= ord("9"):
+            # Number keys for instant selection
+            idx = k - ord("1")
+            if idx < len(profiles):
+                self._launch_apply_profile(profiles[idx])
+                return self._do_launch()
+        return None
+
     def _input_help(self, k: int) -> Optional[str]:
         # Any key closes the help overlay
         self.mode = "normal"
@@ -1760,6 +1912,7 @@ def cmd_help():
   \033[36m↑/↓\033[0m or \033[36mj/k\033[0m       Navigate sessions
   \033[36mEnter\033[0m             Resume selected session
   \033[36mo\033[0m                 Resume with options / profiles
+  \033[36mO\033[0m                 Quick launch with a profile
   \033[36mp\033[0m                 Toggle pin (pinned sort to top)
   \033[36mt\033[0m                 Tag a session
   \033[36mT\033[0m                 Remove tag from session
