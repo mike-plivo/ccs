@@ -218,6 +218,10 @@ class Session:
             return (tier, self.label.lower(), -self.mtime)
         elif sort_mode == "project":
             return (tier, self.project_display.lower(), -self.mtime)
+        elif sort_mode == "messages":
+            return (tier, -self.msg_count, -self.mtime)
+        elif sort_mode == "tag":
+            return (tier, 0 if self.tag else 1, (self.tag or "").lower(), -self.mtime)
         return (tier, -self.mtime)
 
 
@@ -679,13 +683,21 @@ class CCSApp:
 
     def _refresh(self, force: bool = False):
         self.sessions = self.mgr.scan(self.sort_mode, force=force)
-        self._apply_filter()
         if HAS_TMUX:
             alive = self.mgr.tmux_sessions()
             self.tmux_sids = {info.get("session_id"): name
                               for name, info in alive.items()}
         else:
             self.tmux_sids = {}
+        # Re-sort for tmux mode (needs tmux_sids populated first)
+        if self.sort_mode == "tmux":
+            sids = self.tmux_sids
+            self.sessions.sort(key=lambda s: (
+                0 if s.pinned else 1,
+                0 if s.id in sids else 1,
+                -s.mtime,
+            ))
+        self._apply_filter()
 
     def _apply_filter(self):
         if not self.query:
@@ -889,7 +901,8 @@ class CCSApp:
         else:
             n = len(self.filtered)
             total = len(self.sessions)
-            labels = {"date": "Date", "name": "Name", "project": "Project"}
+            labels = {"date": "Date", "name": "Name", "project": "Project",
+                      "tag": "Tag", "messages": "Messages", "tmux": "Tmux"}
             sort_label = labels.get(self.sort_mode, "Date")
             if n < total:
                 info = f" {n}/{total} sessions · Sort: {sort_label}"
@@ -1956,11 +1969,12 @@ class CCSApp:
             else:
                 self._set_status("No sessions to resume")
         elif k == ord("s"):
-            modes = ["date", "name", "project"]
+            modes = ["date", "name", "project", "tag", "messages", "tmux"]
             idx = modes.index(self.sort_mode) if self.sort_mode in modes else 0
             self.sort_mode = modes[(idx + 1) % len(modes)]
             self._refresh()
-            labels = {"date": "Date", "name": "Name", "project": "Project"}
+            labels = {"date": "Date", "name": "Name", "project": "Project",
+                      "tag": "Tag", "messages": "Messages", "tmux": "Tmux"}
             self._set_status(f"Sort: {labels[self.sort_mode]}")
         elif k in (ord("r"), curses.KEY_F5):
             self._refresh(force=True)
