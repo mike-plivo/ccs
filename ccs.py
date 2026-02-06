@@ -1047,8 +1047,8 @@ class CCSApp:
         else:
             msg_str = "      "
 
-        # Pin/tmux indicator (3 display-cols: ⚡/💤 are 2 cols wide)
-        tmux_ch = "💤" if is_idle else "⚡"
+        # Pin/tmux indicator (3 display-cols: ⚡/😴 are 2 cols wide)
+        tmux_ch = "😴" if is_idle else "⚡"
         if s.pinned and has_tmux:
             pin_str = f"★{tmux_ch}"   # 1 + 2 = 3 cols
         elif s.pinned:
@@ -1174,7 +1174,7 @@ class CCSApp:
         if s.id in self.tmux_sids:
             tmux_name = self.tmux_sids[s.id]
             if s.id in self.tmux_idle:
-                lines.append((f"  Tmux:    💤 {tmux_name} idle (K to kill)",
+                lines.append((f"  Tmux:    😴 {tmux_name} idle (K to kill)",
                                curses.color_pair(CP_DIM)))
             else:
                 lines.append((f"  Tmux:    ⚡ {tmux_name} (K to kill)",
