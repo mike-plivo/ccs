@@ -12,6 +12,7 @@ Usage:
     ccs tmp                                Ephemeral session
     ccs pin/unpin <id|tag>                 Pin/unpin a session
     ccs tag <id|tag> <tag>                 Set tag on session
+    ccs tag rename <oldtag> <newtag>       Rename a tag
     ccs untag <id|tag>                     Remove tag
     ccs chdir <id|tag> <path>              Set session working directory
     ccs delete <id|tag>                    Delete a session
@@ -20,6 +21,10 @@ Usage:
     ccs export <id|tag>                    Export session as markdown
     ccs profile list|set|new|delete        Manage profiles
     ccs theme list|set                     Manage themes
+    ccs tmux list                          List running tmux sessions
+    ccs tmux attach <name>                 Attach to tmux session
+    ccs tmux kill <name>                   Kill a tmux session
+    ccs tmux kill --all                    Kill all tmux sessions
     ccs help                               Show help
 """
 
@@ -32,6 +37,7 @@ import getpass
 import signal
 import subprocess
 import sys
+import shlex
 import shutil
 import time
 import uuid as uuid_mod
@@ -51,6 +57,10 @@ EPHEMERAL_FILE = CCS_DIR / "ephemeral_sessions.txt"
 PROFILES_FILE = CCS_DIR / "ccs_profiles.json"
 ACTIVE_PROFILE_FILE = CCS_DIR / "ccs_active_profile.txt"
 THEME_FILE = CCS_DIR / "ccs_theme.txt"
+CACHE_FILE = CCS_DIR / "session_cache.json"
+TMUX_FILE = CCS_DIR / "tmux_sessions.json"
+HAS_TMUX = shutil.which("tmux") is not None
+TMUX_PREFIX = "ccs-"
 
 # ── Color pair IDs ────────────────────────────────────────────────────
 
@@ -157,6 +167,7 @@ ROW_MCP = "mcp"
 ROW_CUSTOM = "custom"
 ROW_PROF_NAME = "prof_name"
 ROW_EXPERT = "expert"
+ROW_TMUX = "tmux"
 ROW_PROF_SAVE = "prof_save"
 
 # ── Data ──────────────────────────────────────────────────────────────
@@ -263,46 +274,73 @@ class SessionManager:
                 return c
         return ""
 
-    def scan(self, sort_mode: str = "date") -> List[Session]:
+    def scan(self, sort_mode: str = "date", force: bool = False) -> List[Session]:
         tags = self._load(TAGS_FILE, {})
         pins = set(self._load(PINS_FILE, []))
         cwd_overrides = self._load(CWDS_FILE, {})
+        cache = {} if force else self._load(CACHE_FILE, {})
         out: List[Session] = []
+        seen_sids: set = set()
         pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
 
         for jp in glob.glob(pattern):
             sid = os.path.basename(jp).replace(".jsonl", "")
+            seen_sids.add(sid)
             praw = os.path.basename(os.path.dirname(jp))
             pdisp = self._decode_proj(praw)
             tag = tags.get(sid, "")
             pinned = sid in pins
-            summary, fm, fm_long, cwd = "", "", "", ""
-            sums: List[str] = []
-            msg_count = 0
+            file_mtime = os.path.getmtime(jp)
 
-            try:
-                with open(jp, "r", errors="replace") as f:
-                    for ln in f:
-                        try:
-                            d = json.loads(ln)
-                        except Exception:
-                            continue
-                        msg_type = d.get("type")
-                        if msg_type == "summary":
-                            s = d.get("summary", "")
-                            if s:
-                                sums.append(s)
-                                summary = s
-                        elif msg_type in ("user", "assistant"):
-                            msg_count += 1
-                            if msg_type == "user" and not fm:
-                                cwd = d.get("cwd", "")
-                                txt = self._extract_text(d.get("message", {}))
-                                if txt:
-                                    fm = txt[:120].replace("\n", " ").replace("\t", " ")
-                                    fm_long = txt[:800]
-            except Exception:
-                pass
+            # Check cache
+            cached = cache.get(sid)
+            if cached and cached.get("mtime") == file_mtime:
+                summary = cached.get("summary", "")
+                fm = cached.get("first_msg", "")
+                fm_long = cached.get("first_msg_long", "")
+                cwd = cached.get("cwd", "")
+                sums = cached.get("summaries", [])
+                msg_count = cached.get("msg_count", 0)
+                praw = cached.get("project_raw", praw)
+                pdisp = cached.get("project_display", pdisp)
+            else:
+                summary, fm, fm_long, cwd = "", "", "", ""
+                sums: List[str] = []
+                msg_count = 0
+                try:
+                    with open(jp, "r", errors="replace") as f:
+                        for ln in f:
+                            try:
+                                d = json.loads(ln)
+                            except Exception:
+                                continue
+                            msg_type = d.get("type")
+                            if msg_type == "summary":
+                                s = d.get("summary", "")
+                                if s:
+                                    sums.append(s)
+                                    summary = s
+                            elif msg_type in ("user", "assistant"):
+                                msg_count += 1
+                                if msg_type == "user" and not fm:
+                                    cwd = d.get("cwd", "")
+                                    txt = self._extract_text(d.get("message", {}))
+                                    if txt:
+                                        fm = txt[:120].replace("\n", " ").replace("\t", " ")
+                                        fm_long = txt[:800]
+                except Exception:
+                    pass
+                cache[sid] = {
+                    "mtime": file_mtime,
+                    "summary": summary,
+                    "first_msg": fm,
+                    "first_msg_long": fm_long,
+                    "cwd": cwd,
+                    "msg_count": msg_count,
+                    "summaries": sums,
+                    "project_raw": praw,
+                    "project_display": pdisp,
+                }
 
             if sid in cwd_overrides:
                 cwd = cwd_overrides[sid]
@@ -311,9 +349,16 @@ class SessionManager:
                 id=sid, project_raw=praw, project_display=pdisp,
                 cwd=cwd, summary=summary, first_msg=fm,
                 first_msg_long=fm_long, tag=tag, pinned=pinned,
-                mtime=os.path.getmtime(jp), summaries=sums, path=jp,
+                mtime=file_mtime, summaries=sums, path=jp,
                 msg_count=msg_count,
             ))
+
+        # Prune cache entries for sessions no longer on disk
+        pruned = {k: v for k, v in cache.items() if k in seen_sids}
+        try:
+            self._save(CACHE_FILE, pruned)
+        except Exception:
+            pass
 
         out.sort(key=lambda s: s.get_sort_key(sort_mode))
         return out
@@ -427,6 +472,34 @@ class SessionManager:
     def save_theme(self, name: str):
         THEME_FILE.write_text(name)
 
+    # ── Tmux session tracking ────────────────────────────────────
+
+    def tmux_sessions(self) -> dict:
+        """Load tracked ccs tmux sessions, prune dead ones."""
+        if not HAS_TMUX:
+            return {}
+        data = self._load(TMUX_FILE, {})
+        alive = {}
+        for name, info in data.items():
+            rc = subprocess.run(["tmux", "has-session", "-t", name],
+                                capture_output=True).returncode
+            if rc == 0:
+                alive[name] = info
+        if len(alive) != len(data):
+            self._save(TMUX_FILE, alive)
+        return alive
+
+    def tmux_register(self, tmux_name: str, session_id: str, profile: str):
+        data = self._load(TMUX_FILE, {})
+        data[tmux_name] = {"session_id": session_id, "profile": profile,
+                           "launched": datetime.datetime.now().isoformat()}
+        self._save(TMUX_FILE, data)
+
+    def tmux_unregister(self, tmux_name: str):
+        data = self._load(TMUX_FILE, {})
+        data.pop(tmux_name, None)
+        self._save(TMUX_FILE, data)
+
     def purge_ephemeral(self):
         if not EPHEMERAL_FILE.exists():
             return
@@ -486,6 +559,7 @@ class CCSApp:
         self.launch_mcp = ""
         self.launch_custom = ""
         self.launch_expert_args = ""  # raw CLI args for expert mode
+        self.launch_tmux = True  # tmux launch mode toggle
         self.launch_editing: Optional[str] = None  # which text field is active
 
         # Profile manager state
@@ -496,6 +570,12 @@ class CCSApp:
         self.prof_editing_existing: Optional[str] = None  # original name if editing
         self.prof_expert_mode = False  # True = expert (raw CLI), False = structured
         self.prof_delete_confirm = False
+
+        # View system
+        self.view = "sessions"  # "sessions" | "tmux"
+        self.tmux_data: dict = {}  # loaded tmux session data
+        self.tmux_cur = 0  # cursor in tmux view
+        self.tmux_list: list = []  # sorted list of (name, info) for display
 
         self.status = ""
         self.status_ttl = 0
@@ -542,7 +622,7 @@ class CCSApp:
 
     def _get_page_size(self) -> int:
         h, _ = self.scr.getmaxyx()
-        hdr_h, ftr_h, sep_h = 4, 1, 1
+        hdr_h, ftr_h, sep_h = 5, 1, 1
         preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
         return max(1, h - hdr_h - ftr_h - sep_h - preview_h)
 
@@ -553,8 +633,10 @@ class CCSApp:
             return None
         if self.mode != "normal":
             return None
+        if self.view != "sessions":
+            return None
         h, w = self.scr.getmaxyx()
-        hdr_h = 4
+        hdr_h = 5
         ftr_h = 1
         sep_h = 1
         preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
@@ -573,6 +655,20 @@ class CCSApp:
                         None,
                     )
                     extra = self._build_args_from_profile(active) if active else []
+                    use_tmux = active.get("tmux", True) if active else True
+                    if use_tmux:
+                        if not HAS_TMUX:
+                            self._set_status("tmux is not installed — install it or disable in profile")
+                            return None
+                        if s.cwd and not os.path.isdir(s.cwd):
+                            self.chdir_pending = ("resume", s.id, s.cwd, extra)
+                            self.mode = "chdir"
+                            self.ibuf = str(Path.home())
+                            self._set_status(f"Directory missing: {s.cwd}")
+                            return None
+                        self._tmux_launch(s, extra)
+                        self._refresh()
+                        return None
                     if s.cwd and not os.path.isdir(s.cwd):
                         self.chdir_pending = ("resume", s.id, s.cwd, extra)
                         self.mode = "chdir"
@@ -590,8 +686,8 @@ class CCSApp:
                 self.cur = min(len(self.filtered) - 1, self.cur + 3)
         return None
 
-    def _refresh(self):
-        self.sessions = self.mgr.scan(self.sort_mode)
+    def _refresh(self, force: bool = False):
+        self.sessions = self.mgr.scan(self.sort_mode, force=force)
         self._apply_filter()
 
     def _apply_filter(self):
@@ -611,6 +707,17 @@ class CCSApp:
             self.cur = max(0, len(self.filtered) - 1)
         valid_ids = {s.id for s in self.filtered}
         self.marked &= valid_ids
+
+    def _refresh_tmux(self):
+        if HAS_TMUX:
+            self.tmux_data = self.mgr.tmux_sessions()
+            self.tmux_list = sorted(self.tmux_data.items(),
+                                    key=lambda x: x[1].get("launched", ""))
+            if self.tmux_cur >= len(self.tmux_list):
+                self.tmux_cur = max(0, len(self.tmux_list) - 1)
+        else:
+            self.tmux_data = {}
+            self.tmux_list = []
 
     def _set_status(self, msg: str, ttl: int = 30):
         self.status = msg
@@ -692,16 +799,23 @@ class CCSApp:
             return
 
         # Layout allocation
-        hdr_h = 4       # header box + input line
+        hdr_h = 5       # header box + input line + tab bar
         ftr_h = 1       # footer / status bar
         sep_h = 1       # separator between list and preview
         preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
         list_h = h - hdr_h - ftr_h - sep_h - preview_h
 
         self._draw_header(w)
-        self._draw_list(hdr_h, list_h, w)
-        self._draw_separator(hdr_h + list_h, w)
-        self._draw_preview(hdr_h + list_h + sep_h, preview_h, w)
+        self._draw_tab_bar(4, w)
+
+        if self.view == "sessions":
+            self._draw_list(hdr_h, list_h, w)
+            self._draw_separator(hdr_h + list_h, w)
+            self._draw_preview(hdr_h + list_h + sep_h, preview_h, w)
+        elif self.view == "tmux":
+            self._draw_tmux_list(hdr_h, list_h, w)
+            self._draw_separator(hdr_h + list_h, w)
+            self._draw_tmux_preview(hdr_h + list_h + sep_h, preview_h, w)
         self._draw_footer(h - ftr_h, w)
 
         if self.mode == "quit":
@@ -749,7 +863,7 @@ class CCSApp:
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
         hints_map = {
-            "normal":  "⏎ Resume  R Last  s Sort  Space Mark  c CWD  P Profiles  d Del  n New  / Search  ? Help  q Quit",
+            "normal":  "⏎ Resume  R Last  Tab Tmux  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
@@ -931,6 +1045,107 @@ class CCSApp:
             # Description
             self._safe(y, x + 1, desc, curses.color_pair(CP_NORMAL))
 
+    def _draw_tab_bar(self, y: int, w: int):
+        """Draw view tabs: [Sessions] [Tmux (N)]."""
+        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        tmux_count = len(self.tmux_list)
+        sess_label = " Sessions "
+        tmux_label = f" Tmux ({tmux_count}) "
+        sess_attr = sel_attr if self.view == "sessions" else dim
+        tmux_attr = sel_attr if self.view == "tmux" else dim
+        x = 2
+        self._safe(y, x, sess_label, sess_attr)
+        x += len(sess_label) + 1
+        self._safe(y, x, tmux_label, tmux_attr)
+        x += len(tmux_label) + 1
+        hint = "Tab: switch view"
+        self._safe(y, x + 1, hint, curses.color_pair(CP_DIM) | curses.A_DIM)
+
+    def _draw_tmux_list(self, sy: int, height: int, w: int):
+        """Draw the list of tracked tmux sessions."""
+        if not self.tmux_list:
+            if not HAS_TMUX:
+                msg = "tmux is not installed."
+                self._safe(sy + height // 2, max(1, (w - len(msg)) // 2),
+                           msg, curses.color_pair(CP_WARN) | curses.A_BOLD)
+                hint = "Install tmux or set profile to direct mode."
+                self._safe(sy + height // 2 + 1, max(1, (w - len(hint)) // 2),
+                           hint, curses.color_pair(CP_DIM) | curses.A_DIM)
+            else:
+                msg = "No active tmux sessions."
+                self._safe(sy + height // 2, max(1, (w - len(msg)) // 2),
+                           msg, curses.color_pair(CP_DIM) | curses.A_DIM)
+                hint = "Launch a session with Enter to start one."
+                self._safe(sy + height // 2 + 1, max(1, (w - len(hint)) // 2),
+                           hint, curses.color_pair(CP_DIM) | curses.A_DIM)
+            return
+
+        # Scroll handling
+        tmux_scroll = 0
+        if self.tmux_cur < tmux_scroll:
+            tmux_scroll = self.tmux_cur
+        if self.tmux_cur >= tmux_scroll + height:
+            tmux_scroll = self.tmux_cur - height + 1
+
+        for i in range(height):
+            idx = tmux_scroll + i
+            if idx >= len(self.tmux_list):
+                break
+            name, info = self.tmux_list[idx]
+            sel = (idx == self.tmux_cur)
+            sid = info.get("session_id", "")[:12]
+            profile = info.get("profile", "")
+            launched = info.get("launched", "")[:16]
+
+            ind = " ▸ " if sel else "   "
+            line = f"{ind}{name:<20s}  {sid:<14s}  {profile:<16s}  {launched}"
+            if len(line) < w - 1:
+                line += " " * (w - 1 - len(line))
+            line = line[:w - 1]
+
+            if sel:
+                self._safe(sy + i, 0, line,
+                           curses.color_pair(CP_SELECTED) | curses.A_BOLD)
+            else:
+                self._safe(sy + i, 0, ind, curses.color_pair(CP_NORMAL))
+                x = len(ind)
+                self._safe(sy + i, x, name[:20].ljust(20),
+                           curses.color_pair(CP_TAG) | curses.A_BOLD)
+                x += 22
+                self._safe(sy + i, x, sid.ljust(14),
+                           curses.color_pair(CP_DIM) | curses.A_DIM)
+                x += 16
+                self._safe(sy + i, x, profile[:16].ljust(16),
+                           curses.color_pair(CP_PROJECT))
+                x += 18
+                self._safe(sy + i, x, launched,
+                           curses.color_pair(CP_DIM) | curses.A_DIM)
+
+    def _draw_tmux_preview(self, sy: int, h: int, w: int):
+        """Show details of selected tmux session."""
+        if not self.tmux_list:
+            self._safe(sy + 1, 3, "No tmux session selected",
+                       curses.color_pair(CP_DIM) | curses.A_DIM)
+            return
+
+        name, info = self.tmux_list[self.tmux_cur]
+        lines: List[Tuple[str, int]] = []
+        lines.append((f"  Tmux name: {name}",
+                       curses.color_pair(CP_TAG) | curses.A_BOLD))
+        lines.append((f"  Session:   {info.get('session_id', 'N/A')}",
+                       curses.color_pair(CP_DIM) | curses.A_DIM))
+        lines.append((f"  Profile:   {info.get('profile', 'N/A')}",
+                       curses.color_pair(CP_PROJECT)))
+        lines.append((f"  Launched:  {info.get('launched', 'N/A')}",
+                       curses.color_pair(CP_ACCENT)))
+        lines.append(("", 0))
+        lines.append(("  Press Enter to attach, x to kill",
+                       curses.color_pair(CP_DIM) | curses.A_DIM))
+
+        for i, (text, attr) in enumerate(lines[:h]):
+            self._safe(sy + i, 0, text[:w - 1], attr)
+
     def _draw_separator(self, y: int, w: int):
         bdr = curses.color_pair(CP_BORDER)
         self._safe(y, 0, "├", bdr)
@@ -1023,6 +1238,11 @@ class CCSApp:
             ("  Sessions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    n              Create a new named session", 0),
             ("    e              Start an ephemeral session", 0),
+            ("", 0),
+            ("  Tmux View", curses.color_pair(CP_HEADER) | curses.A_BOLD),
+            ("    Tab            Switch Sessions / Tmux view", 0),
+            ("    Enter          Attach to tmux session", 0),
+            ("    x              Kill tmux session", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
@@ -1161,6 +1381,7 @@ class CCSApp:
         self.launch_mcp = profile.get("mcp_config", "")
         self.launch_custom = profile.get("custom_args", "")
         self.launch_expert_args = profile.get("expert_args", "")
+        self.launch_tmux = profile.get("tmux", True)
 
     def _launch_to_profile_dict(self, name: str) -> dict:
         """Serialize current launch state to a profile dict."""
@@ -1171,6 +1392,7 @@ class CCSApp:
                 "system_prompt": "", "tools": "", "mcp_config": "",
                 "custom_args": "",
                 "expert_args": self.launch_expert_args,
+                "tmux": self.launch_tmux,
             }
         flags = [TOGGLE_FLAGS[i][1] for i, v in enumerate(self.launch_toggles) if v]
         return {
@@ -1183,6 +1405,7 @@ class CCSApp:
             "mcp_config": self.launch_mcp,
             "custom_args": self.launch_custom,
             "expert_args": "",
+            "tmux": self.launch_tmux,
         }
 
     @staticmethod
@@ -1215,11 +1438,12 @@ class CCSApp:
     @staticmethod
     def _profile_summary(p: dict) -> str:
         """One-line summary of a profile's settings."""
+        tmux_label = "[tmux]" if p.get("tmux", True) else "[direct]"
         expert = p.get("expert_args", "").strip()
         if expert:
             label = expert[:50] + ("..." if len(expert) > 50 else "")
-            return f"[expert] {label}"
-        parts: List[str] = []
+            return f"{tmux_label} [expert] {label}"
+        parts: List[str] = [tmux_label]
         model = p.get("model", "")
         for name, mid in MODELS:
             if mid == model and name != "default":
@@ -1323,6 +1547,7 @@ class CCSApp:
     def _build_profile_edit_rows(self) -> List[Tuple[str, int]]:
         rows: List[Tuple[str, int]] = []
         rows.append((ROW_PROF_NAME, 0))
+        rows.append((ROW_TMUX, 0))
         if self.prof_expert_mode:
             rows.append((ROW_EXPERT, 0))
         else:
@@ -1372,6 +1597,9 @@ class CCSApp:
                 cursor = "▏" if editing else ""
                 display.append((f"{prefix}Name: {self.prof_edit_name}{cursor}",
                                 accent if is_sel(ri) else tag_attr))
+            elif rtype == ROW_TMUX:
+                display.append((f"{prefix}Launch mode:  {cb(self.launch_tmux)} tmux"
+                                f"   {cb(not self.launch_tmux)} direct", a))
             elif rtype == ROW_EXPERT:
                 editing = self.launch_editing == ROW_EXPERT
                 cursor = "▏" if editing else ""
@@ -1479,6 +1707,72 @@ class CCSApp:
             self._safe(y, mx, mode_label,
                        curses.color_pair(CP_INPUT) | curses.A_BOLD)
 
+    # ── Tmux launch helpers ────────────────────────────────────────
+
+    def _tmux_attach(self, tmux_name: str):
+        curses.endwin()
+        os.system(f"tmux attach-session -t {shlex.quote(tmux_name)}")
+        self.scr.refresh()
+        curses.doupdate()
+        self._refresh_tmux()
+
+    def _tmux_launch(self, s: Session, extra: List[str]):
+        tmux_name = TMUX_PREFIX + s.id[:8]
+        # Check if already running
+        existing = self.mgr.tmux_sessions()
+        if tmux_name in existing:
+            self._tmux_attach(tmux_name)
+            return
+        # Build claude command
+        cmd_parts = ["claude", "--resume", s.id] + extra
+        cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        if s.cwd and os.path.isdir(s.cwd):
+            full_cmd = f"cd {shlex.quote(s.cwd)} && {cmd_str}"
+        else:
+            full_cmd = cmd_str
+        subprocess.run(["tmux", "new-session", "-d", "-s", tmux_name,
+                        "-x", "200", "-y", "50",
+                        "bash", "-c", full_cmd])
+        self.mgr.tmux_register(tmux_name, s.id, self.active_profile_name)
+        self._tmux_attach(tmux_name)
+
+    def _tmux_launch_new(self, name: str, extra: List[str]):
+        uid = str(uuid_mod.uuid4())
+        tmux_name = TMUX_PREFIX + uid[:8]
+        # Tag the new session
+        tags = self.mgr._load(TAGS_FILE, {})
+        tags[uid] = name
+        self.mgr._save(TAGS_FILE, tags)
+        cmd_parts = ["claude", "--session-id", uid] + extra
+        cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        subprocess.run(["tmux", "new-session", "-d", "-s", tmux_name,
+                        "-x", "200", "-y", "50",
+                        "bash", "-c", cmd_str])
+        self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
+        self._tmux_attach(tmux_name)
+
+    def _tmux_launch_ephemeral(self, extra: List[str]):
+        uid = str(uuid_mod.uuid4())
+        tmux_name = TMUX_PREFIX + uid[:8]
+        with open(EPHEMERAL_FILE, "a") as f:
+            f.write(uid + "\n")
+        cmd_parts = ["claude", "--session-id", uid] + extra
+        cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        subprocess.run(["tmux", "new-session", "-d", "-s", tmux_name,
+                        "-x", "200", "-y", "50",
+                        "bash", "-c", cmd_str])
+        self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
+        self._tmux_attach(tmux_name)
+
+    def _get_use_tmux(self) -> bool:
+        """Check if the active profile wants tmux launch."""
+        profiles = self.mgr.load_profiles()
+        active = next(
+            (p for p in profiles if p.get("name") == self.active_profile_name),
+            None,
+        )
+        return active.get("tmux", True) if active else True
+
     # ── Text wrapping ─────────────────────────────────────────────
 
     @staticmethod
@@ -1520,11 +1814,15 @@ class CCSApp:
         return handler(k)
 
     def _input_normal(self, k: int) -> Optional[str]:
+        # ── Global keys (work in both views) ──────────────────
         if k == ord("q"):
             self.confirm_sel = 0
             self.mode = "quit"
             return None
         elif k == 27:  # Esc
+            if self.view == "tmux":
+                self.view = "sessions"
+                return None
             if self.query:
                 self.query = ""
                 self._apply_filter()
@@ -1532,9 +1830,37 @@ class CCSApp:
                 self.confirm_sel = 0
                 self.mode = "quit"
                 return None
+        elif k == 9:  # Tab — switch view
+            if self.view == "sessions":
+                self.view = "tmux"
+                self._refresh_tmux()
+            else:
+                self.view = "sessions"
+            return None
+        elif k == ord("?"):
+            self.mode = "help"
+            return None
+        elif k == ord("P"):
+            self.prof_cur = 0
+            self.prof_delete_confirm = False
+            self.mode = "profiles"
+            return None
+        elif k == ord("H"):
+            idx = THEME_NAMES.index(self.active_theme) if self.active_theme in THEME_NAMES else 0
+            idx = (idx + 1) % len(THEME_NAMES)
+            self._apply_theme(THEME_NAMES[idx])
+            self.mgr.save_theme(self.active_theme)
+            self._set_status(f"Theme: {self.active_theme}")
+            return None
+
+        # ── Tmux view input ───────────────────────────────────
+        if self.view == "tmux":
+            return self._input_tmux(k)
+
+        # ── Sessions view input ───────────────────────────────
 
         # Navigation
-        elif k in (curses.KEY_UP, ord("k")):
+        if k in (curses.KEY_UP, ord("k")):
             self.cur = max(0, self.cur - 1)
         elif k in (curses.KEY_DOWN, ord("j")):
             if self.filtered:
@@ -1565,14 +1891,29 @@ class CCSApp:
                     None,
                 )
                 extra = self._build_args_from_profile(active) if active else []
-                if s.cwd and not os.path.isdir(s.cwd):
-                    self.chdir_pending = ("resume", s.id, s.cwd, extra)
-                    self.mode = "chdir"
-                    self.ibuf = str(Path.home())
-                    self._set_status(f"Directory missing: {s.cwd}")
+                use_tmux = active.get("tmux", True) if active else True
+
+                if use_tmux:
+                    if not HAS_TMUX:
+                        self._set_status("tmux is not installed — install it or disable in profile")
+                        return None
+                    if s.cwd and not os.path.isdir(s.cwd):
+                        self.chdir_pending = ("resume", s.id, s.cwd, extra)
+                        self.mode = "chdir"
+                        self.ibuf = str(Path.home())
+                        self._set_status(f"Directory missing: {s.cwd}")
+                    else:
+                        self._tmux_launch(s, extra)
+                        self._refresh()
                 else:
-                    self.exit_action = ("resume", s.id, s.cwd, extra)
-                    return "action"
+                    if s.cwd and not os.path.isdir(s.cwd):
+                        self.chdir_pending = ("resume", s.id, s.cwd, extra)
+                        self.mode = "chdir"
+                        self.ibuf = str(Path.home())
+                        self._set_status(f"Directory missing: {s.cwd}")
+                    else:
+                        self.exit_action = ("resume", s.id, s.cwd, extra)
+                        return "action"
         elif k == ord(" "):
             # Toggle mark
             if self.filtered:
@@ -1642,8 +1983,22 @@ class CCSApp:
             self.mode = "new"
             self.ibuf = ""
         elif k == ord("e"):
-            self.exit_action = ("tmp",)
-            return "action"
+            use_tmux = self._get_use_tmux()
+            if use_tmux:
+                if not HAS_TMUX:
+                    self._set_status("tmux is not installed — install it or disable in profile")
+                    return None
+                profiles = self.mgr.load_profiles()
+                active = next(
+                    (p for p in profiles if p.get("name") == self.active_profile_name),
+                    None,
+                )
+                extra = self._build_args_from_profile(active) if active else []
+                self._tmux_launch_ephemeral(extra)
+                self._refresh()
+            else:
+                self.exit_action = ("tmp",)
+                return "action"
         elif k == ord("/"):
             self.mode = "search"
         elif k == ord("R"):
@@ -1656,27 +2011,31 @@ class CCSApp:
                     None,
                 )
                 extra = self._build_args_from_profile(active) if active else []
-                if most_recent.cwd and not os.path.isdir(most_recent.cwd):
-                    self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
-                    self.mode = "chdir"
-                    self.ibuf = str(Path.home())
-                    self._set_status(f"Directory missing: {most_recent.cwd}")
+                use_tmux = active.get("tmux", True) if active else True
+
+                if use_tmux:
+                    if not HAS_TMUX:
+                        self._set_status("tmux is not installed — install it or disable in profile")
+                        return None
+                    if most_recent.cwd and not os.path.isdir(most_recent.cwd):
+                        self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
+                        self.mode = "chdir"
+                        self.ibuf = str(Path.home())
+                        self._set_status(f"Directory missing: {most_recent.cwd}")
+                    else:
+                        self._tmux_launch(most_recent, extra)
+                        self._refresh()
                 else:
-                    self.exit_action = ("resume", most_recent.id, most_recent.cwd, extra)
-                    return "action"
+                    if most_recent.cwd and not os.path.isdir(most_recent.cwd):
+                        self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
+                        self.mode = "chdir"
+                        self.ibuf = str(Path.home())
+                        self._set_status(f"Directory missing: {most_recent.cwd}")
+                    else:
+                        self.exit_action = ("resume", most_recent.id, most_recent.cwd, extra)
+                        return "action"
             else:
                 self._set_status("No sessions to resume")
-        elif k == ord("P"):
-            self.prof_cur = 0
-            self.prof_delete_confirm = False
-            self.mode = "profiles"
-        elif k == ord("H"):
-            # Cycle theme
-            idx = THEME_NAMES.index(self.active_theme) if self.active_theme in THEME_NAMES else 0
-            idx = (idx + 1) % len(THEME_NAMES)
-            self._apply_theme(THEME_NAMES[idx])
-            self.mgr.save_theme(self.active_theme)
-            self._set_status(f"Theme: {self.active_theme}")
         elif k == ord("s"):
             modes = ["date", "name", "project"]
             idx = modes.index(self.sort_mode) if self.sort_mode in modes else 0
@@ -1684,12 +2043,39 @@ class CCSApp:
             self._refresh()
             labels = {"date": "Date", "name": "Name", "project": "Project"}
             self._set_status(f"Sort: {labels[self.sort_mode]}")
-        elif k == ord("?"):
-            self.mode = "help"
         elif k in (ord("r"), curses.KEY_F5):
-            self._refresh()
+            self._refresh(force=True)
             self._set_status("Refreshed session list")
 
+        return None
+
+    def _input_tmux(self, k: int) -> Optional[str]:
+        """Handle input when in tmux view."""
+        if k in (curses.KEY_UP, ord("k")):
+            self.tmux_cur = max(0, self.tmux_cur - 1)
+        elif k in (curses.KEY_DOWN, ord("j")):
+            if self.tmux_list:
+                self.tmux_cur = min(len(self.tmux_list) - 1, self.tmux_cur + 1)
+        elif k in (curses.KEY_HOME, ord("g")):
+            self.tmux_cur = 0
+        elif k == ord("G"):
+            if self.tmux_list:
+                self.tmux_cur = len(self.tmux_list) - 1
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.tmux_list:
+                name, _ = self.tmux_list[self.tmux_cur]
+                self._tmux_attach(name)
+        elif k == ord("x"):
+            if self.tmux_list:
+                name, _ = self.tmux_list[self.tmux_cur]
+                subprocess.run(["tmux", "kill-session", "-t", name],
+                               capture_output=True)
+                self.mgr.tmux_unregister(name)
+                self._set_status(f"Killed tmux session: {name}")
+                self._refresh_tmux()
+        elif k in (ord("r"), curses.KEY_F5):
+            self._refresh_tmux()
+            self._set_status("Refreshed tmux sessions")
         return None
 
     def _input_search(self, k: int) -> Optional[str]:
@@ -1769,8 +2155,25 @@ class CCSApp:
             self.mode = "normal"
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.ibuf.strip():
-                self.exit_action = ("new", self.ibuf.strip())
-                return "action"
+                name = self.ibuf.strip()
+                use_tmux = self._get_use_tmux()
+                if use_tmux:
+                    if not HAS_TMUX:
+                        self._set_status("tmux is not installed — install it or disable in profile")
+                        self.mode = "normal"
+                        return None
+                    profiles = self.mgr.load_profiles()
+                    active = next(
+                        (p for p in profiles if p.get("name") == self.active_profile_name),
+                        None,
+                    )
+                    extra = self._build_args_from_profile(active) if active else []
+                    self.mode = "normal"
+                    self._tmux_launch_new(name, extra)
+                    self._refresh()
+                else:
+                    self.exit_action = ("new", name)
+                    return "action"
             self.mode = "normal"
         elif k in (curses.KEY_BACKSPACE, 127, 8):
             self.ibuf = self.ibuf[:-1]
@@ -1797,8 +2200,19 @@ class CCSApp:
             if action_type == "resume":
                 extra = self.chdir_pending[3]
                 self.chdir_pending = None
-                self.exit_action = ("resume", sid, expanded, extra)
-                return "action"
+                use_tmux = self._get_use_tmux()
+                if use_tmux and HAS_TMUX:
+                    # Create a temporary Session to pass to _tmux_launch
+                    tmp_s = Session(id=sid, project_raw="", project_display="",
+                                   cwd=expanded, summary="", first_msg="",
+                                   first_msg_long="", tag="", pinned=False,
+                                   mtime=0.0)
+                    self._tmux_launch(tmp_s, extra)
+                    self._refresh()
+                    self.mode = "normal"
+                else:
+                    self.exit_action = ("resume", sid, expanded, extra)
+                    return "action"
             elif action_type == "set_cwd":
                 self.mgr.set_cwd(sid, expanded)
                 self._set_status(f"CWD set to: {expanded}")
@@ -1917,6 +2331,7 @@ class CCSApp:
             self.launch_mcp = ""
             self.launch_custom = ""
             self.launch_expert_args = ""
+            self.launch_tmux = True
             # Start with name field editing immediately
             self.launch_editing = ROW_PROF_NAME
 
@@ -1987,6 +2402,8 @@ class CCSApp:
             self.launch_perm_idx = (self.launch_perm_idx + 1) % len(PERMISSION_MODES)
         elif rtype == ROW_TOGGLE:
             self.launch_toggles[ridx] = not self.launch_toggles[ridx]
+        elif rtype == ROW_TMUX:
+            self.launch_tmux = not self.launch_tmux
         elif rtype in (ROW_PROF_NAME, ROW_EXPERT):
             self.launch_editing = rtype
         elif rtype in (ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
@@ -2085,6 +2502,7 @@ def cmd_help():
   ccs pin <id|tag>                       Pin a session
   ccs unpin <id|tag>                     Unpin a session
   ccs tag <id|tag> <tag>                 Set tag on session
+  ccs tag rename <oldtag> <newtag>       Rename a tag
   ccs untag <id|tag>                     Remove tag from session
   ccs chdir <id|tag> <path>              Set session working directory
   ccs delete <id|tag>                    Delete a session
@@ -2097,6 +2515,10 @@ def cmd_help():
   ccs profile delete <name>              Delete a profile
   ccs theme list                         List themes
   ccs theme set <name>                   Set theme
+  ccs tmux list                          List running tmux sessions
+  ccs tmux attach <name>                 Attach to tmux session
+  ccs tmux kill <name>                   Kill a tmux session
+  ccs tmux kill --all                    Kill all tmux sessions
   ccs help                               Show this help
 
 \033[1mProfile creation flags:\033[0m
@@ -2107,6 +2529,7 @@ def cmd_help():
   --print                                Print flag
   --continue                             Continue flag
   --no-session-persistence               No session persistence
+  --no-tmux                              Disable tmux (use direct launch)
   --system-prompt <prompt>               System prompt
   --tools <tools>                        Tools
   --mcp-config <path>                    MCP config path
@@ -2127,6 +2550,8 @@ def cmd_help():
   \033[36mn\033[0m                 New named session
   \033[36me\033[0m                 Ephemeral session
   \033[36m/\033[0m                 Search / filter
+  \033[36mTab\033[0m               Switch Sessions / Tmux view
+  \033[36mx\033[0m                 Kill tmux session (in Tmux view)
   \033[36mr\033[0m                 Refresh
   \033[36mq\033[0m                 Quit
   Mouse: click select, double-click resume, scroll navigate""")
@@ -2219,6 +2644,23 @@ def cmd_tag(mgr: SessionManager, query: str, tag: str):
         sys.exit(1)
     mgr.set_tag(s.id, tag)
     print(f"Tagged [{tag}]: {s.id[:12]}")
+
+
+def cmd_tag_rename(mgr: SessionManager, old_tag: str, new_tag: str):
+    tags = mgr._load(TAGS_FILE, {})
+    matches = [sid for sid, t in tags.items() if t == old_tag]
+    if not matches:
+        print(f"\033[31mNo session with tag '{old_tag}'\033[0m")
+        sys.exit(1)
+    if len(matches) > 1:
+        print(f"\033[31mAmbiguous: {len(matches)} sessions have tag '{old_tag}'\033[0m")
+        sys.exit(1)
+    sid = matches[0]
+    if not mgr.is_tag_unique(new_tag, sid):
+        print(f"\033[31mTag '{new_tag}' is already used by another session\033[0m")
+        sys.exit(1)
+    mgr.set_tag(sid, new_tag)
+    print(f"Renamed tag [{old_tag}] → [{new_tag}]: {sid[:12]}")
 
 
 def cmd_untag(mgr: SessionManager, query: str):
@@ -2324,7 +2766,7 @@ def cmd_profile_new(mgr: SessionManager, name: str, cli_args: List[str]):
     profile = {
         "name": name, "model": "", "permission_mode": "",
         "flags": [], "system_prompt": "", "tools": "",
-        "mcp_config": "", "custom_args": "",
+        "mcp_config": "", "custom_args": "", "tmux": True,
     }
     i = 0
     flags_list = []
@@ -2345,6 +2787,9 @@ def cmd_profile_new(mgr: SessionManager, name: str, cli_args: List[str]):
         elif a == "--mcp-config" and i + 1 < len(cli_args):
             profile["mcp_config"] = cli_args[i + 1]
             i += 2
+        elif a == "--no-tmux":
+            profile["tmux"] = False
+            i += 1
         elif a in ("--verbose", "--dangerously-skip-permissions",
                     "--print", "--continue", "--no-session-persistence"):
             flags_list.append(a)
@@ -2420,6 +2865,58 @@ def cmd_export(mgr: SessionManager, query: str):
                         print(f"## Assistant\n\n{txt}\n")
     except Exception as e:
         print(f"\n*Error reading session file: {e}*")
+
+
+def cmd_tmux_list(mgr: SessionManager):
+    sessions = mgr.tmux_sessions()
+    if not sessions:
+        print("No active ccs tmux sessions.")
+        return
+    for name, info in sorted(sessions.items(), key=lambda x: x[1].get("launched", "")):
+        sid = info.get("session_id", "")[:12]
+        profile = info.get("profile", "")
+        launched = info.get("launched", "")[:16]
+        print(f"  {name:<20s}  {sid:<14s}  {profile:<16s}  {launched}")
+
+
+def cmd_tmux_attach(mgr: SessionManager, name: str):
+    if not HAS_TMUX:
+        print("\033[31mtmux is not installed.\033[0m")
+        sys.exit(1)
+    sessions = mgr.tmux_sessions()
+    if name not in sessions:
+        print(f"\033[31mNo ccs tmux session named '{name}'.\033[0m")
+        sys.exit(1)
+    os.execvp("tmux", ["tmux", "attach-session", "-t", name])
+
+
+def cmd_tmux_kill(mgr: SessionManager, name: str):
+    if not HAS_TMUX:
+        print("\033[31mtmux is not installed.\033[0m")
+        sys.exit(1)
+    sessions = mgr.tmux_sessions()
+    if name not in sessions:
+        print(f"\033[31mNo ccs tmux session named '{name}'.\033[0m")
+        sys.exit(1)
+    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+    mgr.tmux_unregister(name)
+    print(f"Killed tmux session: {name}")
+
+
+def cmd_tmux_kill_all(mgr: SessionManager):
+    if not HAS_TMUX:
+        print("\033[31mtmux is not installed.\033[0m")
+        sys.exit(1)
+    sessions = mgr.tmux_sessions()
+    if not sessions:
+        print("No active ccs tmux sessions to kill.")
+        return
+    count = 0
+    for name in list(sessions.keys()):
+        subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+        mgr.tmux_unregister(name)
+        count += 1
+    print(f"Killed {count} tmux session{'s' if count != 1 else ''}.")
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -2510,10 +3007,16 @@ def main():
         cmd_unpin(mgr, args[1])
 
     elif verb == "tag":
-        if len(args) < 3:
-            print("\033[31mUsage: ccs tag <id|tag> <newtag>\033[0m")
+        if len(args) >= 2 and args[1] == "rename":
+            if len(args) < 4:
+                print("\033[31mUsage: ccs tag rename <oldtag> <newtag>\033[0m")
+                sys.exit(1)
+            cmd_tag_rename(mgr, args[2], args[3])
+        elif len(args) < 3:
+            print("\033[31mUsage: ccs tag <id|tag> <newtag>  |  ccs tag rename <old> <new>\033[0m")
             sys.exit(1)
-        cmd_tag(mgr, args[1], args[2])
+        else:
+            cmd_tag(mgr, args[1], args[2])
 
     elif verb == "untag":
         if len(args) < 2:
@@ -2588,6 +3091,33 @@ def main():
             cmd_theme_set(mgr, args[2])
         else:
             print(f"\033[31mUnknown theme command: {sub}\033[0m")
+            sys.exit(1)
+
+    elif verb == "tmux":
+        if not HAS_TMUX:
+            print("\033[31mtmux is not installed.\033[0m")
+            sys.exit(1)
+        if len(args) < 2:
+            print("\033[31mUsage: ccs tmux list|attach|kill\033[0m")
+            sys.exit(1)
+        sub = args[1]
+        if sub == "list":
+            cmd_tmux_list(mgr)
+        elif sub == "attach":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs tmux attach <name>\033[0m")
+                sys.exit(1)
+            cmd_tmux_attach(mgr, args[2])
+        elif sub == "kill":
+            if len(args) >= 3 and args[2] == "--all":
+                cmd_tmux_kill_all(mgr)
+            elif len(args) >= 3:
+                cmd_tmux_kill(mgr, args[2])
+            else:
+                print("\033[31mUsage: ccs tmux kill <name> | ccs tmux kill --all\033[0m")
+                sys.exit(1)
+        else:
+            print(f"\033[31mUnknown tmux command: {sub}\033[0m")
             sys.exit(1)
 
     else:
