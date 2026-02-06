@@ -385,10 +385,6 @@ class SessionManager:
     def remove_tag(self, sid: str):
         self.set_tag(sid, "")
 
-    def is_tag_unique(self, tag: str, exclude_sid: str = "") -> bool:
-        tags = self._load(TAGS_FILE, {})
-        return not any(sid != exclude_sid and t == tag for sid, t in tags.items())
-
     def set_cwd(self, sid: str, path: str):
         cwds = self._load(CWDS_FILE, {})
         if path:
@@ -2134,9 +2130,6 @@ class CCSApp:
             if self.filtered and self.ibuf.strip():
                 s = self.filtered[self.cur]
                 new_tag = self.ibuf.strip()
-                if not self.mgr.is_tag_unique(new_tag, s.id):
-                    self._set_status(f"Tag '{new_tag}' already used by another session")
-                    return None
                 self.mgr.set_tag(s.id, new_tag)
                 self._set_status(f"Tagged: [{new_tag}]")
                 self._refresh()
@@ -2675,9 +2668,6 @@ def cmd_unpin(mgr: SessionManager, query: str):
 
 def cmd_tag(mgr: SessionManager, query: str, tag: str):
     s = _find_session(mgr, query)
-    if not mgr.is_tag_unique(tag, s.id):
-        print(f"\033[31mTag '{tag}' is already used by another session\033[0m")
-        sys.exit(1)
     mgr.set_tag(s.id, tag)
     print(f"Tagged [{tag}]: {s.id[:12]}")
 
@@ -2688,15 +2678,12 @@ def cmd_tag_rename(mgr: SessionManager, old_tag: str, new_tag: str):
     if not matches:
         print(f"\033[31mNo session with tag '{old_tag}'\033[0m")
         sys.exit(1)
-    if len(matches) > 1:
-        print(f"\033[31mAmbiguous: {len(matches)} sessions have tag '{old_tag}'\033[0m")
-        sys.exit(1)
-    sid = matches[0]
-    if not mgr.is_tag_unique(new_tag, sid):
-        print(f"\033[31mTag '{new_tag}' is already used by another session\033[0m")
-        sys.exit(1)
-    mgr.set_tag(sid, new_tag)
-    print(f"Renamed tag [{old_tag}] → [{new_tag}]: {sid[:12]}")
+    for sid in matches:
+        mgr.set_tag(sid, new_tag)
+    if len(matches) == 1:
+        print(f"Renamed tag [{old_tag}] → [{new_tag}]: {matches[0][:12]}")
+    else:
+        print(f"Renamed tag [{old_tag}] → [{new_tag}] on {len(matches)} sessions")
 
 
 def cmd_untag(mgr: SessionManager, query: str):
