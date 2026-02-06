@@ -1,0 +1,2 @@
+# ccs - Claude Code Session Manager
+# No external dependencies required — uses only Python standard library.
