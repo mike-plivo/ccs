@@ -455,6 +455,7 @@ class CCSApp:
         self.status_ttl = 0
         self.exit_action: Optional[Tuple] = None
         self.last_ctrl_c: float = 0.0
+        self.confirm_sel = 0  # 0=No (default), 1=Yes — for y/n popups
 
         self._init_colors()
         self._refresh()
@@ -639,9 +640,9 @@ class CCSApp:
             "normal":  "⏎ Resume  P Profiles  H Theme  p Pin  t Tag  d Del  n New  / Search  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
-            "quit":    "y Quit  ·  n / Esc Cancel",
-            "delete":  "y Confirm  ·  n / Esc Cancel",
-            "delete_empty": "y Confirm  ·  n / Esc Cancel",
+            "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
+            "delete":  "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
+            "delete_empty": "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create  ·  Esc Cancel",
             "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
             "profile_edit": "Tab Expert/Structured  ↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
@@ -914,24 +915,33 @@ class CCSApp:
 
     def _draw_confirm_overlay(self, h: int, w: int,
                                title: str, message: str, detail: str):
-        """Draw a centered y/n confirmation popup."""
+        """Draw a centered y/n confirmation popup with arrow-selectable buttons."""
         warn = curses.color_pair(CP_WARN) | curses.A_BOLD
         bdr = curses.color_pair(CP_WARN)
         dim = curses.color_pair(CP_DIM) | curses.A_DIM
         normal = curses.color_pair(CP_NORMAL)
+        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+
+        # Button labels
+        yes_label = "  Yes  "
+        no_label = "  No   "
+        yes_a = sel_attr if self.confirm_sel == 1 else dim
+        no_a = sel_attr if self.confirm_sel == 0 else dim
 
         content_lines = [
             ("", 0),
             (f"  {message}", warn),
             ("", 0),
-            (f"  {detail}", normal),
-            ("", 0),
-            ("  y  Confirm", dim),
-            ("  N  Cancel  (default)", warn),
-            ("", 0),
         ]
+        if detail:
+            content_lines.append((f"  {detail}", normal))
+            content_lines.append(("", 0))
+        # Placeholder row for buttons (drawn separately)
+        content_lines.append(("", 0))
+        content_lines.append(("  ←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc", dim))
+        content_lines.append(("", 0))
 
-        box_w = min(max(len(message) + 6, len(detail) + 6, len(title) + 8, 40), w - 4)
+        box_w = min(max(len(message) + 6, len(detail) + 6 if detail else 0, len(title) + 8, 40), w - 4)
         box_h = len(content_lines) + 2
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
@@ -945,12 +955,25 @@ class CCSApp:
         self._safe(sy, ttx, ttl, warn)
 
         # Content rows
+        btn_row = -1
         for i in range(box_h - 2):
             y = sy + 1 + i
             self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
             if i < len(content_lines):
                 text, attr = content_lines[i]
-                self._safe(y, sx + 1, text[:box_w - 3], attr)
+                # The button placeholder row (first empty after detail)
+                if text == "" and attr == 0 and i > 2 and btn_row < 0:
+                    btn_row = y
+                else:
+                    self._safe(y, sx + 1, text[:box_w - 3], attr)
+
+        # Draw buttons on their row
+        if btn_row >= 0:
+            gap = 4
+            total_w = len(yes_label) + len(no_label) + gap
+            bx = sx + max(2, (box_w - total_w) // 2)
+            self._safe(btn_row, bx, yes_label, yes_a)
+            self._safe(btn_row, bx + len(yes_label) + gap, no_label, no_a)
 
         # Bottom border
         self._safe(sy + box_h - 1, sx, "└", bdr)
@@ -1332,6 +1355,7 @@ class CCSApp:
 
     def _input_normal(self, k: int) -> Optional[str]:
         if k == ord("q"):
+            self.confirm_sel = 0
             self.mode = "quit"
             return None
         elif k == 27:  # Esc
@@ -1339,6 +1363,7 @@ class CCSApp:
                 self.query = ""
                 self._apply_filter()
             else:
+                self.confirm_sel = 0
                 self.mode = "quit"
                 return None
 
@@ -1395,11 +1420,13 @@ class CCSApp:
             if self.filtered:
                 s = self.filtered[self.cur]
                 self.delete_label = s.tag or s.label[:40]
+                self.confirm_sel = 0
                 self.mode = "delete"
         elif k == ord("D"):
             empty = [s for s in self.sessions if not s.first_msg and not s.summary]
             if empty:
                 self.empty_count = len(empty)
+                self.confirm_sel = 0
                 self.mode = "delete_empty"
             else:
                 self._set_status("No empty sessions to delete")
@@ -1460,19 +1487,21 @@ class CCSApp:
         return None
 
     def _input_delete(self, k: int) -> Optional[str]:
-        if k == ord("y"):
+        if k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
             if self.filtered:
                 s = self.filtered[self.cur]
                 self.mgr.delete(s)
                 self._set_status(f"Deleted: {s.tag or s.id[:12]}")
                 self._refresh()
             self.mode = "normal"
-        else:
+        elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
+            self.confirm_sel = 1 - self.confirm_sel
+        elif k == ord("n") or k == 27 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 0):
             self.mode = "normal"
         return None
 
     def _input_delete_empty(self, k: int) -> Optional[str]:
-        if k == ord("y"):
+        if k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
             empty = [s for s in self.sessions if not s.first_msg and not s.summary]
             count = 0
             for s in empty:
@@ -1481,7 +1510,9 @@ class CCSApp:
             self._set_status(f"Deleted {count} empty session{'s' if count != 1 else ''}")
             self._refresh()
             self.mode = "normal"
-        else:
+        elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
+            self.confirm_sel = 1 - self.confirm_sel
+        elif k == ord("n") or k == 27 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 0):
             self.mode = "normal"
         return None
 
@@ -1526,7 +1557,8 @@ class CCSApp:
 
         # Delete confirmation sub-mode
         if self.prof_delete_confirm:
-            if k == ord("y") and profiles:
+            if (k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13)
+                                  and self.confirm_sel == 1)) and profiles:
                 pname = profiles[self.prof_cur].get("name", "")
                 self.mgr.delete_profile(pname)
                 self._set_status(f"Deleted profile: {pname}")
@@ -1536,7 +1568,11 @@ class CCSApp:
                 if self.active_profile_name == pname:
                     self.active_profile_name = "default"
                     self.mgr.save_active_profile_name("default")
-            self.prof_delete_confirm = False
+                self.prof_delete_confirm = False
+            elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
+                self.confirm_sel = 1 - self.confirm_sel
+            else:
+                self.prof_delete_confirm = False
             return None
 
         if k == 27:  # Esc
@@ -1572,6 +1608,7 @@ class CCSApp:
                 if pname.lower() == "default":
                     self._set_status("Cannot delete the default profile")
                 else:
+                    self.confirm_sel = 0
                     self.prof_delete_confirm = True
 
         return None
@@ -1694,9 +1731,12 @@ class CCSApp:
                 break
 
     def _input_quit(self, k: int) -> Optional[str]:
-        if k == ord("y"):
+        if k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
             return "quit"
-        self.mode = "normal"
+        elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
+            self.confirm_sel = 1 - self.confirm_sel
+        elif k == ord("n") or k == 27 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 0):
+            self.mode = "normal"
         return None
 
     def _input_help(self, k: int) -> Optional[str]:
