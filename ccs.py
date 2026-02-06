@@ -914,13 +914,22 @@ class CCSApp:
         if self.cur >= self.scroll + height:
             self.scroll = self.cur - height + 1
 
+        # Compute max tag width across visible rows for column alignment
+        visible = self.filtered[self.scroll:self.scroll + height]
+        max_tag_w = 0
+        for vs in visible:
+            if vs.tag:
+                tw = len(vs.tag) + 3  # "[tag] "
+                if tw > max_tag_w:
+                    max_tag_w = tw
+
         for i in range(height):
             idx = self.scroll + i
             if idx >= len(self.filtered):
                 break
             s = self.filtered[idx]
             sel = (idx == self.cur)
-            self._draw_row(sy + i, w, s, sel)
+            self._draw_row(sy + i, w, s, sel, max_tag_w)
 
         # Scroll indicators
         if self.scroll > 0:
@@ -931,7 +940,7 @@ class CCSApp:
             self._safe(sy + last, w - 3, " ▼ ",
                        curses.color_pair(CP_ACCENT) | curses.A_BOLD)
 
-    def _draw_row(self, y: int, w: int, s: Session, sel: bool):
+    def _draw_row(self, y: int, w: int, s: Session, sel: bool, tag_col_w: int = 0):
         """Draw a single session row with color-coded segments."""
         marked = s.id in self.marked
         has_tmux = s.id in self.tmux_sids
@@ -941,10 +950,16 @@ class CCSApp:
         pin_w = 2     # "★ " or "▶ " or "  "
         ts_w = 18     # "2025-01-15 14:30  "
         msg_w = 5     # "12m " or "  0m "
-        proj_w = min(28, max(12, (w - ind_w - pin_w - ts_w - msg_w - 4) // 3))
+        tag_w = tag_col_w  # fixed across all visible rows
+        proj_w = min(28, max(12, (w - ind_w - pin_w - tag_w - ts_w - msg_w - 4) // 3))
 
-        tag_str = f"[{s.tag}] " if s.tag else ""
-        tag_w = len(tag_str)
+        if s.tag:
+            raw_tag = f"[{s.tag}] "
+            if len(raw_tag) > tag_w:
+                raw_tag = raw_tag[:tag_w - 2] + "] "
+            tag_str = raw_tag.ljust(tag_w)
+        else:
+            tag_str = " " * tag_w
 
         desc_w = max(8, w - ind_w - pin_w - tag_w - ts_w - msg_w - proj_w - 2)
 
@@ -992,8 +1007,11 @@ class CCSApp:
             elif has_tmux:
                 self._safe(y, x, "▶", curses.color_pair(CP_STATUS) | curses.A_BOLD)
             x += pin_w
-            if s.tag:
-                self._safe(y, x, f"[{s.tag}]",
+            if s.tag and tag_w > 0:
+                disp_tag = f"[{s.tag}]"
+                if len(disp_tag) > tag_w - 1:
+                    disp_tag = disp_tag[:tag_w - 2] + "]"
+                self._safe(y, x, disp_tag,
                            curses.color_pair(CP_SEL_TAG) | curses.A_BOLD)
             x += tag_w + ts_w + msg_w
             self._safe(y, x, proj.rstrip(),
@@ -1017,8 +1035,11 @@ class CCSApp:
             x += pin_w
 
             # Tag
-            if s.tag:
-                self._safe(y, x, f"[{s.tag}] ",
+            if s.tag and tag_w > 0:
+                disp_tag = f"[{s.tag}] "
+                if len(disp_tag) > tag_w:
+                    disp_tag = disp_tag[:tag_w - 2] + "] "
+                self._safe(y, x, disp_tag,
                            curses.color_pair(CP_TAG) | curses.A_BOLD)
             x += tag_w
 
