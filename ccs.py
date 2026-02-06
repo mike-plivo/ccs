@@ -893,8 +893,8 @@ class CCSApp:
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
         hints_map = {
-            "normal":  "⏎ Resume  R Last  → Tmux  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help  q Quit",
-            "normal_tmux": "⏎ Attach  x Kill  ← Sessions  r Refresh  P Profiles  ? Help  q Quit",
+            "normal":  "⏎ Resume  a Attach  R Last  → Tmux  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help",
+            "normal_tmux": "⏎ Attach  x Kill  s Session  ← Sessions  r Refresh  P Profiles  ? Help  q Quit",
             "search":  "Type to filter  ·  ↑/↓ Navigate  ·  ⏎ Done  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
@@ -1172,7 +1172,7 @@ class CCSApp:
         lines.append((f"  Launched:  {info.get('launched', 'N/A')}",
                        curses.color_pair(CP_ACCENT)))
         lines.append(("", 0))
-        lines.append(("  Press Enter to attach, x to kill",
+        lines.append(("  Enter: attach  x: kill  s: go to session",
                        curses.color_pair(CP_DIM) | curses.A_DIM))
 
         for i, (text, attr) in enumerate(lines[:h]):
@@ -1271,10 +1271,12 @@ class CCSApp:
             ("    n              Create a new named session", 0),
             ("    e              Start an ephemeral session", 0),
             ("", 0),
-            ("  Tmux View", curses.color_pair(CP_HEADER) | curses.A_BOLD),
+            ("  Tmux", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    ←/→ or Tab     Switch Sessions / Tmux view", 0),
+            ("    a              Attach to session's tmux", 0),
             ("    Enter          Attach to tmux session", 0),
             ("    x              Kill tmux session", 0),
+            ("    s              Jump to linked session", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
@@ -2031,6 +2033,18 @@ class CCSApp:
             else:
                 self.exit_action = ("tmp",)
                 return "action"
+        elif k == ord("a"):
+            # Attach to tmux session if one is running for this session
+            if self.filtered and HAS_TMUX:
+                s = self.filtered[self.cur]
+                tmux_name = TMUX_PREFIX + s.id[:8]
+                alive = self.mgr.tmux_sessions()
+                if tmux_name in alive:
+                    self._tmux_attach(tmux_name)
+                else:
+                    self._set_status("No active tmux session for this session")
+            elif not HAS_TMUX:
+                self._set_status("tmux is not installed")
         elif k == ord("/"):
             self.mode = "search"
         elif k == ord("R"):
@@ -2105,6 +2119,19 @@ class CCSApp:
                 self.mgr.tmux_unregister(name)
                 self._set_status(f"Killed tmux session: {name}")
                 self._refresh_tmux()
+        elif k == ord("s"):
+            # Jump to the linked session in Sessions view
+            if self.tmux_list:
+                _, info = self.tmux_list[self.tmux_cur]
+                sid = info.get("session_id", "")
+                self.view = "sessions"
+                for i, s in enumerate(self.filtered):
+                    if s.id == sid:
+                        self.cur = i
+                        self._set_status(f"Session: {s.tag or s.id[:12]}")
+                        break
+                else:
+                    self._set_status(f"Session not found in current list")
         elif k in (ord("r"), curses.KEY_F5):
             self._refresh_tmux()
             self._set_status("Refreshed tmux sessions")
