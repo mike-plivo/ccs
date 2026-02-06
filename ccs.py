@@ -561,6 +561,7 @@ class CCSApp:
         self.launch_expert_args = ""  # raw CLI args for expert mode
         self.launch_tmux = True  # tmux launch mode toggle
         self.launch_editing: Optional[str] = None  # which text field is active
+        self.launch_edit_pos: int = 0  # cursor position in active text field
 
         # Profile manager state
         self.prof_cur = 0             # cursor in profile list
@@ -863,7 +864,7 @@ class CCSApp:
             "chdir":   "Type directory path  ·  ⏎ Apply  ·  Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create  ·  Esc Cancel",
             "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
-            "profile_edit": "Tab Expert/Structured  ↑↓ Navigate  Space Toggle  ⏎ Save/Edit  Esc Cancel",
+            "profile_edit": "↑↓ Navigate  Type to edit  Space Toggle  Tab Expert/Structured  ⏎ Save  Esc Back",
             "help":    "Press any key to close",
         }
         hint_key = self.mode
@@ -1520,23 +1521,37 @@ class CCSApp:
         def cb(val):
             return "[x]" if val else "[ ]"
 
+        def fmt_field(val: str, field_type: str, max_w: int) -> str:
+            """Format a text field with cursor at correct position."""
+            if self.launch_editing == field_type:
+                pos = min(self.launch_edit_pos, len(val))
+                text = val[:pos] + "▏" + val[pos:]
+                # Scroll if text is too long: keep cursor visible
+                if len(text) > max_w:
+                    cursor_pos = pos + 1  # +1 for ▏ char
+                    start = max(0, cursor_pos - max_w + 4)
+                    text = "…" + text[start + 1:start + max_w]
+                return text
+            if len(val) > max_w:
+                return val[:max_w - 1] + "…"
+            return val
+
         display: List[Tuple[str, int]] = []
+        field_w = max(20, min(76, w - 4) - 20)  # available width for field values
         for ri, (rtype, ridx) in enumerate(rows):
             a = sel_attr if is_sel(ri) else normal
             prefix = ind(ri)
 
             if rtype == ROW_PROF_NAME:
-                editing = self.launch_editing == ROW_PROF_NAME
-                cursor = "▏" if editing else ""
-                display.append((f"{prefix}Name: {self.prof_edit_name}{cursor}",
+                v = fmt_field(self.prof_edit_name, ROW_PROF_NAME, field_w)
+                display.append((f"{prefix}Name: {v}",
                                 accent if is_sel(ri) else tag_attr))
             elif rtype == ROW_TMUX:
                 display.append((f"{prefix}Launch mode:  {cb(self.launch_tmux)} tmux"
                                 f"   {cb(not self.launch_tmux)} direct", a))
             elif rtype == ROW_EXPERT:
-                editing = self.launch_editing == ROW_EXPERT
-                cursor = "▏" if editing else ""
-                display.append((f"{prefix}claude {self.launch_expert_args}{cursor}", a))
+                v = fmt_field(self.launch_expert_args, ROW_EXPERT, field_w)
+                display.append((f"{prefix}claude {v}", a))
             elif rtype == ROW_MODEL:
                 display.append((f"{prefix}Model:       {MODELS[self.launch_model_idx][0]}", a))
             elif rtype == ROW_PERMMODE:
@@ -1545,27 +1560,22 @@ class CCSApp:
                 flag_name = TOGGLE_FLAGS[ridx][0]
                 display.append((f"{prefix}{flag_name:<38s} {cb(self.launch_toggles[ridx])}", a))
             elif rtype == ROW_SYSPROMPT:
-                editing = self.launch_editing == ROW_SYSPROMPT
-                cursor = "▏" if editing else ""
-                v = self.launch_sysprompt
-                display.append((f"{prefix}System prompt: {v}{cursor}", a))
+                v = fmt_field(self.launch_sysprompt, ROW_SYSPROMPT, field_w)
+                display.append((f"{prefix}System prompt: {v}", a))
             elif rtype == ROW_TOOLS:
-                editing = self.launch_editing == ROW_TOOLS
-                cursor = "▏" if editing else ""
-                display.append((f"{prefix}Tools: {self.launch_tools}{cursor}", a))
+                v = fmt_field(self.launch_tools, ROW_TOOLS, field_w)
+                display.append((f"{prefix}Tools: {v}", a))
             elif rtype == ROW_MCP:
-                editing = self.launch_editing == ROW_MCP
-                cursor = "▏" if editing else ""
-                display.append((f"{prefix}MCP config: {self.launch_mcp}{cursor}", a))
+                v = fmt_field(self.launch_mcp, ROW_MCP, field_w)
+                display.append((f"{prefix}MCP config: {v}", a))
             elif rtype == ROW_CUSTOM:
-                editing = self.launch_editing == ROW_CUSTOM
-                cursor = "▏" if editing else ""
-                display.append((f"{prefix}Custom args: {self.launch_custom}{cursor}", a))
+                v = fmt_field(self.launch_custom, ROW_CUSTOM, field_w)
+                display.append((f"{prefix}Custom args: {v}", a))
             elif rtype == ROW_PROF_SAVE:
                 la = curses.color_pair(CP_STATUS) | curses.A_BOLD if is_sel(ri) else accent
                 display.append((f"{prefix}>>> Save <<<", la))
 
-        box_w = min(64, w - 4)
+        box_w = min(76, w - 4)
         box_h = min(len(display) + 4, h - 2)
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
@@ -1599,7 +1609,9 @@ class CCSApp:
             self._safe(sy + 1 + i, sx + 1, text[:box_w - 3], attr)
 
         # Hints
-        if self.prof_expert_mode:
+        if self.launch_editing:
+            hints = " ←→ move · Ctrl+A/E home/end · Ctrl+K/U clear · ⏎ Done "
+        elif self.prof_expert_mode:
             hints = " Tab structured · ⏎ edit/save · Esc cancel "
         else:
             hints = " Tab expert · Space toggle · ⏎ edit/save · Esc cancel "
@@ -2141,25 +2153,74 @@ class CCSApp:
             self.ibuf += chr(k)
         return None
 
-    def _launch_edit_backspace(self):
-        if self.launch_editing == ROW_SYSPROMPT:
-            self.launch_sysprompt = self.launch_sysprompt[:-1]
-        elif self.launch_editing == ROW_TOOLS:
-            self.launch_tools = self.launch_tools[:-1]
-        elif self.launch_editing == ROW_MCP:
-            self.launch_mcp = self.launch_mcp[:-1]
-        elif self.launch_editing == ROW_CUSTOM:
-            self.launch_custom = self.launch_custom[:-1]
+    def _launch_start_editing(self, field: str):
+        """Enter text editing mode for a field, cursor at end."""
+        self.launch_editing = field
+        self.launch_edit_pos = len(self._launch_get_field_by_name(field))
 
-    def _launch_edit_char(self, ch: str):
-        if self.launch_editing == ROW_SYSPROMPT:
-            self.launch_sysprompt += ch
-        elif self.launch_editing == ROW_TOOLS:
-            self.launch_tools += ch
-        elif self.launch_editing == ROW_MCP:
-            self.launch_mcp += ch
-        elif self.launch_editing == ROW_CUSTOM:
-            self.launch_custom += ch
+    def _launch_get_field_by_name(self, f: str) -> str:
+        if f == ROW_PROF_NAME: return self.prof_edit_name
+        if f == ROW_EXPERT:    return self.launch_expert_args
+        if f == ROW_SYSPROMPT: return self.launch_sysprompt
+        if f == ROW_TOOLS:     return self.launch_tools
+        if f == ROW_MCP:       return self.launch_mcp
+        if f == ROW_CUSTOM:    return self.launch_custom
+        return ""
+
+    def _launch_get_field(self) -> str:
+        """Get the text value of the currently edited field."""
+        return self._launch_get_field_by_name(self.launch_editing)
+
+    def _launch_set_field(self, val: str):
+        """Set the text value of the currently edited field."""
+        f = self.launch_editing
+        if f == ROW_PROF_NAME: self.prof_edit_name = val
+        elif f == ROW_EXPERT:    self.launch_expert_args = val
+        elif f == ROW_SYSPROMPT: self.launch_sysprompt = val
+        elif f == ROW_TOOLS:     self.launch_tools = val
+        elif f == ROW_MCP:       self.launch_mcp = val
+        elif f == ROW_CUSTOM:    self.launch_custom = val
+
+    def _launch_edit_key(self, k: int):
+        """Handle a keypress in a text editing field with cursor support."""
+        text = self._launch_get_field()
+        pos = self.launch_edit_pos
+
+        if k in (curses.KEY_BACKSPACE, 127, 8):
+            if pos > 0:
+                text = text[:pos - 1] + text[pos:]
+                pos -= 1
+        elif k == curses.KEY_DC:  # Delete key
+            if pos < len(text):
+                text = text[:pos] + text[pos + 1:]
+        elif k == curses.KEY_LEFT:
+            pos = max(0, pos - 1)
+        elif k == curses.KEY_RIGHT:
+            pos = min(len(text), pos + 1)
+        elif k == curses.KEY_HOME or k == 1:  # Home or Ctrl+A
+            pos = 0
+        elif k == curses.KEY_END or k == 5:  # End or Ctrl+E
+            pos = len(text)
+        elif k == 11:  # Ctrl+K — kill to end of line
+            text = text[:pos]
+        elif k == 21:  # Ctrl+U — kill to start of line
+            text = text[pos:]
+            pos = 0
+        elif k == 23:  # Ctrl+W — delete word backward
+            if pos > 0:
+                i = pos - 1
+                while i > 0 and text[i - 1] == " ":
+                    i -= 1
+                while i > 0 and text[i - 1] != " ":
+                    i -= 1
+                text = text[:i] + text[pos:]
+                pos = i
+        elif 32 <= k <= 126:
+            text = text[:pos] + chr(k) + text[pos:]
+            pos += 1
+
+        self._launch_set_field(text)
+        self.launch_edit_pos = pos
 
     # ── Profile manager input ────────────────────────────────────
 
@@ -2249,11 +2310,13 @@ class CCSApp:
             self.launch_expert_args = ""
             self.launch_tmux = True
             # Start with name field editing immediately
-            self.launch_editing = ROW_PROF_NAME
+            self._launch_start_editing(ROW_PROF_NAME)
 
         self.prof_edit_rows = self._build_profile_edit_rows()
         self.prof_edit_cur = 0
         self.mode = "profile_edit"
+
+    _TEXT_FIELDS = {ROW_PROF_NAME, ROW_EXPERT, ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM}
 
     def _input_profile_edit(self, k: int) -> Optional[str]:
         rows = self.prof_edit_rows
@@ -2265,20 +2328,27 @@ class CCSApp:
                 self.launch_editing = None
             elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
                 self.launch_editing = None
-            elif k in (curses.KEY_BACKSPACE, 127, 8):
-                if self.launch_editing == ROW_PROF_NAME:
-                    self.prof_edit_name = self.prof_edit_name[:-1]
-                elif self.launch_editing == ROW_EXPERT:
-                    self.launch_expert_args = self.launch_expert_args[:-1]
-                else:
-                    self._launch_edit_backspace()
-            elif 32 <= k <= 126:
-                if self.launch_editing == ROW_PROF_NAME:
-                    self.prof_edit_name += chr(k)
-                elif self.launch_editing == ROW_EXPERT:
-                    self.launch_expert_args += chr(k)
-                else:
-                    self._launch_edit_char(chr(k))
+            elif k in (curses.KEY_UP,):
+                # Exit edit, move up, auto-enter edit if also a text field
+                self.launch_editing = None
+                self.prof_edit_cur = max(0, self.prof_edit_cur - 1)
+                new_type = rows[self.prof_edit_cur][0]
+                if new_type in self._TEXT_FIELDS:
+                    self._launch_start_editing(new_type)
+            elif k in (curses.KEY_DOWN,):
+                self.launch_editing = None
+                self.prof_edit_cur = min(len(rows) - 1, self.prof_edit_cur + 1)
+                new_type = rows[self.prof_edit_cur][0]
+                if new_type in self._TEXT_FIELDS:
+                    self._launch_start_editing(new_type)
+            elif k == 9:  # Tab → toggle expert/structured
+                self.launch_editing = None
+                self.prof_expert_mode = not self.prof_expert_mode
+                self.prof_edit_rows = self._build_profile_edit_rows()
+                if self.prof_edit_cur >= len(self.prof_edit_rows):
+                    self.prof_edit_cur = len(self.prof_edit_rows) - 1
+            else:
+                self._launch_edit_key(k)
             return None
 
         # ── Normal navigation ─────────────────────────────────────
@@ -2286,27 +2356,43 @@ class CCSApp:
             self.mode = "profiles"
 
         elif k == 9:  # Tab → toggle expert/structured mode
-            self.launch_editing = None
             self.prof_expert_mode = not self.prof_expert_mode
             self.prof_edit_rows = self._build_profile_edit_rows()
             if self.prof_edit_cur >= len(self.prof_edit_rows):
                 self.prof_edit_cur = len(self.prof_edit_rows) - 1
 
-        elif k in (curses.KEY_UP, ord("k")):
+        elif k in (curses.KEY_UP,):
             self.prof_edit_cur = max(0, self.prof_edit_cur - 1)
-        elif k in (curses.KEY_DOWN, ord("j")):
+        elif k in (curses.KEY_DOWN,):
             self.prof_edit_cur = min(len(rows) - 1, self.prof_edit_cur + 1)
 
         elif k == ord(" "):
-            self._prof_edit_toggle_current()
+            if cur_type in self._TEXT_FIELDS:
+                # Space starts editing on text fields
+                self._launch_start_editing(cur_type)
+                self._launch_edit_key(k)
+            else:
+                self._prof_edit_toggle_current()
 
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if cur_type == ROW_PROF_SAVE:
                 self._prof_do_save()
-            elif cur_type in (ROW_PROF_NAME, ROW_EXPERT, ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
-                self.launch_editing = cur_type
+            elif cur_type in self._TEXT_FIELDS:
+                self._launch_start_editing(cur_type)
             else:
                 self._prof_edit_toggle_current()
+
+        elif k in (curses.KEY_BACKSPACE, 127, 8):
+            # Backspace on text field — enter edit and delete
+            if cur_type in self._TEXT_FIELDS:
+                self._launch_start_editing(cur_type)
+                self._launch_edit_key(k)
+
+        elif 32 <= k <= 126:
+            # Printable char on text field — auto enter edit and type
+            if cur_type in self._TEXT_FIELDS:
+                self._launch_start_editing(cur_type)
+                self._launch_edit_key(k)
 
         return None
 
@@ -2321,9 +2407,9 @@ class CCSApp:
         elif rtype == ROW_TMUX:
             self.launch_tmux = not self.launch_tmux
         elif rtype in (ROW_PROF_NAME, ROW_EXPERT):
-            self.launch_editing = rtype
+            self._launch_start_editing(rtype)
         elif rtype in (ROW_SYSPROMPT, ROW_TOOLS, ROW_MCP, ROW_CUSTOM):
-            self.launch_editing = rtype
+            self._launch_start_editing(rtype)
 
     def _prof_do_save(self):
         name = self.prof_edit_name.strip()
