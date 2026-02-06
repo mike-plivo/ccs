@@ -16,6 +16,7 @@ Usage:
     ccs delete <id|tag>                    Delete a session
     ccs delete --empty                     Delete all empty sessions
     ccs search <query>                     Search sessions
+    ccs export <id|tag>                    Export session as markdown
     ccs profile list|set|new|delete        Manage profiles
     ccs theme list|set                     Manage themes
     ccs help                               Show help
@@ -67,6 +68,9 @@ CP_SEL_TAG = 13
 CP_SEL_PROJ = 14
 CP_ACCENT = 15
 CP_PROFILE_BADGE = 16
+CP_AGE_TODAY = 17
+CP_AGE_WEEK = 18
+CP_AGE_OLD = 19
 
 # ── Themes ───────────────────────────────────────────────────────────
 # Raw color values: 0=BLACK 1=RED 2=GREEN 3=YELLOW 4=BLUE 5=MAGENTA 6=CYAN 7=WHITE
@@ -76,37 +80,42 @@ _DEF = -1  # terminal default
 THEME_NAMES = ["dark", "blue", "red", "green", "light"]
 DEFAULT_THEME = "dark"
 
-# Each theme: 16 (fg, bg) tuples for CP_HEADER(1) .. CP_PROFILE_BADGE(16)
+# Each theme: 19 (fg, bg) tuples for CP_HEADER(1) .. CP_AGE_OLD(19)
 THEMES = {
     "dark": [
         (_CYN, _DEF), (_CYN, _DEF), (_YLW, _DEF), (_GRN, _DEF),
         (_WHT, _BLU), (_WHT, _DEF), (_MAG, _DEF), (_RED, _DEF),
         (_WHT, _DEF), (_YLW, _DEF), (_GRN, _DEF), (_YLW, _BLU),
         (_GRN, _BLU), (_MAG, _BLU), (_CYN, _DEF), (_BLK, _GRN),
+        (_GRN, _DEF), (_YLW, _DEF), (_WHT, _DEF),
     ],
     "blue": [
         (_BLU, _DEF), (_BLU, _DEF), (_YLW, _DEF), (_CYN, _DEF),
         (_WHT, _BLU), (_CYN, _DEF), (_CYN, _DEF), (_RED, _DEF),
         (_WHT, _DEF), (_CYN, _DEF), (_CYN, _DEF), (_YLW, _BLU),
         (_CYN, _BLU), (_WHT, _BLU), (_BLU, _DEF), (_WHT, _BLU),
+        (_GRN, _DEF), (_CYN, _DEF), (_WHT, _DEF),
     ],
     "red": [
         (_RED, _DEF), (_RED, _DEF), (_YLW, _DEF), (_GRN, _DEF),
         (_WHT, _RED), (_WHT, _DEF), (_YLW, _DEF), (_RED, _DEF),
         (_WHT, _DEF), (_YLW, _DEF), (_RED, _DEF), (_YLW, _RED),
         (_GRN, _RED), (_YLW, _RED), (_RED, _DEF), (_WHT, _RED),
+        (_GRN, _DEF), (_YLW, _DEF), (_WHT, _DEF),
     ],
     "green": [
         (_GRN, _DEF), (_GRN, _DEF), (_YLW, _DEF), (_GRN, _DEF),
         (_BLK, _GRN), (_GRN, _DEF), (_GRN, _DEF), (_RED, _DEF),
         (_GRN, _DEF), (_GRN, _DEF), (_GRN, _DEF), (_YLW, _GRN),
         (_WHT, _GRN), (_BLK, _GRN), (_GRN, _DEF), (_BLK, _GRN),
+        (_GRN, _DEF), (_YLW, _DEF), (_WHT, _DEF),
     ],
     "light": [
         (_BLU, _DEF), (_BLU, _DEF), (_RED, _DEF), (_GRN, _DEF),
         (_WHT, _BLU), (_BLK, _DEF), (_MAG, _DEF), (_RED, _DEF),
         (_BLK, _DEF), (_BLU, _DEF), (_GRN, _DEF), (_RED, _BLU),
         (_GRN, _BLU), (_MAG, _BLU), (_BLU, _DEF), (_WHT, _BLU),
+        (_GRN, _DEF), (_BLU, _DEF), (_BLK, _DEF),
     ],
 }
 
@@ -165,6 +174,7 @@ class Session:
     mtime: float
     summaries: List[str] = field(default_factory=list)
     path: str = ""
+    msg_count: int = 0
 
     @property
     def ts(self) -> str:
@@ -189,9 +199,13 @@ class Session:
     def label(self) -> str:
         return self.summary or self.first_msg or "(empty session)"
 
-    @property
-    def sort_key(self) -> Tuple:
-        return (0 if self.pinned else 1, -self.mtime)
+    def get_sort_key(self, sort_mode: str = "date") -> Tuple:
+        tier = 0 if self.pinned else 1
+        if sort_mode == "name":
+            return (tier, self.label.lower(), -self.mtime)
+        elif sort_mode == "project":
+            return (tier, self.project_display.lower(), -self.mtime)
+        return (tier, -self.mtime)
 
 
 # ── Session Manager ───────────────────────────────────────────────────
@@ -247,7 +261,7 @@ class SessionManager:
                 return c
         return ""
 
-    def scan(self) -> List[Session]:
+    def scan(self, sort_mode: str = "date") -> List[Session]:
         tags = self._load(TAGS_FILE, {})
         pins = set(self._load(PINS_FILE, []))
         out: List[Session] = []
@@ -261,6 +275,7 @@ class SessionManager:
             pinned = sid in pins
             summary, fm, fm_long, cwd = "", "", "", ""
             sums: List[str] = []
+            msg_count = 0
 
             try:
                 with open(jp, "r", errors="replace") as f:
@@ -269,17 +284,20 @@ class SessionManager:
                             d = json.loads(ln)
                         except Exception:
                             continue
-                        if d.get("type") == "summary":
+                        msg_type = d.get("type")
+                        if msg_type == "summary":
                             s = d.get("summary", "")
                             if s:
                                 sums.append(s)
                                 summary = s
-                        elif d.get("type") == "user" and not fm:
-                            cwd = d.get("cwd", "")
-                            txt = self._extract_text(d.get("message", {}))
-                            if txt:
-                                fm = txt[:120].replace("\n", " ").replace("\t", " ")
-                                fm_long = txt[:800]
+                        elif msg_type in ("user", "assistant"):
+                            msg_count += 1
+                            if msg_type == "user" and not fm:
+                                cwd = d.get("cwd", "")
+                                txt = self._extract_text(d.get("message", {}))
+                                if txt:
+                                    fm = txt[:120].replace("\n", " ").replace("\t", " ")
+                                    fm_long = txt[:800]
             except Exception:
                 pass
 
@@ -288,9 +306,10 @@ class SessionManager:
                 cwd=cwd, summary=summary, first_msg=fm,
                 first_msg_long=fm_long, tag=tag, pinned=pinned,
                 mtime=os.path.getmtime(jp), summaries=sums, path=jp,
+                msg_count=msg_count,
             ))
 
-        out.sort(key=lambda s: s.sort_key)
+        out.sort(key=lambda s: s.get_sort_key(sort_mode))
         return out
 
     def toggle_pin(self, sid: str) -> bool:
@@ -426,6 +445,8 @@ class CCSApp:
         self.ibuf = ""
         self.delete_label = ""  # label shown in delete confirmation popup
         self.empty_count = 0    # count for delete_empty confirmation
+        self.sort_mode = "date"  # "date" | "name" | "project"
+        self.marked: set = set()  # session IDs for bulk operations
 
         # Active profile & theme
         self.active_profile_name = self.mgr.load_active_profile_name()
@@ -470,6 +491,7 @@ class CCSApp:
             pass
         self.scr.keypad(True)
         self.scr.timeout(100)
+        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
 
     def _apply_theme(self, name: str):
         """Apply a theme by reinitializing all 16 color pairs."""
@@ -485,8 +507,60 @@ class CCSApp:
             curses.init_pair(i + 1, cfn, cbn)
         self.active_theme = name
 
+    def _age_color(self, mtime: float) -> int:
+        delta = datetime.datetime.now() - datetime.datetime.fromtimestamp(mtime)
+        if delta.days == 0:
+            return curses.color_pair(CP_AGE_TODAY)
+        elif delta.days < 7:
+            return curses.color_pair(CP_AGE_WEEK)
+        return curses.color_pair(CP_AGE_OLD) | curses.A_DIM
+
+    def _get_page_size(self) -> int:
+        h, _ = self.scr.getmaxyx()
+        hdr_h, ftr_h, sep_h = 4, 1, 1
+        preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
+        return max(1, h - hdr_h - ftr_h - sep_h - preview_h)
+
+    def _handle_mouse(self) -> Optional[str]:
+        try:
+            _, mx, my, _, bstate = curses.getmouse()
+        except curses.error:
+            return None
+        if self.mode != "normal":
+            return None
+        h, w = self.scr.getmaxyx()
+        hdr_h = 4
+        ftr_h = 1
+        sep_h = 1
+        preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
+        list_h = h - hdr_h - ftr_h - sep_h - preview_h
+        list_top = hdr_h
+        list_bot = list_top + list_h
+        if list_top <= my < list_bot and self.filtered:
+            row_idx = self.scroll + (my - list_top)
+            if row_idx < len(self.filtered):
+                if bstate & curses.BUTTON1_DOUBLE_CLICKED:
+                    self.cur = row_idx
+                    s = self.filtered[self.cur]
+                    profiles = self.mgr.load_profiles()
+                    active = next(
+                        (p for p in profiles if p.get("name") == self.active_profile_name),
+                        None,
+                    )
+                    extra = self._build_args_from_profile(active) if active else []
+                    self.exit_action = ("resume", s.id, s.cwd, extra)
+                    return "action"
+                elif bstate & curses.BUTTON1_CLICKED:
+                    self.cur = row_idx
+        if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+            self.cur = max(0, self.cur - 3)
+        elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+            if self.filtered:
+                self.cur = min(len(self.filtered) - 1, self.cur + 3)
+        return None
+
     def _refresh(self):
-        self.sessions = self.mgr.scan()
+        self.sessions = self.mgr.scan(self.sort_mode)
         self._apply_filter()
 
     def _apply_filter(self):
@@ -504,6 +578,8 @@ class CCSApp:
             ]
         if self.cur >= len(self.filtered):
             self.cur = max(0, len(self.filtered) - 1)
+        valid_ids = {s.id for s in self.filtered}
+        self.marked &= valid_ids
 
     def _set_status(self, msg: str, ttl: int = 30):
         self.status = msg
@@ -552,6 +628,11 @@ class CCSApp:
                 continue
             if k == curses.KEY_RESIZE:
                 self.scr.clear()
+                continue
+            if k == curses.KEY_MOUSE:
+                result = self._handle_mouse()
+                if result in ("quit", "action"):
+                    break
                 continue
 
             # Ctrl-C: double-tap within 1 second to quit
@@ -637,7 +718,7 @@ class CCSApp:
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
         hints_map = {
-            "normal":  "⏎ Resume  P Profiles  H Theme  p Pin  t Tag  d Del  n New  / Search  ? Help  q Quit",
+            "normal":  "⏎ Resume  R Last  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help  q Quit",
             "search":  "Type to filter  ·  ⏎ Apply  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
@@ -678,8 +759,14 @@ class CCSApp:
             self._safe(y, cx, "(Esc to clear)", curses.color_pair(CP_DIM) | curses.A_DIM)
         else:
             n = len(self.filtered)
-            self._safe(y, 1, f" {n} session{'s' if n != 1 else ''}",
-                       curses.color_pair(CP_ACCENT))
+            total = len(self.sessions)
+            labels = {"date": "Date", "name": "Name", "project": "Project"}
+            sort_label = labels.get(self.sort_mode, "Date")
+            if n < total:
+                info = f" {n}/{total} sessions · Sort: {sort_label}"
+            else:
+                info = f" {n} session{'s' if n != 1 else ''} · Sort: {sort_label}"
+            self._safe(y, 1, info, curses.color_pair(CP_ACCENT))
 
     def _draw_list(self, sy: int, height: int, w: int):
         if not self.filtered:
@@ -706,21 +793,30 @@ class CCSApp:
             sel = (idx == self.cur)
             self._draw_row(sy + i, w, s, sel)
 
+        # Scroll indicators
+        if self.scroll > 0:
+            self._safe(sy, w - 3, " ▲ ",
+                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        if self.scroll + height < len(self.filtered):
+            last = min(height - 1, len(self.filtered) - self.scroll - 1)
+            self._safe(sy + last, w - 3, " ▼ ",
+                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+
     def _draw_row(self, y: int, w: int, s: Session, sel: bool):
         """Draw a single session row with color-coded segments."""
-        _, scr_w = self.scr.getmaxyx()
+        marked = s.id in self.marked
 
         # Column widths
-        ind_w = 3     # " ▸ " or "   "
+        ind_w = 3     # " ▸ " or " ● " or "   "
         pin_w = 2     # "★ " or "  "
         ts_w = 18     # "2025-01-15 14:30  "
-        age_w = 10    # "3d ago    "
-        proj_w = min(28, max(12, (w - ind_w - pin_w - ts_w - age_w - 4) // 3))
+        msg_w = 5     # "12m " or "  0m "
+        proj_w = min(28, max(12, (w - ind_w - pin_w - ts_w - msg_w - 4) // 3))
 
         tag_str = f"[{s.tag}] " if s.tag else ""
         tag_w = len(tag_str)
 
-        desc_w = max(8, w - ind_w - pin_w - tag_w - ts_w - age_w - proj_w - 2)
+        desc_w = max(8, w - ind_w - pin_w - tag_w - ts_w - msg_w - proj_w - 2)
 
         proj = s.project_display
         if len(proj) > proj_w:
@@ -731,38 +827,46 @@ class CCSApp:
         if len(desc) > desc_w:
             desc = desc[:desc_w - 1] + "…"
 
-        age = s.age
-        if len(age) > age_w:
-            age = age[:age_w]
-        age = age.rjust(age_w)
+        msg_str = f"{s.msg_count:>3d}m " if s.msg_count else "     "
+
+        # Mark indicator
+        if marked:
+            mark_ch = "●"
+        elif sel:
+            mark_ch = "▸"
+        else:
+            mark_ch = " "
 
         if sel:
             # Highlight entire row
             base = curses.color_pair(CP_SELECTED) | curses.A_BOLD
 
-            # Build full line and pad
-            line = f" ▸ {'★ ' if s.pinned else '  '}{tag_str}{s.ts}  {proj} {desc}"
-            # Pad to fill width
+            line = f" {mark_ch} {'★ ' if s.pinned else '  '}{tag_str}{s.ts}  {msg_str}{proj} {desc}"
             if len(line) < w - 1:
                 line += " " * (w - 1 - len(line))
             line = line[:w - 1]
             self._safe(y, 0, line, base)
 
             # Overlay colored segments on selection background
-            x = 3  # after indicator
+            x = 3
             if s.pinned:
                 self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
             x += pin_w
             if s.tag:
                 self._safe(y, x, f"[{s.tag}]",
                            curses.color_pair(CP_SEL_TAG) | curses.A_BOLD)
-            x += tag_w + ts_w
+            x += tag_w + ts_w + msg_w
             self._safe(y, x, proj.rstrip(),
                        curses.color_pair(CP_SEL_PROJ) | curses.A_BOLD)
+            if marked:
+                self._safe(y, 1, "●", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
         else:
             x = 0
             # Indicator
-            self._safe(y, x, "   ", curses.color_pair(CP_NORMAL))
+            if marked:
+                self._safe(y, x, f" ● ", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+            else:
+                self._safe(y, x, "   ", curses.color_pair(CP_NORMAL))
             x += ind_w
 
             # Pin
@@ -776,9 +880,14 @@ class CCSApp:
                            curses.color_pair(CP_TAG) | curses.A_BOLD)
             x += tag_w
 
-            # Timestamp
-            self._safe(y, x, s.ts + "  ", curses.color_pair(CP_DIM) | curses.A_DIM)
+            # Timestamp (age-colored)
+            age_attr = self._age_color(s.mtime)
+            self._safe(y, x, s.ts + "  ", age_attr)
             x += ts_w
+
+            # Message count
+            self._safe(y, x, msg_str, curses.color_pair(CP_DIM) | curses.A_DIM)
+            x += msg_w
 
             # Project
             self._safe(y, x, proj, curses.color_pair(CP_PROJECT))
@@ -816,8 +925,9 @@ class CCSApp:
                        curses.color_pair(CP_PROJECT)))
         if s.cwd:
             lines.append((f"  CWD:     {s.cwd}", curses.color_pair(CP_DIM) | curses.A_DIM))
-        lines.append((f"  Modified: {s.ts}  ({s.age})",
-                       curses.color_pair(CP_DIM) | curses.A_DIM))
+        lines.append((f"  Modified: {s.ts}  ({s.age})", self._age_color(s.mtime)))
+        lines.append((f"  Messages: {s.msg_count}",
+                       curses.color_pair(CP_ACCENT)))
         lines.append(("", 0))
 
         # First message
@@ -858,13 +968,19 @@ class CCSApp:
             ("", 0),
             ("  Actions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    Enter          Resume with active profile", 0),
+            ("    R              Quick resume most recent", 0),
             ("    P              Profile picker / manager", 0),
             ("                   (Tab: expert/structured mode)", 0),
-            ("    p              Toggle pin (pinned sort to top)", 0),
+            ("    p              Toggle pin (bulk if marked)", 0),
             ("    t              Tag a session", 0),
             ("    T              Remove tag from session", 0),
-            ("    d              Delete a session (default: N)", 0),
+            ("    d              Delete session (bulk if marked)", 0),
             ("    D              Delete all empty sessions", 0),
+            ("", 0),
+            ("  Bulk & Sort", curses.color_pair(CP_HEADER) | curses.A_BOLD),
+            ("    Space          Mark / unmark session", 0),
+            ("    u              Unmark all", 0),
+            ("    s              Cycle sort: date/name/project", 0),
             ("", 0),
             ("  Sessions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    n              Create a new named session", 0),
@@ -874,6 +990,7 @@ class CCSApp:
             ("    H              Cycle theme", 0),
             ("    /              Search / filter sessions", 0),
             ("    r              Refresh session list", 0),
+            ("    Mouse          Click / dbl-click / scroll", 0),
             ("    Esc            Clear filter, or quit", 0),
             ("    q              Quit", 0),
             ("", 0),
@@ -1291,23 +1408,33 @@ class CCSApp:
                    hints[:box_w - 3], dim)
 
     def _draw_footer(self, y: int, w: int):
+        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+
+        # Left: status or app name
         if self.status:
             self._safe(y, 1, f" {self.status} ",
                        curses.color_pair(CP_STATUS) | curses.A_BOLD)
         else:
-            self._safe(y, 1, " ccs ",
-                       curses.color_pair(CP_DIM) | curses.A_DIM)
-            # Hint for help
-            self._safe(y, 7, "? help",
-                       curses.color_pair(CP_DIM) | curses.A_DIM)
+            self._safe(y, 1, " ccs ", dim)
+            self._safe(y, 6, "? help", dim)
 
-        # Scroll position
+        # Right: [marked ·] position (pg X/Y)
+        right_parts = []
+        if self.marked:
+            right_parts.append(f"{len(self.marked)} marked")
         if self.filtered:
-            pos = f" {self.cur + 1}/{len(self.filtered)} "
-            self._safe(y, w - len(pos) - 1, pos,
-                       curses.color_pair(CP_DIM) | curses.A_DIM)
+            page_size = self._get_page_size()
+            page = (self.cur // page_size) + 1 if page_size > 0 else 1
+            pages = ((len(self.filtered) - 1) // page_size) + 1 if page_size > 0 else 1
+            pos = f"{self.cur + 1}/{len(self.filtered)}"
+            if pages > 1:
+                pos += f" pg {page}/{pages}"
+            right_parts.append(pos)
+        if right_parts:
+            right_text = " · ".join(right_parts)
+            self._safe(y, w - len(right_text) - 2, f" {right_text} ", dim)
 
-        # Show mode indicator
+        # Center: mode indicator
         if self.mode not in ("normal", "help", "delete", "delete_empty", "quit", "profiles", "profile_edit"):
             mode_label = f" [{self.mode.upper()}] "
             mx = (w - len(mode_label)) // 2
@@ -1374,10 +1501,10 @@ class CCSApp:
             if self.filtered:
                 self.cur = min(len(self.filtered) - 1, self.cur + 1)
         elif k == curses.KEY_PPAGE:
-            self.cur = max(0, self.cur - 10)
+            self.cur = max(0, self.cur - self._get_page_size())
         elif k == curses.KEY_NPAGE:
             if self.filtered:
-                self.cur = min(len(self.filtered) - 1, self.cur + 10)
+                self.cur = min(len(self.filtered) - 1, self.cur + self._get_page_size())
         elif k in (curses.KEY_HOME, ord("g")):
             self.cur = 0
         elif k == ord("G"):
@@ -1396,8 +1523,28 @@ class CCSApp:
                 extra = self._build_args_from_profile(active) if active else []
                 self.exit_action = ("resume", s.id, s.cwd, extra)
                 return "action"
-        elif k == ord("p"):
+        elif k == ord(" "):
+            # Toggle mark
             if self.filtered:
+                s = self.filtered[self.cur]
+                if s.id in self.marked:
+                    self.marked.discard(s.id)
+                else:
+                    self.marked.add(s.id)
+                if self.cur < len(self.filtered) - 1:
+                    self.cur += 1
+        elif k == ord("u"):
+            if self.marked:
+                self.marked.clear()
+                self._set_status("Cleared all marks")
+        elif k == ord("p"):
+            if self.marked:
+                for sid in self.marked:
+                    self.mgr.toggle_pin(sid)
+                self._set_status(f"Toggled pin for {len(self.marked)} session(s)")
+                self.marked.clear()
+                self._refresh()
+            elif self.filtered:
                 s = self.filtered[self.cur]
                 pinned = self.mgr.toggle_pin(s.id)
                 icon = "★ Pinned" if pinned else "Unpinned"
@@ -1417,7 +1564,11 @@ class CCSApp:
                 else:
                     self._set_status("No tag to remove")
         elif k == ord("d"):
-            if self.filtered:
+            if self.marked:
+                self.delete_label = f"{len(self.marked)} marked sessions"
+                self.confirm_sel = 0
+                self.mode = "delete"
+            elif self.filtered:
                 s = self.filtered[self.cur]
                 self.delete_label = s.tag or s.label[:40]
                 self.confirm_sel = 0
@@ -1438,6 +1589,20 @@ class CCSApp:
             return "action"
         elif k == ord("/"):
             self.mode = "search"
+        elif k == ord("R"):
+            # Quick resume most recent session
+            if self.sessions:
+                most_recent = max(self.sessions, key=lambda s: s.mtime)
+                profiles = self.mgr.load_profiles()
+                active = next(
+                    (p for p in profiles if p.get("name") == self.active_profile_name),
+                    None,
+                )
+                extra = self._build_args_from_profile(active) if active else []
+                self.exit_action = ("resume", most_recent.id, most_recent.cwd, extra)
+                return "action"
+            else:
+                self._set_status("No sessions to resume")
         elif k == ord("P"):
             self.prof_cur = 0
             self.prof_delete_confirm = False
@@ -1449,6 +1614,13 @@ class CCSApp:
             self._apply_theme(THEME_NAMES[idx])
             self.mgr.save_theme(self.active_theme)
             self._set_status(f"Theme: {self.active_theme}")
+        elif k == ord("s"):
+            modes = ["date", "name", "project"]
+            idx = modes.index(self.sort_mode) if self.sort_mode in modes else 0
+            self.sort_mode = modes[(idx + 1) % len(modes)]
+            self._refresh()
+            labels = {"date": "Date", "name": "Name", "project": "Project"}
+            self._set_status(f"Sort: {labels[self.sort_mode]}")
         elif k == ord("?"):
             self.mode = "help"
         elif k in (ord("r"), curses.KEY_F5):
@@ -1488,7 +1660,16 @@ class CCSApp:
 
     def _input_delete(self, k: int) -> Optional[str]:
         if k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
-            if self.filtered:
+            if self.marked:
+                count = 0
+                for s in list(self.sessions):
+                    if s.id in self.marked:
+                        self.mgr.delete(s)
+                        count += 1
+                self.marked.clear()
+                self._set_status(f"Deleted {count} session{'s' if count != 1 else ''}")
+                self._refresh()
+            elif self.filtered:
                 s = self.filtered[self.cur]
                 self.mgr.delete(s)
                 self._set_status(f"Deleted: {s.tag or s.id[:12]}")
@@ -1808,6 +1989,7 @@ def cmd_help():
   ccs delete <id|tag>                    Delete a session
   ccs delete --empty                     Delete all empty sessions
   ccs search <query>                     Search sessions by text
+  ccs export <id|tag>                    Export session as markdown
   ccs profile list                       List profiles
   ccs profile set <name>                 Set active profile
   ccs profile new <name> [flags]         Create profile from CLI flags
@@ -1831,16 +2013,21 @@ def cmd_help():
 \033[1mTUI Keybindings:\033[0m
   \033[36m↑/↓\033[0m or \033[36mj/k\033[0m       Navigate sessions
   \033[36mEnter\033[0m             Resume with active profile
+  \033[36mR\033[0m                 Quick resume most recent session
   \033[36mP\033[0m                 Profile picker / manager
   \033[36mH\033[0m                 Cycle theme
-  \033[36mp\033[0m                 Toggle pin
+  \033[36ms\033[0m                 Cycle sort (date/name/project)
+  \033[36mp\033[0m                 Toggle pin (bulk if marked)
   \033[36mt\033[0m / \033[36mT\033[0m             Tag / remove tag
   \033[36md\033[0m / \033[36mD\033[0m             Delete session / delete empties
+  \033[36mSpace\033[0m             Mark/unmark session for bulk ops
+  \033[36mu\033[0m                 Unmark all
   \033[36mn\033[0m                 New named session
   \033[36me\033[0m                 Ephemeral session
   \033[36m/\033[0m                 Search / filter
   \033[36mr\033[0m                 Refresh
-  \033[36mq\033[0m                 Quit""")
+  \033[36mq\033[0m                 Quit
+  Mouse: click select, double-click resume, scroll navigate""")
 
 
 def cmd_list(mgr: SessionManager):
@@ -2084,6 +2271,40 @@ def cmd_theme_set(mgr: SessionManager, name: str):
     print(f"Theme set to: {name}")
 
 
+def cmd_export(mgr: SessionManager, query: str):
+    s = _find_session(mgr, query)
+    ts = datetime.datetime.fromtimestamp(s.mtime).strftime("%Y-%m-%d %H:%M")
+    print(f"# Session: {s.label}")
+    print(f"- **ID:** `{s.id}`")
+    if s.tag:
+        print(f"- **Tag:** {s.tag}")
+    print(f"- **Project:** {s.project_display}")
+    print(f"- **CWD:** {s.cwd}")
+    print(f"- **Modified:** {ts}")
+    if s.pinned:
+        print("- **Pinned:** yes")
+    print(f"- **Messages:** {s.msg_count}")
+    print()
+    try:
+        with open(s.path, "r", errors="replace") as f:
+            for ln in f:
+                try:
+                    d = json.loads(ln)
+                except Exception:
+                    continue
+                msg_type = d.get("type")
+                if msg_type == "user":
+                    txt = SessionManager._extract_text(d.get("message", {}))
+                    if txt:
+                        print(f"## User\n\n{txt}\n")
+                elif msg_type == "assistant":
+                    txt = SessionManager._extract_text(d.get("message", {}))
+                    if txt:
+                        print(f"## Assistant\n\n{txt}\n")
+    except Exception as e:
+        print(f"\n*Error reading session file: {e}*")
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 
@@ -2196,6 +2417,12 @@ def main():
             print("\033[31mUsage: ccs search <query>\033[0m")
             sys.exit(1)
         cmd_search(mgr, " ".join(args[1:]))
+
+    elif verb == "export":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs export <id|tag>\033[0m")
+            sys.exit(1)
+        cmd_export(mgr, args[1])
 
     elif verb == "profile":
         if len(args) < 2:
