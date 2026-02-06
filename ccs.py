@@ -807,13 +807,13 @@ class CCSApp:
                     break
                 continue
 
-            # Ctrl-C: double-tap within 1 second to quit
+            # Ctrl-C: double-tap within 1 second to open quit confirmation
             if k == 3:
                 now = time.monotonic()
                 if now - self.last_ctrl_c < 1.0:
-                    break
+                    self.confirm_sel = 0
+                    self.mode = "quit"
                 self.last_ctrl_c = now
-                self._set_status("Press Ctrl-C again to quit")
                 continue
 
             result = self._handle_input(k)
