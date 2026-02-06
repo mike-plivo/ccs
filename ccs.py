@@ -1500,6 +1500,11 @@ class CCSApp:
         elif k in (curses.KEY_DOWN, ord("j")):
             if self.filtered:
                 self.cur = min(len(self.filtered) - 1, self.cur + 1)
+        elif k == curses.KEY_SR:  # Shift+Up
+            self.cur = max(0, self.cur - 10)
+        elif k == curses.KEY_SF:  # Shift+Down
+            if self.filtered:
+                self.cur = min(len(self.filtered) - 1, self.cur + 10)
         elif k == curses.KEY_PPAGE:
             self.cur = max(0, self.cur - self._get_page_size())
         elif k == curses.KEY_NPAGE:
