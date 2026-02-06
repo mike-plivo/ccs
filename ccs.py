@@ -974,13 +974,15 @@ class CCSApp:
 
         msg_str = f"{s.msg_count:>3d}m " if s.msg_count else "     "
 
-        # Pin/tmux indicator
-        if s.pinned:
-            pin_ch = "★"
+        # Pin/tmux indicator (2-char column)
+        if s.pinned and has_tmux:
+            pin_str = "★▶"
+        elif s.pinned:
+            pin_str = "★ "
         elif has_tmux:
-            pin_ch = "▶"
+            pin_str = "▶ "
         else:
-            pin_ch = " "
+            pin_str = "  "
 
         # Mark indicator
         if marked:
@@ -994,7 +996,7 @@ class CCSApp:
             # Highlight entire row
             base = curses.color_pair(CP_SELECTED) | curses.A_BOLD
 
-            line = f" {mark_ch} {pin_ch} {tag_str}{s.ts}  {msg_str}{proj} {desc}"
+            line = f" {mark_ch} {pin_str}{tag_str}{s.ts}  {msg_str}{proj} {desc}"
             if len(line) < w - 1:
                 line += " " * (w - 1 - len(line))
             line = line[:w - 1]
@@ -1004,8 +1006,9 @@ class CCSApp:
             x = 3
             if s.pinned:
                 self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
-            elif has_tmux:
-                self._safe(y, x, "▶", curses.color_pair(CP_STATUS) | curses.A_BOLD)
+            if has_tmux:
+                tx = 4 if s.pinned else 3
+                self._safe(y, tx, "▶", curses.color_pair(CP_STATUS) | curses.A_BOLD)
             x += pin_w
             if s.tag and tag_w > 0:
                 disp_tag = f"[{s.tag}]"
@@ -1029,9 +1032,10 @@ class CCSApp:
 
             # Pin / tmux
             if s.pinned:
-                self._safe(y, x, "★ ", curses.color_pair(CP_PIN) | curses.A_BOLD)
-            elif has_tmux:
-                self._safe(y, x, "▶ ", curses.color_pair(CP_STATUS) | curses.A_BOLD)
+                self._safe(y, x, "★", curses.color_pair(CP_PIN) | curses.A_BOLD)
+            if has_tmux:
+                self._safe(y, x + (1 if s.pinned else 0), "▶",
+                           curses.color_pair(CP_STATUS) | curses.A_BOLD)
             x += pin_w
 
             # Tag
