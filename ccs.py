@@ -947,7 +947,7 @@ class CCSApp:
 
         # Column widths
         ind_w = 3     # " ▸ " or " ● " or "   "
-        pin_w = 2     # "★ " or "▶ " or "  "
+        pin_w = 2     # "★ " or "⚡ " or "  "
         ts_w = 18     # "2025-01-15 14:30  "
         msg_w = 5     # "12m " or "  0m "
         tag_w = tag_col_w  # fixed across all visible rows
@@ -976,11 +976,11 @@ class CCSApp:
 
         # Pin/tmux indicator (2-char column)
         if s.pinned and has_tmux:
-            pin_str = "★▶"
+            pin_str = "★⚡"
         elif s.pinned:
             pin_str = "★ "
         elif has_tmux:
-            pin_str = "▶ "
+            pin_str = "⚡ "
         else:
             pin_str = "  "
 
@@ -1008,7 +1008,7 @@ class CCSApp:
                 self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
             if has_tmux:
                 tx = 4 if s.pinned else 3
-                self._safe(y, tx, "▶", curses.color_pair(CP_STATUS) | curses.A_BOLD)
+                self._safe(y, tx, "⚡", curses.color_pair(CP_STATUS) | curses.A_BOLD)
             x += pin_w
             if s.tag and tag_w > 0:
                 disp_tag = f"[{s.tag}]"
@@ -1034,7 +1034,7 @@ class CCSApp:
             if s.pinned:
                 self._safe(y, x, "★", curses.color_pair(CP_PIN) | curses.A_BOLD)
             if has_tmux:
-                self._safe(y, x + (1 if s.pinned else 0), "▶",
+                self._safe(y, x + (1 if s.pinned else 0), "⚡",
                            curses.color_pair(CP_STATUS) | curses.A_BOLD)
             x += pin_w
 
@@ -1098,7 +1098,7 @@ class CCSApp:
                        curses.color_pair(CP_ACCENT)))
         if s.id in self.tmux_sids:
             tmux_name = self.tmux_sids[s.id]
-            lines.append((f"  Tmux:    ▶ {tmux_name} (K to kill)",
+            lines.append((f"  Tmux:    ⚡ {tmux_name} (K to kill)",
                            curses.color_pair(CP_STATUS) | curses.A_BOLD))
         lines.append(("", 0))
 
@@ -1162,7 +1162,7 @@ class CCSApp:
             ("", 0),
             ("  Tmux", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
-            ("    ▶ indicator    Session has active tmux", 0),
+            ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
