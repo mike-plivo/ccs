@@ -1079,7 +1079,7 @@ class CCSApp:
                    curses.color_pair(CP_TAG) | curses.A_BOLD)
 
         if self.view == "detail":
-            normal_hints = "← Back  ↑↓ Scroll  j/k Session  ⏎ Resume  K Kill  / Search  ? Help"
+            normal_hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  K Kill  / Search  ? Help"
         else:
             normal_hints = "⏎ Resume  → Detail  R Last  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help"
         hints_map = {
@@ -1103,9 +1103,9 @@ class CCSApp:
             s = self.filtered[self.cur]
             if self.view == "detail":
                 if s.id in self.tmux_sids:
-                    hints = "Tab Pane  ↑↓ Scroll  i Send to tmux  K Kill  ⏎ Attach  ← Back  ? Help"
+                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  i Send to tmux  K Kill  ⏎ Attach  ? Help"
                 else:
-                    hints = "Tab Pane  ↑↓ Scroll  ⏎ Resume  ← Back  ? Help"
+                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1557,62 +1557,86 @@ class CCSApp:
 
     def _draw_help_overlay(self, h: int, w: int):
         """Draw a centered help box over the main UI."""
-        help_lines = [
-            ("", 0),
-            ("  Keybindings", curses.A_BOLD),
-            ("", 0),
-            ("  Navigation", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    ↑ / k          Move up", 0),
-            ("    ↓ / j          Move down", 0),
-            ("    g              Jump to first", 0),
-            ("    G              Jump to last", 0),
-            ("    Shift+↑/↓      Jump 10 rows", 0),
-            ("    PgUp / PgDn    Page up / down", 0),
-            ("", 0),
-            ("  Actions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    Enter          Resume with active profile", 0),
-            ("    R              Quick resume most recent", 0),
-            ("    P              Profile picker / manager", 0),
-            ("                   (Tab: expert/structured mode)", 0),
-            ("    p              Toggle pin (bulk if marked)", 0),
-            ("    t              Set / rename tag", 0),
-            ("    T              Remove tag from session", 0),
-            ("    c              Change session CWD", 0),
-            ("    d              Delete session (bulk if marked)", 0),
-            ("    D              Delete all empty sessions", 0),
-            ("", 0),
-            ("  Bulk & Sort", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    Space          Mark / unmark session", 0),
-            ("    u              Unmark all", 0),
-            ("    s              Cycle sort: date/name/project", 0),
-            ("", 0),
-            ("  Sessions", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    n              Create a new named session", 0),
-            ("    e              Start an ephemeral session", 0),
-            ("", 0),
-            ("  Tmux (requires tmux)", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    K              Kill session's tmux", 0),
-            ("    i              Send text to tmux (Session View, Ctrl+D to send)", 0),
-            ("    ⚡ indicator    Session has active tmux", 0),
-            ("", 0),
-            ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    → / l          Session View (Session Info + Tmux View)", 0),
-            ("    ← / h          Sessions", 0),
-            ("    Tab            Switch focus between Session Info and Tmux View", 0),
-            ("    ↑/↓            Scroll focused pane", 0),
-            ("    Shift+↑/↓      Fast scroll focused pane", 0),
-            ("", 0),
-            ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    H              Cycle theme", 0),
-            ("    /              Search / filter sessions", 0),
-            ("    r              Refresh session list", 0),
-            ("    Mouse          Click / dbl-click / scroll", 0),
-            ("    Esc            Clear filter, or quit", 0),
-            ("    q              Quit", 0),
-            ("", 0),
-            ("  Press any key to close", curses.color_pair(CP_DIM) | curses.A_DIM),
-            ("", 0),
-        ]
+        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
+        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+
+        if self.view == "detail":
+            help_lines = [
+                ("", 0),
+                ("  Session View", curses.A_BOLD),
+                ("", 0),
+                ("  Panes", hdr),
+                ("    Tab            Switch Info / Tmux pane", 0),
+                ("    ↑ / ↓          Scroll focused pane", 0),
+                ("    Shift+↑/↓      Fast scroll (10 lines)", 0),
+                ("    PgUp / PgDn    Page up / down", 0),
+                ("    g              Scroll to top", 0),
+                ("    G              Scroll to bottom", 0),
+                ("", 0),
+                ("  Actions", hdr),
+                ("    Enter          Resume / attach session", 0),
+                ("    K              Kill session's tmux", 0),
+                ("    i              Send text to tmux (Ctrl+D to send)", 0),
+                ("    p              Toggle pin", 0),
+                ("    t              Set / rename tag", 0),
+                ("    T              Remove tag", 0),
+                ("", 0),
+                ("  Other", hdr),
+                ("    H              Cycle theme", 0),
+                ("    /              Search / filter sessions", 0),
+                ("    r              Refresh session list", 0),
+                ("    Esc / ← / h    Back to Sessions list", 0),
+                ("    q              Quit", 0),
+                ("", 0),
+                ("  Press any key to close", dim),
+                ("", 0),
+            ]
+        else:
+            help_lines = [
+                ("", 0),
+                ("  Sessions List", curses.A_BOLD),
+                ("", 0),
+                ("  Navigation", hdr),
+                ("    ↑ / k          Move up", 0),
+                ("    ↓ / j          Move down", 0),
+                ("    g              Jump to first", 0),
+                ("    G              Jump to last", 0),
+                ("    Shift+↑/↓      Jump 10 rows", 0),
+                ("    PgUp / PgDn    Page up / down", 0),
+                ("    → / l          Open Session View", 0),
+                ("", 0),
+                ("  Actions", hdr),
+                ("    Enter          Resume with active profile", 0),
+                ("    R              Quick resume most recent", 0),
+                ("    P              Profile picker / manager", 0),
+                ("    p              Toggle pin (bulk if marked)", 0),
+                ("    t              Set / rename tag", 0),
+                ("    T              Remove tag from session", 0),
+                ("    c              Change session CWD", 0),
+                ("    d              Delete session (bulk if marked)", 0),
+                ("    D              Delete all empty sessions", 0),
+                ("    K              Kill session's tmux", 0),
+                ("", 0),
+                ("  Bulk & Sort", hdr),
+                ("    Space          Mark / unmark session", 0),
+                ("    u              Unmark all", 0),
+                ("    s              Cycle sort: date/name/project", 0),
+                ("", 0),
+                ("  Sessions", hdr),
+                ("    n              Create a new named session", 0),
+                ("    e              Start an ephemeral session", 0),
+                ("", 0),
+                ("  Other", hdr),
+                ("    H              Cycle theme", 0),
+                ("    /              Search / filter sessions", 0),
+                ("    r              Refresh session list", 0),
+                ("    Mouse          Click / dbl-click / scroll", 0),
+                ("    Esc            Clear filter, or quit", 0),
+                ("    q              Quit", 0),
+                ("", 0),
+                ("  Press any key to close", dim),
+                ("", 0),
+            ]
 
         box_w = min(54, w - 4)
         box_h = min(len(help_lines) + 2, h - 2)
@@ -2322,7 +2346,10 @@ class CCSApp:
             self.mode = "quit"
             return None
         elif k == 27:  # Esc
-            if self.query:
+            if self.view == "detail":
+                self.view = "sessions"
+                return None
+            elif self.query:
                 self.query = ""
                 self.query_cursor = 0
                 self._apply_filter()
