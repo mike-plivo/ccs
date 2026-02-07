@@ -1053,9 +1053,9 @@ class CCSApp:
         self._safe(1, 2, prof_badge,
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
-        tab_label = "Tab Sessions" if self.view == "detail" else "Tab Detail"
+        view_hint = "← Back" if self.view == "detail" else "→ Detail"
         hints_map = {
-            "normal":  f"⏎ Resume  {tab_label}  R Last  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help",
+            "normal":  f"⏎ Resume  {view_hint}  R Last  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help",
             "search":  "Type to filter  ·  ↑/↓ Navigate  ·  ⏎ Done  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
@@ -1076,11 +1076,11 @@ class CCSApp:
             if s.id in self.tmux_sids:
                 state = self.tmux_claude_state.get(s.id, "unknown")
                 if state == "approval":
-                    hints = f"Y Approve  N Deny  i Input  {tab_label}  K Kill  ⏎ Attach  ? Help"
+                    hints = f"Y Approve  N Deny  i Input  {view_hint}  K Kill  ⏎ Attach  ? Help"
                 elif state == "input":
-                    hints = f"i Send input  Y/N Quick  {tab_label}  K Kill  ⏎ Attach  ? Help"
+                    hints = f"i Send input  Y/N Quick  {view_hint}  K Kill  ⏎ Attach  ? Help"
                 else:
-                    hints = f"i Input  Y/N  {tab_label}  K Kill  ⏎ Attach  s Sort  ? Help"
+                    hints = f"i Input  Y/N  {view_hint}  K Kill  ⏎ Attach  s Sort  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1316,10 +1316,10 @@ class CCSApp:
         else:
             label = " Preview "
         self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
-        # Tab indicator on right
-        tab_hint = " Tab: Detail " if self.view == "sessions" else " Tab: Sessions "
-        if len(tab_hint) + 4 < w:
-            self._safe(y, w - len(tab_hint) - 2, tab_hint,
+        # View indicator on right
+        view_hint = " →: Detail " if self.view == "sessions" else " ←: Sessions "
+        if len(view_hint) + 4 < w:
+            self._safe(y, w - len(view_hint) - 2, view_hint,
                        curses.color_pair(CP_DIM) | curses.A_DIM)
 
     def _draw_preview(self, sy: int, h: int, w: int):
@@ -1515,7 +1515,8 @@ class CCSApp:
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    Tab            Toggle Sessions/Detail view", 0),
+            ("    → / l          Detail view", 0),
+            ("    ← / h          Sessions view", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
@@ -2194,12 +2195,16 @@ class CCSApp:
             self.mgr.save_theme(self.active_theme)
             self._set_status(f"Theme: {self.active_theme}")
             return None
-        elif k == 9:  # Tab — toggle between sessions and detail view
-            self.view = "detail" if self.view == "sessions" else "sessions"
-            return None
-
         # Navigation
-        if k in (curses.KEY_UP, ord("k")):
+        if k in (curses.KEY_RIGHT, ord("l")):
+            if self.view == "sessions":
+                self.view = "detail"
+            return None
+        elif k in (curses.KEY_LEFT, ord("h")):
+            if self.view == "detail":
+                self.view = "sessions"
+            return None
+        elif k in (curses.KEY_UP, ord("k")):
             self.cur = max(0, self.cur - 1)
         elif k in (curses.KEY_DOWN, ord("j")):
             if self.filtered:
