@@ -1727,7 +1727,7 @@ class ConfirmModal(ModalScreen[bool]):
             self.dismiss(False)
         elif key in ("enter", "return"):
             self.dismiss(self.sel == 0)
-        elif key in ("left", "h", "right", "l"):
+        elif key in ("left", "h", "right", "l", "up", "k", "down", "j"):
             self.sel = 1 - self.sel
             self._render_buttons()
 
@@ -2771,7 +2771,7 @@ class CCSApp(App):
             )
         else:
             header.hints = (
-                "j/k nav \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
+                "\u2191/\u2193 j/k nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
                 " \u00b7 t tag \u00b7 s sort \u00b7 ? help"
             )
 
@@ -3073,14 +3073,20 @@ class CCSApp(App):
             self.mgr.tmux_unregister(tmux_name)
         self._do_refresh()
 
-    def _tmux_launch_new(self, name, extra):
+    def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid[:8]
         tags = self.mgr._load(TAGS_FILE, {})
         tags[uid] = name
         self.mgr._save(TAGS_FILE, tags)
+        if cwd:
+            cwds = self.mgr._load(CWDS_FILE, {})
+            cwds[uid] = cwd
+            self.mgr._save(CWDS_FILE, cwds)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        if cwd and os.path.isdir(cwd):
+            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str)
         subprocess.run(
             [
@@ -3725,8 +3731,10 @@ class CCSApp(App):
         if self.view != "sessions":
             return
 
-        def on_result(name):
-            if not name:
+        def on_path(cwd, name):
+            cwd = cwd.strip() if cwd else ""
+            if cwd and not os.path.isdir(cwd):
+                self._set_status(f"Directory not found: {cwd}")
                 return
             use_tmux = self._get_use_tmux()
             if use_tmux:
@@ -3734,15 +3742,23 @@ class CCSApp(App):
                     self._set_status("tmux is not installed")
                     return
                 extra = self._active_profile_args()
-                self._tmux_launch_new(name, extra)
+                self._tmux_launch_new(name, extra, cwd=cwd or None)
                 self._do_refresh()
             else:
-                self.exit_action = ("new", name)
+                self.exit_action = ("new", name, cwd or None)
                 self.exit()
+
+        def on_name(name):
+            if not name:
+                return
+            self.push_screen(
+                SimpleInputModal("Working Directory", os.getcwd(), "Path (leave default for current dir)"),
+                lambda cwd: on_path(cwd, name),
+            )
 
         self.push_screen(
             SimpleInputModal("New Session Name", "", "Enter session name"),
-            on_result,
+            on_name,
         )
 
     def action_ephemeral_session(self):
@@ -3933,11 +3949,17 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
     os.execvp("claude", cmd)
 
 
-def cmd_new(mgr: SessionManager, name: str, extra: List[str]):
+def cmd_new(mgr: SessionManager, name: str, extra: List[str], cwd: str = None):
     uid = str(uuid_mod.uuid4())
     tags = mgr._load(TAGS_FILE, {})
     tags[uid] = name
     mgr._save(TAGS_FILE, tags)
+    if cwd:
+        cwds = mgr._load(CWDS_FILE, {})
+        cwds[uid] = cwd
+        mgr._save(CWDS_FILE, cwds)
+        if os.path.isdir(cwd):
+            os.chdir(cwd)
     print(f"\033[1;36m◆\033[0m Starting named session: "
           f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
     cmd = ["claude", "--session-id", uid] + extra
@@ -4289,8 +4311,8 @@ def main():
             os.execvp("claude", cmd)
 
         elif action[0] == "new":
-            _, name = action
-            cmd_new(mgr, name, [])
+            _, name, cwd = action
+            cmd_new(mgr, name, [], cwd=cwd)
 
         elif action[0] == "tmp":
             cmd_tmp(mgr, [])
