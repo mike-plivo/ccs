@@ -1087,12 +1087,8 @@ class CCSApp:
         hints = hints_map.get(hint_key, "")
         if hint_key == "normal" and self.filtered:
             s = self.filtered[self.cur]
-            if s.id in self.tmux_sids:
-                state = self.tmux_claude_state.get(s.id, "unknown")
-                if self.view == "detail":
-                    hints = "i Send to tmux  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
-                else:
-                    hints = "i Send to tmux  → Detail  K Kill  ⏎ Attach  s Sort  ? Help"
+            if s.id in self.tmux_sids and self.view == "detail":
+                hints = "i Send to tmux  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1529,15 +1525,15 @@ class CCSApp:
             ("", 0),
             ("  Tmux (requires tmux)", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
-            ("    i              Send text to tmux session", 0),
+            ("    i              Send text to tmux (Session View)", 0),
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    → / l          Detail view", 0),
-            ("    ← / h          Sessions view", 0),
-            ("    ↑/↓            Scroll detail (in detail view)", 0),
-            ("    Shift+↑/↓      Fast scroll detail", 0),
-            ("    j / k          Switch session (in detail view)", 0),
+            ("    → / l          Session View", 0),
+            ("    ← / h          Sessions", 0),
+            ("    ↑/↓            Scroll (in Session View)", 0),
+            ("    Shift+↑/↓      Fast scroll (in Session View)", 0),
+            ("    j / k          Switch session (in Session View)", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
@@ -2421,7 +2417,9 @@ class CCSApp:
             elif not HAS_TMUX:
                 self._set_status("tmux is not installed")
         elif k == ord("i"):
-            # Send input to tmux session
+            # Send input to tmux session (only in detail/session view)
+            if self.view != "detail":
+                return None
             if self.filtered and HAS_TMUX:
                 s = self.filtered[self.cur]
                 if s.id in self.tmux_sids:
