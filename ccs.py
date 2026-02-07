@@ -910,19 +910,6 @@ Screen {
     background: $surface;
 }
 
-#search-input {
-    dock: top;
-    height: 1;
-    display: none;
-    border: none;
-    background: $surface;
-    color: $accent;
-}
-
-#search-input.visible {
-    display: block;
-}
-
 #sessions-view {
     height: 1fr;
 }
@@ -1931,6 +1918,156 @@ class SimpleInputModal(ModalScreen[str]):
         self.dismiss(None)
 
 
+class SearchModal(ModalScreen[str]):
+    """Centered search popup with live filtering."""
+
+    DEFAULT_CSS = """
+    SearchModal {
+        align: center middle;
+    }
+    #search-box {
+        width: 56;
+        height: auto;
+        border: heavy $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #search-field {
+        margin-top: 1;
+    }
+    #search-hints { margin-top: 1; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, initial: str = "", on_change=None):
+        super().__init__()
+        self.initial = initial
+        self._on_change = on_change
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="search-box"):
+            yield Static(id="search-title")
+            yield Input(value=self.initial, placeholder="Search sessions...", id="search-field")
+            yield Static(id="search-hints")
+
+    def on_mount(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        title = Text("/ Search", style=Style(color=tc("header-color", "#00ffff"), bold=True))
+        self.query_one("#search-title", Static).update(title)
+        hints = Text("\u23ce Confirm  \u00b7  Esc Clear & close", style=Style(color=tc("dim-color", "#888888")))
+        self.query_one("#search-hints", Static).update(hints)
+        inp = self.query_one("#search-field", Input)
+        inp.focus()
+        inp.cursor_position = len(self.initial)
+
+    def on_input_changed(self, event: Input.Changed):
+        if self._on_change:
+            self._on_change(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted):
+        self.dismiss(event.value)
+
+    def action_cancel(self):
+        if self._on_change:
+            self._on_change("")
+        self.dismiss(None)
+
+
+class ThemeModal(ModalScreen[str]):
+    """Theme picker with live preview on navigation."""
+
+    DEFAULT_CSS = """
+    ThemeModal {
+        align: center middle;
+    }
+    #theme-box {
+        width: 44;
+        height: auto;
+        border: heavy $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #theme-list-text { height: auto; }
+    #theme-hints { margin-top: 1; }
+    """
+
+    def __init__(self, current_theme: str, on_preview=None):
+        super().__init__()
+        self._original = current_theme
+        self.cur = THEME_NAMES.index(current_theme) if current_theme in THEME_NAMES else 0
+        self._on_preview = on_preview
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="theme-box"):
+            yield Static(id="theme-title")
+            yield Static(id="theme-list-text")
+            yield Static(id="theme-hints")
+
+    def on_mount(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        title = Text("Select Theme", style=Style(color=tc("header-color", "#00ffff"), bold=True))
+        self.query_one("#theme-title", Static).update(title)
+        hints = Text("j/k navigate  \u00b7  \u23ce select  \u00b7  Esc cancel",
+                     style=Style(color=tc("dim-color", "#888888")), justify="center")
+        self.query_one("#theme-hints", Static).update(hints)
+        self._refresh_display()
+
+    def _refresh_display(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        sel_style = Style(color=tc("header-color", "#00ffff"), bold=True, reverse=True)
+        dim_style = Style(color=tc("dim-color", "#888888"))
+        active_style = Style(color=tc("tag-color", "#00ff00"), bold=True)
+
+        text = Text()
+        for i, name in enumerate(THEME_NAMES):
+            is_sel = (i == self.cur)
+            is_active = (name == self._original)
+            prefix = " \u25b8 " if is_sel else "   "
+            badge = " *" if is_active else ""
+            line = f"{prefix}{name}{badge}"
+            if is_sel:
+                text.append(line, style=sel_style)
+            elif is_active:
+                text.append(line, style=active_style)
+            else:
+                text.append(line, style=dim_style)
+            if i < len(THEME_NAMES) - 1:
+                text.append("\n")
+        self.query_one("#theme-list-text", Static).update(text)
+
+    def _preview_current(self):
+        name = THEME_NAMES[self.cur]
+        if self._on_preview:
+            self._on_preview(name)
+
+    def on_key(self, event):
+        key = event.key
+        event.stop()
+        event.prevent_default()
+        n = len(THEME_NAMES)
+
+        if key in ("j", "down"):
+            if self.cur < n - 1:
+                self.cur += 1
+                self._refresh_display()
+                self._preview_current()
+        elif key in ("k", "up"):
+            if self.cur > 0:
+                self.cur -= 1
+                self._refresh_display()
+                self._preview_current()
+        elif key in ("enter", "return"):
+            self.dismiss(THEME_NAMES[self.cur])
+        elif key == "escape":
+            # Restore original theme
+            if self._on_preview:
+                self._on_preview(self._original)
+            self.dismiss(None)
+
+
 class ProfilesModal(ModalScreen[str]):
     """Profile picker/manager with text-based rendering."""
 
@@ -2395,7 +2532,6 @@ class CCSApp(App):
 
     def compose(self) -> ComposeResult:
         yield HeaderBox(id="header")
-        yield Input(id="search-input", placeholder="Search...")
         with Container(id="sessions-view"):
             yield SessionListWidget(id="session-list")
             yield PreviewPane(id="preview")
@@ -2661,8 +2797,32 @@ class CCSApp(App):
     # -- Tmux polling ------------------------------------------------------
 
     def _poll_tmux_activity(self):
-        if not HAS_TMUX or not self.tmux_sids:
+        if not HAS_TMUX:
             self.tmux_idle = set()
+            return
+        # Refresh tmux_sids from live tmux sessions
+        old_sids = set(self.tmux_sids)
+        try:
+            alive = self.mgr.tmux_sessions()
+            self.tmux_sids = {
+                info.get("session_id"): name for name, info in alive.items()
+            }
+        except Exception:
+            pass
+        new_sids = set(self.tmux_sids)
+        sids_changed = (old_sids != new_sids)
+        # Prune stale pane cache
+        gone = old_sids - new_sids
+        for sid in gone:
+            self.tmux_pane_cache.pop(sid, None)
+            self.tmux_pane_cache_stripped.pop(sid, None)
+            self.tmux_pane_ts.pop(sid, None)
+            self.tmux_claude_state.pop(sid, None)
+        if not self.tmux_sids:
+            self.tmux_idle = set()
+            if sids_changed:
+                self._rebuild_list()
+                self._update_footer()
             return
         try:
             r = subprocess.run(
@@ -2677,8 +2837,14 @@ class CCSApp(App):
                 timeout=2,
             )
             if r.returncode != 0:
+                if sids_changed:
+                    self._rebuild_list()
+                    self._update_footer()
                 return
         except Exception:
+            if sids_changed:
+                self._rebuild_list()
+                self._update_footer()
             return
         now = time.time()
         activity = {}
@@ -2702,18 +2868,28 @@ class CCSApp(App):
                 s = next((s for s in self.sessions if s.id == sid), None)
                 names.append(s.tag or s.id[:12] if s else sid[:12])
             self._set_status(f"Idle: {', '.join(names)}")
+        idle_changed = (self.tmux_idle != new_idle)
         self.tmux_idle = new_idle
+        # Rebuild list if tmux state changed
+        if sids_changed or idle_changed:
+            self._rebuild_list()
+            self._update_footer()
 
     def _poll_tmux_capture(self):
         """Capture tmux pane output for all active sessions."""
         if not HAS_TMUX or not self.tmux_sids:
             return
         now = time.monotonic()
+        old_states = dict(self.tmux_claude_state)
         for sid, tmux_name in self.tmux_sids.items():
             last = self.tmux_pane_ts.get(sid, 0.0)
             if now - last < TMUX_CAPTURE_INTERVAL:
                 continue
             self._capture_one_pane(sid, tmux_name)
+        # Rebuild session list if any claude state changed
+        if self.tmux_claude_state != old_states:
+            self._rebuild_list()
+            self._update_footer()
         # If in detail view, update tmux pane widget
         if self.view == "detail":
             self._update_detail()
@@ -2944,28 +3120,6 @@ class CCSApp(App):
         # Don't handle keys when a modal screen is active
         if isinstance(self.screen, ModalScreen):
             return
-        # Let search input handle its own keys when focused
-        si = self.query_one("#search-input", Input)
-        if si.has_class("visible") and si.has_focus:
-            if event.key == "escape":
-                event.stop()
-                event.prevent_default()
-                self._hide_search()
-                if self.query:
-                    self.query = ""
-                    self._apply_filter()
-                    self._rebuild_list()
-                    self._update_header()
-            elif event.key == "up":
-                event.stop()
-                event.prevent_default()
-                self.query_one("#session-list", SessionListWidget).action_cursor_up()
-            elif event.key == "down":
-                event.stop()
-                event.prevent_default()
-                self.query_one("#session-list", SessionListWidget).action_cursor_down()
-            # All other keys go to the Input widget normally
-            return
 
         key = event.key
         event.stop()
@@ -3089,28 +3243,29 @@ class CCSApp(App):
 
     # -- Search ------------------------------------------------------------
 
-    @on(Input.Changed, "#search-input")
-    def on_search_changed(self, event: Input.Changed):
-        self.query = event.value
-        self._apply_filter()
-        self._rebuild_list()
-        self._update_header()
-
-    @on(Input.Submitted, "#search-input")
-    def on_search_submitted(self, event: Input.Submitted):
-        self._hide_search()
-
     def _show_search(self):
-        si = self.query_one("#search-input", Input)
-        si.add_class("visible")
-        si.value = self.query
-        si.focus()
+        def on_live_change(value):
+            self.query = value
+            self._apply_filter()
+            self._rebuild_list()
+            self._update_header()
 
-    def _hide_search(self):
-        si = self.query_one("#search-input", Input)
-        si.remove_class("visible")
-        # Return focus to session list
-        self.query_one("#session-list", SessionListWidget).focus()
+        def on_result(result):
+            if result is None:
+                # Esc: clear filter
+                self.query = ""
+            else:
+                # Enter: keep the filter
+                self.query = result
+            self._apply_filter()
+            self._rebuild_list()
+            self._update_header()
+            self.query_one("#session-list", SessionListWidget).focus()
+
+        self.push_screen(
+            SearchModal(initial=self.query, on_change=on_live_change),
+            on_result,
+        )
 
     # -- Actions -----------------------------------------------------------
 
@@ -3171,29 +3326,37 @@ class CCSApp(App):
 
         self.push_screen(ProfileEditModal(profile), on_result)
 
+    def _apply_theme(self, short_name: str):
+        """Apply a theme by short name and refresh the UI."""
+        textual_name = TEXTUAL_THEME_MAP.get(short_name, "ccs-dark")
+        self._ccs_theme_name = textual_name
+        self.theme = textual_name
+        self._rebuild_list()
+        self._update_preview()
+        self._update_header()
+
     def action_cycle_theme(self):
-        # Find current theme index
-        current_short = None
+        # Find current short name
+        current_short = "dark"
         for short, textual_name in TEXTUAL_THEME_MAP.items():
             if textual_name == self._ccs_theme_name:
                 current_short = short
                 break
-        idx = (
-            THEME_NAMES.index(current_short)
-            if current_short in THEME_NAMES
-            else 0
+
+        def on_preview(name):
+            self._apply_theme(name)
+
+        def on_result(result):
+            if result is None:
+                return  # already restored by modal
+            self._apply_theme(result)
+            self.mgr.save_theme(result)
+            self._set_status(f"Theme: {result}")
+
+        self.push_screen(
+            ThemeModal(current_theme=current_short, on_preview=on_preview),
+            on_result,
         )
-        idx = (idx + 1) % len(THEME_NAMES)
-        new_short = THEME_NAMES[idx]
-        new_textual = TEXTUAL_THEME_MAP[new_short]
-        self._ccs_theme_name = new_textual
-        self.theme = new_textual
-        self.mgr.save_theme(new_short)
-        self._set_status(f"Theme: {new_short}")
-        # Force full UI rebuild for theme colors in Rich Text
-        self._rebuild_list()
-        self._update_preview()
-        self._update_header()
 
     def action_search(self):
         self._show_search()
@@ -3235,15 +3398,6 @@ class CCSApp(App):
             self._switch_to_sessions()
 
     def action_escape_action(self):
-        si = self.query_one("#search-input", Input)
-        if si.has_class("visible"):
-            self._hide_search()
-            if self.query:
-                self.query = ""
-                self._apply_filter()
-                self._rebuild_list()
-                self._update_header()
-            return
         if self.view == "detail":
             self._switch_to_sessions()
             return
