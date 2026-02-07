@@ -134,7 +134,6 @@ class Session:
     id: str
     project_raw: str
     project_display: str
-    cwd: str
     summary: str
     first_msg: str
     first_msg_long: str
@@ -217,11 +216,6 @@ class SessionManager:
         pins = self._load(old_pins, [])
         for sid in pins:
             meta.setdefault(sid, {})["pinned"] = True
-        # Merge cwds
-        cwds = self._load(old_cwds, {})
-        for sid, cwd in cwds.items():
-            if cwd:
-                meta.setdefault(sid, {})["cwd"] = cwd
         # Merge ephemeral
         try:
             text = old_ephemeral.read_text().strip()
@@ -328,13 +322,12 @@ class SessionManager:
                 summary = cached.get("summary", "")
                 fm = cached.get("first_msg", "")
                 fm_long = cached.get("first_msg_long", "")
-                cwd = cached.get("cwd", "").strip()
                 sums = cached.get("summaries", [])
                 msg_count = cached.get("msg_count", 0)
                 praw = cached.get("project_raw", praw)
                 pdisp = cached.get("project_display", pdisp)
             else:
-                summary, fm, fm_long, cwd = "", "", "", ""
+                summary, fm, fm_long = "", "", ""
                 sums: List[str] = []
                 msg_count = 0
                 try:
@@ -353,7 +346,6 @@ class SessionManager:
                             elif msg_type in ("user", "assistant"):
                                 msg_count += 1
                                 if msg_type == "user" and not fm:
-                                    cwd = d.get("cwd", "").strip()
                                     txt = self._extract_text(d.get("message", {}))
                                     if txt:
                                         fm = txt[:120].replace("\n", " ").replace("\t", " ")
@@ -365,7 +357,6 @@ class SessionManager:
                     "summary": summary,
                     "first_msg": fm,
                     "first_msg_long": fm_long,
-                    "cwd": cwd,
                     "msg_count": msg_count,
                     "summaries": sums,
                     "project_raw": praw,
@@ -374,7 +365,7 @@ class SessionManager:
 
             out.append(Session(
                 id=sid, project_raw=praw, project_display=pdisp,
-                cwd=cwd, summary=summary, first_msg=fm,
+                summary=summary, first_msg=fm,
                 first_msg_long=fm_long, tag=tag, pinned=pinned,
                 mtime=file_mtime, summaries=sums, path=jp,
                 msg_count=msg_count,
@@ -1306,13 +1297,6 @@ def _append_session_meta(
         style=Style(color=tc("project-color", "#cc00cc")),
     )
 
-    # CWD
-    if s.cwd:
-        text.append(
-            f"  CWD:     {s.cwd}\n",
-            style=Style(color=tc("dim-color", "#888888")),
-        )
-
     # Modified timestamp with age coloring
     if app:
         age_sty = _age_style(app, s.mtime)
@@ -1356,15 +1340,10 @@ def _append_session_meta(
         text.append(f"{label}", style=state_sty)
         text.append(f"{kill_hint}\n", style=Style(color=tc("dim-color", "#888888")))
 
-    # Git info
-    cwd = s.cwd
-    if not HAS_GIT and cwd:
-        text.append(
-            "  Git:     (git not found)\n",
-            style=Style(color=tc("warn-color", "#ff4444"), dim=True),
-        )
-    else:
-        git_info = git_cache.get(cwd) if cwd else None
+    # Git info (from project path)
+    proj_path = os.path.expanduser(s.project_display) if s.project_display else ""
+    if proj_path and os.path.isdir(proj_path):
+        git_info = git_cache.get(proj_path)
         if git_info:
             repo_name, branch, _commits = git_info
             branch_str = f" ({branch})" if branch else ""
@@ -1439,8 +1418,8 @@ class InfoPane(Static):
         )
 
         # Git commit log (detail view only)
-        cwd = s.cwd
-        git_info = git_cache.get(cwd) if cwd else None
+        proj_path = os.path.expanduser(s.project_display) if s.project_display else ""
+        git_info = git_cache.get(proj_path) if proj_path else None
         if git_info:
             _repo, _branch, commits = git_info
             for sha, subject in commits:
@@ -1963,7 +1942,7 @@ class InputModal(ModalScreen[str]):
 
 
 class SimpleInputModal(ModalScreen[str]):
-    """Single-line text input modal (for tag, new session, CWD)."""
+    """Single-line text input modal (for tag, new session name)."""
 
     DEFAULT_CSS = """
     SimpleInputModal {
@@ -2863,9 +2842,10 @@ class CCSApp(App):
         s = self._current_session()
         if s is None:
             return
-        # Ensure git info is loaded
-        if s.cwd and s.cwd not in self._git_cache:
-            self._get_git_info(s.cwd)
+        # Ensure git info is loaded from project path
+        proj_path = os.path.expanduser(s.project_display) if s.project_display else ""
+        if proj_path and os.path.isdir(proj_path) and proj_path not in self._git_cache:
+            self._get_git_info(proj_path)
         info = self.query_one("#info-pane", InfoPane)
         info.update_info(
             s,
@@ -3195,8 +3175,6 @@ class CCSApp(App):
             return
         cmd_parts = ["claude", "--resume", s.id] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
-        if s.cwd and os.path.isdir(s.cwd):
-            cmd_str = f"cd {shlex.quote(s.cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
@@ -3259,15 +3237,13 @@ class CCSApp(App):
         """Remove all metadata for a session ID."""
         self.mgr._delete_meta(sid)
 
-    def _tmux_launch_new(self, name, extra, cwd=None):
+    def _tmux_launch_new(self, name, extra):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
         if name:
             self.mgr._set_meta(uid, tag=name)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
-        if cwd and os.path.isdir(cwd):
-            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
@@ -3336,8 +3312,9 @@ class CCSApp(App):
         self.query_one("#detail-view").add_class("active")
         self.detail_focus = "info"
         s = self._current_session()
-        if s and s.cwd and s.cwd not in self._git_cache:
-            self._get_git_info(s.cwd)
+        proj_path = os.path.expanduser(s.project_display) if s and s.project_display else ""
+        if proj_path and os.path.isdir(proj_path) and proj_path not in self._git_cache:
+            self._get_git_info(proj_path)
         self._update_detail()
         self._update_header()
         # Keep focus on session list so on_key always fires
@@ -3724,7 +3701,7 @@ class CCSApp(App):
                 self._tmux_launch(s, extra)
                 self._do_refresh()
             elif choice == "terminal":
-                self.exit_action = ("resume", s.id, s.cwd, extra)
+                self.exit_action = ("resume", s.id, extra)
                 self.exit()
 
         self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
@@ -3946,30 +3923,21 @@ class CCSApp(App):
         if self.view != "sessions":
             return
 
-        def on_path(cwd, name):
-            cwd = cwd.strip() if cwd else ""
-            if cwd and not os.path.isdir(cwd):
-                self._set_status(f"Directory not found: {cwd}")
+        def on_name(name):
+            if name is None:
                 return
+            name = name.strip()
             use_tmux = self._get_use_tmux()
             if use_tmux:
                 if not HAS_TMUX:
                     self._set_status("tmux is not installed")
                     return
                 extra = self._active_profile_args()
-                self._tmux_launch_new(name, extra, cwd=cwd or None)
+                self._tmux_launch_new(name, extra)
                 self._do_refresh()
             else:
-                self.exit_action = ("new", name, cwd or None)
+                self.exit_action = ("new", name)
                 self.exit()
-
-        def on_name(name):
-            if name is None:
-                return
-            self.push_screen(
-                SimpleInputModal("Working Directory", os.getcwd(), "Path (leave default for current dir)"),
-                lambda cwd: on_path(cwd, name.strip()),
-            )
 
         self.push_screen(
             SimpleInputModal("New Session Name", "", "Enter session name (optional)"),
@@ -4171,25 +4139,15 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
         extra = claude_args
     else:
         extra = _get_profile_extra(mgr, profile_name)
-    if s.cwd:
-        if os.path.isdir(s.cwd):
-            os.chdir(s.cwd)
-        else:
-            home = str(Path.home())
-            print(f"\033[1;33m◆ Warning:\033[0m Directory no longer exists: \033[33m{s.cwd}\033[0m")
-            print(f"  Falling back to: \033[36m{home}\033[0m")
-            os.chdir(home)
     opts = f" {' '.join(extra)}" if extra else ""
     print(f"\033[1;36m◆\033[0m Resuming session \033[2m({s.id[:8]}…)\033[0m{opts}")
     cmd = ["claude", "--resume", s.id] + extra
     os.execvp("claude", cmd)
 
 
-def cmd_new(mgr: SessionManager, name: str, extra: List[str], cwd: str = None):
+def cmd_new(mgr: SessionManager, name: str, extra: List[str]):
     uid = str(uuid_mod.uuid4())
     mgr._set_meta(uid, tag=name)
-    if cwd and os.path.isdir(cwd):
-        os.chdir(cwd)
     print(f"\033[1;36m◆\033[0m Starting named session: "
           f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
     cmd = ["claude", "--session-id", uid] + extra
@@ -4309,7 +4267,6 @@ def cmd_search(mgr: SessionManager, query: str):
         or q in s.project_display.lower()
         or q in s.tag.lower()
         or q in s.id.lower()
-        or q in s.cwd.lower()
     ]
     if not matches:
         print(f"No sessions matching '{query}'.")
@@ -4424,7 +4381,6 @@ def cmd_export(mgr: SessionManager, query: str):
     if s.tag:
         print(f"- **Tag:** {s.tag}")
     print(f"- **Project:** {s.project_display}")
-    print(f"- **CWD:** {s.cwd}")
     print(f"- **Modified:** {ts}")
     if s.pinned:
         print("- **Pinned:** yes")
@@ -4534,23 +4490,15 @@ def main():
             return
 
         if action[0] == "resume":
-            _, sid, cwd, extra = action
-            if cwd:
-                if os.path.isdir(cwd):
-                    os.chdir(cwd)
-                else:
-                    home = str(Path.home())
-                    print(f"\033[1;33m◆ Warning:\033[0m Session directory no longer exists: \033[33m{cwd}\033[0m")
-                    print(f"  Falling back to: \033[36m{home}\033[0m")
-                    os.chdir(home)
+            _, sid, extra = action
             cmd = ["claude", "--resume", sid] + extra
             opts = f" {' '.join(extra)}" if extra else ""
             print(f"\033[1;36m◆\033[0m Resuming session \033[2m({sid[:8]}…)\033[0m{opts}")
             os.execvp("claude", cmd)
 
         elif action[0] == "new":
-            _, name, cwd = action
-            cmd_new(mgr, name, [], cwd=cwd)
+            _, name = action
+            cmd_new(mgr, name, [])
 
         elif action[0] == "tmp":
             cmd_tmp(mgr, [])
