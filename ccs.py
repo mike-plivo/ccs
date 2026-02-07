@@ -69,15 +69,11 @@ VERSION = "1.0.0"
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 CCS_DIR = Path.home() / ".config" / "ccs"
-TAGS_FILE = CCS_DIR / "session_tags.json"
-PINS_FILE = CCS_DIR / "session_pins.json"
-CWDS_FILE = CCS_DIR / "session_cwds.json"
-EPHEMERAL_FILE = CCS_DIR / "ephemeral_sessions.txt"
+META_FILE = CCS_DIR / "sessions.json"
 PROFILES_FILE = CCS_DIR / "ccs_profiles.json"
 ACTIVE_PROFILE_FILE = CCS_DIR / "ccs_active_profile.txt"
 THEME_FILE = CCS_DIR / "ccs_theme.txt"
 CACHE_FILE = CCS_DIR / "session_cache.json"
-TMUX_FILE = CCS_DIR / "tmux_sessions.json"
 HAS_TMUX = shutil.which("tmux") is not None
 HAS_GIT = shutil.which("git") is not None
 TMUX_PREFIX = "ccs-"
@@ -196,12 +192,54 @@ class SessionManager:
 
     def _ensure(self):
         CCS_DIR.mkdir(parents=True, exist_ok=True)
-        if not TAGS_FILE.exists():
-            TAGS_FILE.write_text("{}")
-        if not PINS_FILE.exists():
-            PINS_FILE.write_text("[]")
-        if not EPHEMERAL_FILE.exists():
-            EPHEMERAL_FILE.touch()
+        self._migrate_old_meta()
+        if not META_FILE.exists():
+            META_FILE.write_text("{}")
+
+    def _migrate_old_meta(self):
+        """One-time migration from old multi-file metadata to sessions.json."""
+        old_tags = CCS_DIR / "session_tags.json"
+        old_pins = CCS_DIR / "session_pins.json"
+        old_cwds = CCS_DIR / "session_cwds.json"
+        old_ephemeral = CCS_DIR / "ephemeral_sessions.txt"
+        old_tmux = CCS_DIR / "tmux_sessions.json"
+        if not any(f.exists() for f in [old_tags, old_pins, old_cwds, old_ephemeral]):
+            # Remove tmux file if it exists (transient data)
+            if old_tmux.exists():
+                old_tmux.unlink()
+            return
+        meta = self._load_meta()
+        # Merge tags
+        tags = self._load(old_tags, {})
+        for sid, tag in tags.items():
+            if tag:
+                meta.setdefault(sid, {})["tag"] = tag
+        # Merge pins
+        pins = self._load(old_pins, [])
+        for sid in pins:
+            meta.setdefault(sid, {})["pinned"] = True
+        # Merge cwds
+        cwds = self._load(old_cwds, {})
+        for sid, cwd in cwds.items():
+            if cwd:
+                meta.setdefault(sid, {})["cwd"] = cwd
+        # Merge ephemeral
+        try:
+            text = old_ephemeral.read_text().strip()
+            for line in text.split("\n"):
+                sid = line.strip()
+                if sid:
+                    meta.setdefault(sid, {})["ephemeral"] = True
+        except Exception:
+            pass
+        self._save_meta(meta)
+        # Remove old files
+        for f in [old_tags, old_pins, old_cwds, old_ephemeral, old_tmux]:
+            try:
+                if f.exists():
+                    f.unlink()
+            except Exception:
+                pass
 
     def _load(self, p, default):
         try:
@@ -213,6 +251,35 @@ class SessionManager:
     def _save(self, p, data):
         with open(p, "w") as f:
             json.dump(data, f, indent=2)
+
+    def _load_meta(self) -> dict:
+        return self._load(META_FILE, {})
+
+    def _save_meta(self, data: dict):
+        self._save(META_FILE, data)
+
+    def _get_meta(self, sid: str) -> dict:
+        return self._load_meta().get(sid, {})
+
+    def _set_meta(self, sid: str, **kwargs):
+        meta = self._load_meta()
+        entry = meta.get(sid, {})
+        for k, v in kwargs.items():
+            if v in (None, "", False):
+                entry.pop(k, None)
+            else:
+                entry[k] = v
+        if entry:
+            meta[sid] = entry
+        else:
+            meta.pop(sid, None)
+        self._save_meta(meta)
+
+    def _delete_meta(self, sid: str):
+        meta = self._load_meta()
+        if sid in meta:
+            meta.pop(sid)
+            self._save_meta(meta)
 
     def _decode_proj(self, raw: str) -> str:
         p = raw
@@ -240,9 +307,7 @@ class SessionManager:
         return ""
 
     def scan(self, sort_mode: str = "date", force: bool = False) -> List[Session]:
-        tags = self._load(TAGS_FILE, {})
-        pins = set(self._load(PINS_FILE, []))
-        cwd_overrides = self._load(CWDS_FILE, {})
+        meta = self._load_meta()
         cache = {} if force else self._load(CACHE_FILE, {})
         out: List[Session] = []
         seen_sids: set = set()
@@ -253,8 +318,9 @@ class SessionManager:
             seen_sids.add(sid)
             praw = os.path.basename(os.path.dirname(jp))
             pdisp = self._decode_proj(praw)
-            tag = tags.get(sid, "")
-            pinned = sid in pins
+            sm = meta.get(sid, {})
+            tag = sm.get("tag", "")
+            pinned = sm.get("pinned", False)
             file_mtime = os.path.getmtime(jp)
 
             # Check cache
@@ -307,8 +373,9 @@ class SessionManager:
                     "project_display": pdisp,
                 }
 
-            if sid in cwd_overrides:
-                cwd = cwd_overrides[sid]
+            cwd_override = sm.get("cwd", "")
+            if cwd_override:
+                cwd = cwd_override
 
             out.append(Session(
                 id=sid, project_raw=praw, project_display=pdisp,
@@ -325,50 +392,22 @@ class SessionManager:
         except Exception:
             pass
 
-        # Add tagged sessions that don't have a .jsonl yet (newly created)
-        for sid, tag in tags.items():
-            if sid not in seen_sids and tag:
-                cwd = cwd_overrides.get(sid, "")
-                out.append(Session(
-                    id=sid, project_raw="", project_display="",
-                    cwd=cwd, summary="", first_msg="",
-                    first_msg_long="", tag=tag, pinned=sid in pins,
-                    mtime=time.time(), summaries=[], path="",
-                    msg_count=0,
-                ))
-
         out.sort(key=lambda s: s.get_sort_key(sort_mode))
         return out
 
     def toggle_pin(self, sid: str) -> bool:
-        pins = self._load(PINS_FILE, [])
-        if sid in pins:
-            pins.remove(sid)
-            result = False
-        else:
-            pins.append(sid)
-            result = True
-        self._save(PINS_FILE, pins)
-        return result
+        current = self._get_meta(sid).get("pinned", False)
+        self._set_meta(sid, pinned=not current)
+        return not current
 
     def set_tag(self, sid: str, tag: str):
-        tags = self._load(TAGS_FILE, {})
-        if tag:
-            tags[sid] = tag[:10]
-        else:
-            tags.pop(sid, None)
-        self._save(TAGS_FILE, tags)
+        self._set_meta(sid, tag=tag[:10] if tag else "")
 
     def remove_tag(self, sid: str):
         self.set_tag(sid, "")
 
     def set_cwd(self, sid: str, path: str):
-        cwds = self._load(CWDS_FILE, {})
-        if path:
-            cwds[sid] = path
-        else:
-            cwds.pop(sid, None)
-        self._save(CWDS_FILE, cwds)
+        self._set_meta(sid, cwd=path if path else "")
 
     def remove_cwd(self, sid: str):
         self.set_cwd(sid, "")
@@ -376,15 +415,7 @@ class SessionManager:
     def delete(self, s: Session):
         if os.path.exists(s.path):
             os.remove(s.path)
-        tags = self._load(TAGS_FILE, {})
-        tags.pop(s.id, None)
-        self._save(TAGS_FILE, tags)
-        pins = self._load(PINS_FILE, [])
-        pins = [p for p in pins if p != s.id]
-        self._save(PINS_FILE, pins)
-        cwds = self._load(CWDS_FILE, {})
-        cwds.pop(s.id, None)
-        self._save(CWDS_FILE, cwds)
+        self._delete_meta(s.id)
 
     # ── Profile management ──────────────────────────────────────────
 
@@ -445,71 +476,41 @@ class SessionManager:
     def save_theme(self, name: str):
         THEME_FILE.write_text(name)
 
-    # ── Tmux session tracking ────────────────────────────────────
+    # ── Tmux session discovery ─────────────────────────────────
 
-    def tmux_sessions(self) -> dict:
-        """Load tracked ccs tmux sessions, prune dead ones."""
+    def tmux_alive_sids(self) -> set:
+        """Return set of session IDs with live ccs tmux sessions."""
         if not HAS_TMUX:
-            return {}
-        data = self._load(TMUX_FILE, {})
-        alive = {}
-        for name, info in data.items():
-            rc = subprocess.run(["tmux", "has-session", "-t", name],
-                                capture_output=True).returncode
-            if rc == 0:
-                alive[name] = info
-        if len(alive) != len(data):
-            self._save(TMUX_FILE, alive)
-        return alive
-
-    def tmux_register(self, tmux_name: str, session_id: str, profile: str):
-        data = self._load(TMUX_FILE, {})
-        data[tmux_name] = {"session_id": session_id, "profile": profile,
-                           "launched": datetime.datetime.now().isoformat()}
-        self._save(TMUX_FILE, data)
-
-    def tmux_unregister(self, tmux_name: str):
-        data = self._load(TMUX_FILE, {})
-        data.pop(tmux_name, None)
-        self._save(TMUX_FILE, data)
+            return set()
+        try:
+            r = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if r.returncode != 0:
+                return set()
+            sids = set()
+            for name in r.stdout.strip().split("\n"):
+                name = name.strip()
+                if name.startswith(TMUX_PREFIX):
+                    sids.add(name[len(TMUX_PREFIX):])
+            return sids
+        except Exception:
+            return set()
 
     def purge_ephemeral(self):
-        if not EPHEMERAL_FILE.exists():
+        meta = self._load_meta()
+        ephemeral_sids = [sid for sid, m in meta.items() if m.get("ephemeral")]
+        if not ephemeral_sids:
             return
-        try:
-            text = EPHEMERAL_FILE.read_text().strip()
-            if not text:
-                return
-            lines = text.split("\n")
-        except Exception:
-            return
-        tags = self._load(TAGS_FILE, {})
-        cwds = self._load(CWDS_FILE, {})
-        pins = self._load(PINS_FILE, [])
-        changed = False
-        for uid in lines:
-            uid = uid.strip()
-            if not uid:
-                continue
+        for uid in ephemeral_sids:
             for f in glob.glob(str(PROJECTS_DIR / "*" / f"{uid}.jsonl")):
                 try:
                     os.remove(f)
                 except Exception:
                     pass
-            if uid in tags:
-                tags.pop(uid)
-                changed = True
-            if uid in cwds:
-                cwds.pop(uid)
-                changed = True
-            if uid in pins:
-                pins = [p for p in pins if p != uid]
-                changed = True
-        if changed:
-            self._save(TAGS_FILE, tags)
-            self._save(CWDS_FILE, cwds)
-            self._save(PINS_FILE, pins)
-        EPHEMERAL_FILE.write_text("")
+            meta.pop(uid, None)
+        self._save_meta(meta)
 
 
 # ── Standalone utility functions ─────────────────────────────────────
@@ -1241,7 +1242,7 @@ class SessionListWidget(OptionList):
     def rebuild(
         self,
         sessions: list,
-        tmux_sids: dict,
+        tmux_sids: set,
         tmux_idle: set,
         tmux_claude_state: dict,
         marked: set,
@@ -1275,7 +1276,7 @@ def _append_session_meta(
     text: Text,
     s: Session,
     mgr: SessionManager,
-    tmux_sids: dict,
+    tmux_sids: set,
     tmux_idle: set,
     tmux_claude_state: dict,
     git_cache: dict,
@@ -1318,8 +1319,7 @@ def _append_session_meta(
 
     # CWD (with override indicator)
     if s.cwd:
-        cwd_overrides = mgr._load(CWDS_FILE, {})
-        cwd_suffix = " (override)" if cwd_overrides.get(s.id) else ""
+        cwd_suffix = " (override)" if mgr._get_meta(s.id).get("cwd") else ""
         text.append(
             f"  CWD:     {s.cwd}{cwd_suffix}\n",
             style=Style(color=tc("dim-color", "#888888")),
@@ -1346,7 +1346,7 @@ def _append_session_meta(
 
     # Tmux status
     if s.id in tmux_sids:
-        tmux_name = tmux_sids[s.id]
+        tmux_name = TMUX_PREFIX + s.id
         is_idle = s.id in tmux_idle
         state = tmux_claude_state.get(s.id, "unknown")
         state_sty = _tmux_state_style(app, state, is_idle)
@@ -1396,7 +1396,7 @@ class PreviewPane(Static):
         self,
         s: Optional[Session],
         mgr: SessionManager,
-        tmux_sids: dict,
+        tmux_sids: set,
         tmux_idle: set,
         tmux_claude_state: dict,
         git_cache: dict,
@@ -1432,7 +1432,7 @@ class InfoPane(Static):
         self,
         s: Optional[Session],
         mgr: SessionManager,
-        tmux_sids: dict,
+        tmux_sids: set,
         tmux_idle: set,
         tmux_claude_state: dict,
         git_cache: dict,
@@ -2723,7 +2723,7 @@ class CCSApp(App):
         self.theme = self._ccs_theme_name
 
         # Tmux state
-        self.tmux_sids = {}  # session_id -> tmux_name
+        self.tmux_sids = set()  # set of session IDs with live tmux
         self.tmux_idle = set()
         self.tmux_idle_prev = set()
         self.tmux_last_poll = 0.0
@@ -2784,12 +2784,9 @@ class CCSApp(App):
         """Refresh session data and rebuild UI."""
         self.sessions = self.mgr.scan(self.sort_mode, force=force)
         if HAS_TMUX:
-            alive = self.mgr.tmux_sessions()
-            self.tmux_sids = {
-                info.get("session_id"): name for name, info in alive.items()
-            }
+            self.tmux_sids = self.mgr.tmux_alive_sids()
         else:
-            self.tmux_sids = {}
+            self.tmux_sids = set()
         # Re-sort for tmux mode
         if self.sort_mode == "tmux":
             sids = self.tmux_sids
@@ -3006,49 +3003,30 @@ class CCSApp(App):
     # -- Tmux polling ------------------------------------------------------
 
     def _load_ephemeral_ids(self):
-        """Load set of ephemeral session IDs."""
-        try:
-            text = EPHEMERAL_FILE.read_text().strip()
-            return {line.strip() for line in text.split("\n") if line.strip()}
-        except Exception:
-            return set()
+        """Load set of ephemeral session IDs from meta."""
+        return {sid for sid, m in self.mgr._load_meta().items() if m.get("ephemeral")}
 
     def _remove_ephemeral_id(self, sid):
-        """Remove a session ID from the ephemeral list if present."""
-        ephemeral_ids = self._load_ephemeral_ids()
-        if sid in ephemeral_ids:
-            ephemeral_ids.discard(sid)
-            try:
-                EPHEMERAL_FILE.write_text(
-                    "\n".join(ephemeral_ids) + "\n" if ephemeral_ids else ""
-                )
-            except Exception:
-                pass
+        """Clear the ephemeral flag for a session ID."""
+        self.mgr._set_meta(sid, ephemeral=False)
 
     def _cleanup_gone_sessions(self, gone_sids):
         """Auto-delete ephemeral sessions whose tmux has exited."""
-        ephemeral_ids = self._load_ephemeral_ids()
+        meta = self.mgr._load_meta()
         changed = False
         for sid in gone_sids:
-            if sid in ephemeral_ids:
-                # Delete .jsonl file directly
+            is_ephemeral = meta.get(sid, {}).get("ephemeral", False)
+            if is_ephemeral:
                 for f in glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")):
                     try:
                         os.remove(f)
                     except OSError:
                         pass
-                self._cleanup_session_metadata(sid)
-                ephemeral_ids.discard(sid)
+                self.mgr._delete_meta(sid)
                 changed = True
                 self._set_status("Ephemeral session cleaned up")
             elif not self._session_file_exists(sid):
-                # No .jsonl — just clean up tags/cwds
-                self._cleanup_session_metadata(sid)
-        if changed:
-            try:
-                EPHEMERAL_FILE.write_text("\n".join(ephemeral_ids) + "\n" if ephemeral_ids else "")
-            except Exception:
-                pass
+                self.mgr._delete_meta(sid)
 
     def _poll_tmux_activity(self):
         if not HAS_TMUX:
@@ -3057,10 +3035,7 @@ class CCSApp(App):
         # Refresh tmux_sids from live tmux sessions
         old_sids = set(self.tmux_sids)
         try:
-            alive = self.mgr.tmux_sessions()
-            self.tmux_sids = {
-                info.get("session_id"): name for name, info in alive.items()
-            }
+            self.tmux_sids = self.mgr.tmux_alive_sids()
         except Exception:
             pass
         new_sids = set(self.tmux_sids)
@@ -3113,7 +3088,8 @@ class CCSApp(App):
                     pass
         self.tmux_idle_prev = self.tmux_idle.copy()
         new_idle = set()
-        for sid, tmux_name in self.tmux_sids.items():
+        for sid in self.tmux_sids:
+            tmux_name = TMUX_PREFIX + sid
             ts = activity.get(tmux_name)
             if ts is not None and (now - ts) > TMUX_IDLE_SECS:
                 new_idle.add(sid)
@@ -3137,11 +3113,11 @@ class CCSApp(App):
             return
         now = time.monotonic()
         old_states = dict(self.tmux_claude_state)
-        for sid, tmux_name in self.tmux_sids.items():
+        for sid in self.tmux_sids:
             last = self.tmux_pane_ts.get(sid, 0.0)
             if now - last < TMUX_CAPTURE_INTERVAL:
                 continue
-            self._capture_one_pane(sid, tmux_name)
+            self._capture_one_pane(sid, TMUX_PREFIX + sid)
         # Rebuild session list if any claude state changed
         if self.tmux_claude_state != old_states:
             self._rebuild_list()
@@ -3218,7 +3194,6 @@ class CCSApp(App):
             self._set_status("Failed to send input to tmux")
 
     @staticmethod
-    @staticmethod
     def _tmux_wrap_cmd(cmd_str, tmux_name):
         tn = shlex.quote(tmux_name)
         return (
@@ -3229,8 +3204,7 @@ class CCSApp(App):
 
     def _tmux_launch(self, s, extra):
         tmux_name = TMUX_PREFIX + s.id
-        existing = self.mgr.tmux_sessions()
-        if tmux_name in existing:
+        if s.id in self.mgr.tmux_alive_sids():
             self._tmux_attach(tmux_name, s.id)
             return
         cmd_parts = ["claude", "--resume", s.id] + extra
@@ -3254,7 +3228,6 @@ class CCSApp(App):
                 full_cmd,
             ]
         )
-        self.mgr.tmux_register(tmux_name, s.id, self.active_profile_name)
         self._tmux_attach(tmux_name, s.id)
 
     def _session_file_exists(self, sid):
@@ -3271,61 +3244,45 @@ class CCSApp(App):
         if not session_id:
             self._do_refresh()
             return
-        is_ephemeral = session_id in self._load_ephemeral_ids()
-        tmux_alive = tmux_name in self.mgr.tmux_sessions()
+        is_ephemeral = self.mgr._get_meta(session_id).get("ephemeral", False)
+        tmux_alive = subprocess.run(
+            ["tmux", "has-session", "-t", tmux_name],
+            capture_output=True,
+        ).returncode == 0
         has_session = self._session_file_exists(session_id)
         if is_ephemeral:
             # Ephemeral: always kill tmux + delete session + clean up
             if tmux_alive:
                 subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-            self.mgr.tmux_unregister(tmux_name)
-            # Delete .jsonl file directly (self.sessions may be stale)
             for f in glob.glob(str(PROJECTS_DIR / "*" / f"{session_id}.jsonl")):
                 try:
                     os.remove(f)
                 except OSError:
                     pass
-            self._cleanup_session_metadata(session_id)
-            self._remove_ephemeral_id(session_id)
+            self.mgr._delete_meta(session_id)
             self._set_status("Ephemeral session cleaned up")
         elif not has_session:
             # No session file — nothing to keep, kill tmux + clean up
             if tmux_alive:
                 subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-            self.mgr.tmux_unregister(tmux_name)
-            self._cleanup_session_metadata(session_id)
+            self.mgr._delete_meta(session_id)
             self._set_status("No session created — tmux killed")
-        elif not tmux_alive:
-            # Regular session, tmux ended naturally — just unregister
-            self.mgr.tmux_unregister(tmux_name)
         self._do_refresh(force=is_ephemeral or not has_session)
 
     def _cleanup_session_metadata(self, sid):
-        """Remove tags/cwds/pins for a session ID."""
-        tags = self.mgr._load(TAGS_FILE, {})
-        if sid in tags:
-            tags.pop(sid)
-            self.mgr._save(TAGS_FILE, tags)
-        cwds = self.mgr._load(CWDS_FILE, {})
-        if sid in cwds:
-            cwds.pop(sid)
-            self.mgr._save(CWDS_FILE, cwds)
-        pins = self.mgr._load(PINS_FILE, [])
-        if sid in pins:
-            pins = [p for p in pins if p != sid]
-            self.mgr._save(PINS_FILE, pins)
+        """Remove all metadata for a session ID."""
+        self.mgr._delete_meta(sid)
 
     def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
+        kwargs = {}
         if name:
-            tags = self.mgr._load(TAGS_FILE, {})
-            tags[uid] = name
-            self.mgr._save(TAGS_FILE, tags)
+            kwargs["tag"] = name
         if cwd:
-            cwds = self.mgr._load(CWDS_FILE, {})
-            cwds[uid] = cwd
-            self.mgr._save(CWDS_FILE, cwds)
+            kwargs["cwd"] = cwd
+        if kwargs:
+            self.mgr._set_meta(uid, **kwargs)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if cwd and os.path.isdir(cwd):
@@ -3347,14 +3304,12 @@ class CCSApp(App):
                 full_cmd,
             ]
         )
-        self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
         self._tmux_attach(tmux_name, uid)
 
     def _tmux_launch_ephemeral(self, extra):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
-        with open(EPHEMERAL_FILE, "a") as f:
-            f.write(uid + "\n")
+        self.mgr._set_meta(uid, ephemeral=True)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
@@ -3374,7 +3329,6 @@ class CCSApp(App):
                 full_cmd,
             ]
         )
-        self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
         self._tmux_attach(tmux_name, uid)
 
     def _active_profile_args(self):
@@ -3937,8 +3891,7 @@ class CCSApp(App):
             return
         tmux_name = TMUX_PREFIX + sid
         subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-        self.mgr.tmux_unregister(tmux_name)
-        self.tmux_sids.pop(sid, None)
+        self.tmux_sids.discard(sid)
 
     def action_delete_session(self):
         if self.view == "sessions" and self.marked:
@@ -4023,11 +3976,10 @@ class CCSApp(App):
         if not HAS_TMUX:
             self._set_status("tmux is not installed")
             return
-        tmux_name = TMUX_PREFIX + s.id
-        alive = self.mgr.tmux_sessions()
-        if tmux_name not in alive:
+        if s.id not in self.tmux_sids:
             self._set_status("No active tmux session for this session")
             return
+        tmux_name = TMUX_PREFIX + s.id
         label = s.tag or s.id[:12]
 
         def on_result(confirmed):
@@ -4036,8 +3988,7 @@ class CCSApp(App):
                     ["tmux", "kill-session", "-t", tmux_name],
                     capture_output=True,
                 )
-                self.mgr.tmux_unregister(tmux_name)
-                self.tmux_sids.pop(s.id, None)
+                self.tmux_sids.discard(s.id)
                 self._set_status(f"Killed tmux: {label}")
                 self._do_refresh()
 
@@ -4061,12 +4012,12 @@ class CCSApp(App):
 
         def on_result(confirmed):
             if confirmed:
-                for sid, tmux_name in list(self.tmux_sids.items()):
+                for sid in list(self.tmux_sids):
+                    tmux_name = TMUX_PREFIX + sid
                     subprocess.run(
                         ["tmux", "kill-session", "-t", tmux_name],
                         capture_output=True,
                     )
-                    self.mgr.tmux_unregister(tmux_name)
                 self.tmux_sids.clear()
                 self._set_status(f"Killed {count} tmux session{'s' if count != 1 else ''}")
                 self._do_refresh()
@@ -4183,7 +4134,7 @@ class CCSApp(App):
         if s.id not in self.tmux_sids:
             self._set_status("No active tmux session")
             return
-        tmux_name = self.tmux_sids[s.id]
+        tmux_name = TMUX_PREFIX + s.id
 
         def on_result(text):
             if text:
@@ -4327,15 +4278,12 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
 
 def cmd_new(mgr: SessionManager, name: str, extra: List[str], cwd: str = None):
     uid = str(uuid_mod.uuid4())
-    tags = mgr._load(TAGS_FILE, {})
-    tags[uid] = name
-    mgr._save(TAGS_FILE, tags)
+    kwargs = {"tag": name}
     if cwd:
-        cwds = mgr._load(CWDS_FILE, {})
-        cwds[uid] = cwd
-        mgr._save(CWDS_FILE, cwds)
+        kwargs["cwd"] = cwd
         if os.path.isdir(cwd):
             os.chdir(cwd)
+    mgr._set_meta(uid, **kwargs)
     print(f"\033[1;36m◆\033[0m Starting named session: "
           f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
     cmd = ["claude", "--session-id", uid] + extra
@@ -4344,8 +4292,7 @@ def cmd_new(mgr: SessionManager, name: str, extra: List[str], cwd: str = None):
 
 def cmd_tmp(mgr: SessionManager, extra: List[str]):
     uid = str(uuid_mod.uuid4())
-    with open(EPHEMERAL_FILE, "a") as f:
-        f.write(uid + "\n")
+    mgr._set_meta(uid, ephemeral=True)
     print(f"\033[1;36m◆\033[0m Starting ephemeral session \033[2m({uid[:8]}…)\033[0m")
     cmd = ["claude", "--session-id", uid] + extra
     try:
@@ -4358,21 +4305,17 @@ def cmd_tmp(mgr: SessionManager, extra: List[str]):
 
 def cmd_pin(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
-    pins = mgr._load(PINS_FILE, [])
-    if s.id not in pins:
-        pins.append(s.id)
-        mgr._save(PINS_FILE, pins)
-        print(f"★ Pinned: {s.tag or s.id[:12]}")
+    if not mgr._get_meta(s.id).get("pinned"):
+        mgr._set_meta(s.id, pinned=True)
+        print(f"\u2605 Pinned: {s.tag or s.id[:12]}")
     else:
         print(f"Already pinned: {s.tag or s.id[:12]}")
 
 
 def cmd_unpin(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
-    pins = mgr._load(PINS_FILE, [])
-    if s.id in pins:
-        pins.remove(s.id)
-        mgr._save(PINS_FILE, pins)
+    if mgr._get_meta(s.id).get("pinned"):
+        mgr._set_meta(s.id, pinned=False)
         print(f"Unpinned: {s.tag or s.id[:12]}")
     else:
         print(f"Not pinned: {s.tag or s.id[:12]}")
@@ -4385,8 +4328,8 @@ def cmd_tag(mgr: SessionManager, query: str, tag: str):
 
 
 def cmd_tag_rename(mgr: SessionManager, old_tag: str, new_tag: str):
-    tags = mgr._load(TAGS_FILE, {})
-    matches = [sid for sid, t in tags.items() if t == old_tag]
+    meta = mgr._load_meta()
+    matches = [sid for sid, m in meta.items() if m.get("tag") == old_tag]
     if not matches:
         print(f"\033[31mNo session with tag '{old_tag}'\033[0m")
         sys.exit(1)
@@ -4602,25 +4545,43 @@ def cmd_export(mgr: SessionManager, query: str):
         print(f"\n*Error reading session file: {e}*")
 
 
+def _list_ccs_tmux_names():
+    """Return list of tmux session names starting with ccs- prefix."""
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode != 0:
+            return []
+        return [n.strip() for n in r.stdout.strip().split("\n")
+                if n.strip().startswith(TMUX_PREFIX)]
+    except Exception:
+        return []
+
+
 def cmd_tmux_list(mgr: SessionManager):
-    sessions = mgr.tmux_sessions()
-    if not sessions:
+    names = _list_ccs_tmux_names()
+    if not names:
         print("No active ccs tmux sessions.")
         return
-    for name, info in sorted(sessions.items(), key=lambda x: x[1].get("launched", "")):
-        sid = info.get("session_id", "")
-        profile = info.get("profile", "")
-        launched = info.get("launched", "")[:16]
-        print(f"  {name}  profile={profile}  launched={launched}")
+    for name in sorted(names):
+        sid = name[len(TMUX_PREFIX):]
+        meta = mgr._get_meta(sid)
+        tag = meta.get("tag", "")
+        label = f"  {name}"
+        if tag:
+            label += f"  tag={tag}"
+        print(label)
 
 
 def cmd_tmux_attach(mgr: SessionManager, name: str):
     if not HAS_TMUX:
         print("\033[31mtmux is not installed.\033[0m")
         sys.exit(1)
-    sessions = mgr.tmux_sessions()
-    if name not in sessions:
-        print(f"\033[31mNo ccs tmux session named '{name}'.\033[0m")
+    rc = subprocess.run(["tmux", "has-session", "-t", name], capture_output=True).returncode
+    if rc != 0:
+        print(f"\033[31mNo tmux session named '{name}'.\033[0m")
         sys.exit(1)
     os.execvp("tmux", ["tmux", "attach-session", "-t", name])
 
@@ -4629,12 +4590,11 @@ def cmd_tmux_kill(mgr: SessionManager, name: str):
     if not HAS_TMUX:
         print("\033[31mtmux is not installed.\033[0m")
         sys.exit(1)
-    sessions = mgr.tmux_sessions()
-    if name not in sessions:
-        print(f"\033[31mNo ccs tmux session named '{name}'.\033[0m")
+    rc = subprocess.run(["tmux", "has-session", "-t", name], capture_output=True).returncode
+    if rc != 0:
+        print(f"\033[31mNo tmux session named '{name}'.\033[0m")
         sys.exit(1)
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
-    mgr.tmux_unregister(name)
     print(f"Killed tmux session: {name}")
 
 
@@ -4642,16 +4602,13 @@ def cmd_tmux_kill_all(mgr: SessionManager):
     if not HAS_TMUX:
         print("\033[31mtmux is not installed.\033[0m")
         sys.exit(1)
-    sessions = mgr.tmux_sessions()
-    if not sessions:
+    names = _list_ccs_tmux_names()
+    if not names:
         print("No active ccs tmux sessions to kill.")
         return
-    count = 0
-    for name in list(sessions.keys()):
+    for name in names:
         subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
-        mgr.tmux_unregister(name)
-        count += 1
-    print(f"Killed {count} tmux session{'s' if count != 1 else ''}.")
+    print(f"Killed {len(names)} tmux session{'s' if len(names) != 1 else ''}.")
 
 
 # ── Main ─────────────────────────────────────────────────────────────
