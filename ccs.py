@@ -3425,8 +3425,8 @@ class CCSApp(App):
         """Central key handler — mirrors the curses _handle_input dispatch."""
         key = event.key
 
-        # Ctrl-C + c = immediate quit (even over modal)
-        if key == "c" and (time.monotonic() - self._ctrl_c_time) < 1.0:
+        # Ctrl-C twice or Ctrl-C + c = immediate quit
+        if (time.monotonic() - self._ctrl_c_time) < 1.0 and key in ("c", "ctrl+c"):
             self._ctrl_c_time = 0.0
             self.exit()
             return
@@ -3442,7 +3442,7 @@ class CCSApp(App):
         # ── Global keys ──────────────────────────────────────────
         if key == "ctrl+c":
             self._ctrl_c_time = time.monotonic()
-            self.action_quit_confirm()
+            self._set_status("Press Ctrl-C or c again to quit")
             return
         if key in ("question_mark", "?"):
             self.action_help()
