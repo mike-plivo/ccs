@@ -1127,30 +1127,21 @@ def build_session_row(
     else:
         text.append("   ")
 
-    # Pin / tmux icons + state label
+    # Pin / tmux icons (3 display-cols)
     pin_style = Style(color=tc("pin-color", "#ffff00"), bold=True)
     tmux_ch = "\U0001f4a4" if is_idle else "\u26a1"
     tmux_sty = _tmux_state_style(app, tmux_state, is_idle)
-    tmux_label = _tmux_state_label(tmux_state, is_idle) if has_tmux else ""
-    # Total tmux column width: icon(1-2) + label + space
-    tmux_col_w = 10  # fixed column width for alignment
 
     if s.pinned and has_tmux:
         text.append("\u2605", style=pin_style)
-        cell = tmux_ch + tmux_label
-        text.append(cell, style=tmux_sty)
-        pad = max(1, tmux_col_w - len(cell) - 1)
-        text.append(" " * pad)
+        text.append(tmux_ch, style=tmux_sty)
     elif s.pinned:
-        text.append("\u2605", style=pin_style)
-        text.append(" " * tmux_col_w)
+        text.append("\u2605  ", style=pin_style)
     elif has_tmux:
-        cell = tmux_ch + tmux_label
-        text.append(cell, style=tmux_sty)
-        pad = max(1, tmux_col_w + 1 - len(cell))
-        text.append(" " * pad)
+        text.append(tmux_ch, style=tmux_sty)
+        text.append(" ")
     else:
-        text.append(" " * (tmux_col_w + 1))
+        text.append("   ")
 
     # Tag column
     if s.tag:
