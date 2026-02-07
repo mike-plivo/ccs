@@ -1939,9 +1939,11 @@ class CCSApp:
         tmux_label = "  ⚡ Tmux  "
         term_label = "  Terminal  "
         view_label = "  Session View  "
+        cancel_label = " Cancel (Esc/n) "
         tmux_a = sel_attr if self.confirm_sel == 0 else dim
         term_a = sel_attr if self.confirm_sel == 1 else dim
         view_a = sel_attr if self.confirm_sel == 2 else dim
+        cancel_a = sel_attr if self.confirm_sel == 3 else dim
         if not HAS_TMUX:
             tmux_a = curses.color_pair(CP_DIM) | curses.A_DIM
 
@@ -1950,7 +1952,7 @@ class CCSApp:
             (f"  Resume: {label}", hdr),
             ("", 0),
             ("", 0),  # button placeholder
-            ("  ←/→ Select  ·  ⏎ Launch  ·  Esc Cancel", dim),
+            ("", 0),  # cancel button row
             ("", 0),
         ]
 
@@ -1987,10 +1989,15 @@ class CCSApp:
             self._safe(btn_row, x2, term_label, term_a)
             x3 = x2 + len(term_label) + gap
             self._safe(btn_row, x3, view_label, view_a)
+            # Cancel button centered on next row
+            cancel_row = btn_row + 1
+            cx = sx + max(2, (box_w - len(cancel_label)) // 2)
+            self._safe(cancel_row, cx, cancel_label, cancel_a)
             self._geo_overlay_btns = [
-                (bx, btn_row, len(tmux_label), 1, 0),   # Tmux = 0
-                (x2, btn_row, len(term_label), 1, 1),    # Terminal = 1
-                (x3, btn_row, len(view_label), 1, 2),    # Session View = 2
+                (bx, btn_row, len(tmux_label), 1, 0),       # Tmux = 0
+                (x2, btn_row, len(term_label), 1, 1),        # Terminal = 1
+                (x3, btn_row, len(view_label), 1, 2),        # Session View = 2
+                (cx, cancel_row, len(cancel_label), 1, "no"),  # Cancel
             ]
 
         self._safe(sy + box_h - 1, sx, "└", bdr)
@@ -3325,8 +3332,8 @@ class CCSApp:
     def _input_launch(self, k: int) -> Optional[str]:
         s = self.launch_session
         extra = self.launch_extra
-        max_sel = 2  # 0=Tmux, 1=Terminal, 2=Session View
-        if k == 27:  # Esc
+        max_sel = 3  # 0=Tmux, 1=Terminal, 2=Session View, 3=Cancel
+        if k in (27, ord("n"), ord("N")):
             self.mode = "normal"
             return None
         elif k in (curses.KEY_LEFT, ord("h")):
@@ -3340,7 +3347,7 @@ class CCSApp:
             if self.confirm_sel == 0 and not HAS_TMUX:
                 self.confirm_sel = 1
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if not s:
+            if not s or self.confirm_sel == 3:
                 self.mode = "normal"
                 return None
             if self.confirm_sel == 2:
