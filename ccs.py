@@ -1303,6 +1303,9 @@ class CCSApp:
         has_tmux = s.id in self.tmux_sids
         is_idle = s.id in self.tmux_idle
 
+        # Left margin for scrollbar + gap
+        lm = 3
+
         # Column widths (account for scrollbar left margin)
         aw = w - lm  # available width after scrollbar margin
         ind_w = 3     # " ▸ " or " ● " or "   "
@@ -1358,9 +1361,6 @@ class CCSApp:
             mark_ch = "▸"
         else:
             mark_ch = " "
-
-        # Left margin for scrollbar + gap
-        lm = 3
 
         if sel:
             # Highlight entire row
