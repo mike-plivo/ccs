@@ -1024,6 +1024,8 @@ class CCSApp:
                 "Delete Empty Sessions",
                 f"Delete {self.empty_count} empty session{'s' if self.empty_count != 1 else ''}?",
                 "All sessions with no messages will be removed.")
+        elif self.mode == "input":
+            self._draw_input_overlay(h, w)
         elif self.mode == "launch":
             s = self.launch_session
             label = s.tag or s.id[:12] if s else "session"
@@ -1114,8 +1116,7 @@ class CCSApp:
             self._safe(y, 1, " CWD:", curses.color_pair(CP_WARN) | curses.A_BOLD)
             self._safe(y, 7, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
         elif self.mode == "input":
-            self._safe(y, 1, " >", curses.color_pair(CP_STATUS) | curses.A_BOLD)
-            self._safe(y, 4, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
+            pass  # handled by overlay popup
         elif self.mode in ("quit", "delete", "delete_empty", "profiles", "profile_edit"):
             pass  # handled by overlay popups
         elif self.query:
@@ -1640,6 +1641,66 @@ class CCSApp:
             bx = sx + max(2, (box_w - total_w) // 2)
             self._safe(btn_row, bx, yes_label, yes_a)
             self._safe(btn_row, bx + len(yes_label) + gap, no_label, no_a)
+
+        # Bottom border
+        self._safe(sy + box_h - 1, sx, "└", bdr)
+        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+
+    def _draw_input_overlay(self, h: int, w: int):
+        """Draw a popup for sending text to a tmux session."""
+        bdr = curses.color_pair(CP_BORDER)
+        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
+        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        normal = curses.color_pair(CP_NORMAL)
+        inp = curses.color_pair(CP_INPUT)
+
+        target = self.input_target_tmux or "tmux"
+        title = f" Send to {target} "
+
+        # Box dimensions: wide enough for text, tall enough for lines + chrome
+        box_w = min(max(len(title) + 4, 60), w - 4)
+        text_w = box_w - 6  # usable width inside padding
+        max_text_lines = min(len(self.input_lines) + 1, 10)  # show up to 10 lines
+        # Layout: 1 blank + text lines + 1 blank + 1 hints = max_text_lines + 3
+        inner_h = max_text_lines + 3
+        box_h = inner_h + 2  # + top/bottom border
+        sx = max(0, (w - box_w) // 2)
+        sy = max(0, (h - box_h) // 2)
+
+        # Top border with title
+        self._safe(sy, sx, "┌", bdr)
+        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
+        self._safe(sy, sx + box_w - 1, "┐", bdr)
+        ttx = sx + max(1, (box_w - len(title)) // 2)
+        self._safe(sy, ttx, title, hdr)
+
+        # Fill interior rows
+        for i in range(inner_h):
+            y = sy + 1 + i
+            self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
+
+        # Text area: show input lines with cursor
+        text_sy = sy + 2  # after top border + 1 blank row
+        for li in range(max_text_lines):
+            y = text_sy + li
+            if li < len(self.input_lines):
+                line = self.input_lines[li]
+                display = line[:text_w]
+                if li == self.input_cursor_line:
+                    # Show line with cursor
+                    self._safe(y, sx + 3, display, inp)
+                    # Cursor block
+                    cx = sx + 3 + len(display)
+                    if cx < sx + box_w - 2:
+                        self._safe(y, cx, "▏", inp | curses.A_BOLD)
+                else:
+                    self._safe(y, sx + 3, display, normal)
+
+        # Hints row at bottom of interior
+        hints = "⏎ Send  ·  Ctrl+J New line  ·  ↑↓ Lines  ·  Esc Cancel"
+        hints_y = sy + box_h - 2  # last interior row
+        self._safe(hints_y, sx + 2, hints[:box_w - 4], dim)
 
         # Bottom border
         self._safe(sy + box_h - 1, sx, "└", bdr)
@@ -2426,7 +2487,8 @@ class CCSApp:
                     self.input_target_sid = s.id
                     self.input_target_tmux = self.tmux_sids[s.id]
                     self.mode = "input"
-                    self.ibuf = ""
+                    self.input_lines = [""]  # multiline buffer
+                    self.input_cursor_line = 0
                 else:
                     self._set_status("No active tmux session")
             elif not HAS_TMUX:
@@ -2955,24 +3017,41 @@ class CCSApp:
         return None
 
     def _input_send(self, k: int) -> Optional[str]:
-        if k == 27:  # Esc
+        if k == 27:  # Esc — cancel
             self.mode = "normal"
             self.input_target_sid = None
             self.input_target_tmux = None
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if self.ibuf.strip() and self.input_target_tmux:
-                self._tmux_send_text(self.input_target_tmux, self.ibuf)
+        elif k in (curses.KEY_ENTER, 13):
+            # Enter — send the text
+            text = "\n".join(self.input_lines)
+            if text.strip() and self.input_target_tmux:
+                self._tmux_send_text(self.input_target_tmux, text)
                 self._set_status(f"Sent to {self.input_target_tmux}")
                 self.tmux_pane_ts.pop(self.input_target_sid, None)
                 self.tmux_pane_cache.pop(self.input_target_sid, None)
-            self.ibuf = ""
             self.mode = "normal"
             self.input_target_sid = None
             self.input_target_tmux = None
+        elif k == 10:
+            # Ctrl+J / Line feed — new line
+            self.input_lines.insert(self.input_cursor_line + 1, "")
+            self.input_cursor_line += 1
         elif k in (curses.KEY_BACKSPACE, 127, 8):
-            self.ibuf = self.ibuf[:-1]
+            line = self.input_lines[self.input_cursor_line]
+            if line:
+                self.input_lines[self.input_cursor_line] = line[:-1]
+            elif self.input_cursor_line > 0:
+                # Merge with previous line
+                self.input_lines.pop(self.input_cursor_line)
+                self.input_cursor_line -= 1
+        elif k == curses.KEY_UP:
+            if self.input_cursor_line > 0:
+                self.input_cursor_line -= 1
+        elif k == curses.KEY_DOWN:
+            if self.input_cursor_line < len(self.input_lines) - 1:
+                self.input_cursor_line += 1
         elif 32 <= k <= 126:
-            self.ibuf += chr(k)
+            self.input_lines[self.input_cursor_line] += chr(k)
         return None
 
     def _input_help(self, k: int) -> Optional[str]:
