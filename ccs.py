@@ -1539,6 +1539,7 @@ class HelpModal(ModalScreen):
     DEFAULT_CSS = """
     HelpModal {
         align: center middle;
+        background: $background 60%;
     }
     #help-box {
         width: 70;
@@ -1633,6 +1634,7 @@ class ConfirmModal(ModalScreen[bool]):
     DEFAULT_CSS = """
     ConfirmModal {
         align: center middle;
+        background: $background 60%;
     }
     #confirm-box {
         width: 56;
@@ -1709,6 +1711,7 @@ class LaunchModal(ModalScreen[str]):
     DEFAULT_CSS = """
     LaunchModal {
         align: center middle;
+        background: $background 60%;
     }
     #launch-box {
         width: 56;
@@ -1826,6 +1829,7 @@ class InputModal(ModalScreen[str]):
     DEFAULT_CSS = """
     InputModal {
         align: center middle;
+        background: $background 60%;
     }
     #input-container {
         width: 80%;
@@ -1882,6 +1886,7 @@ class SimpleInputModal(ModalScreen[str]):
     DEFAULT_CSS = """
     SimpleInputModal {
         align: center middle;
+        background: $background 60%;
     }
     #simple-input-container {
         width: 60;
@@ -1936,6 +1941,7 @@ class SearchModal(ModalScreen[str]):
     DEFAULT_CSS = """
     SearchModal {
         align: center middle;
+        background: $background 60%;
     }
     #search-box {
         width: 56;
@@ -1994,6 +2000,7 @@ class ThemeModal(ModalScreen[str]):
     DEFAULT_CSS = """
     ThemeModal {
         align: center middle;
+        background: $background 60%;
     }
     #theme-box {
         width: 44;
@@ -2086,6 +2093,7 @@ class ProfilesModal(ModalScreen[str]):
     DEFAULT_CSS = """
     ProfilesModal {
         align: center middle;
+        background: $background 60%;
     }
     #profiles-box {
         width: 64;
@@ -2225,6 +2233,7 @@ class ProfileEditModal(ModalScreen[dict]):
     DEFAULT_CSS = """
     ProfileEditModal {
         align: center middle;
+        background: $background 60%;
     }
     #profedit-box {
         width: 76;
