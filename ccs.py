@@ -1015,7 +1015,6 @@ class HeaderBox(Static):
     total_count = reactive(0)
     sort_mode = reactive("date")
     hints = reactive("")
-    filter_text = reactive("")
 
     def render(self) -> Text:
         """Build a multi-line Rich Text header.
@@ -1023,7 +1022,7 @@ class HeaderBox(Static):
         Line 1: centered title
         Line 2: Profile badge + View label
         Line 3: context-sensitive hints
-        Line 4: session count / sort mode / filter info
+        Line 4: session count / sort mode
         """
         tc = lambda role, fb="": _tc(self.app, role, fb)
         text = Text()
@@ -1054,31 +1053,22 @@ class HeaderBox(Static):
         text.append(self.hints, style=Style(color=tc("dim-color", "#888888")))
         text.append("\n")
 
-        # Line 4 -- info / filter
-        if self.filter_text:
-            text.append(
-                f"Filter: {self.filter_text}",
-                style=Style(color=tc("dim-color", "#888888")),
-            )
-        else:
-            labels = {
-                "date": "Date",
-                "name": "Name",
-                "project": "Project",
-                "tag": "Tag",
-                "messages": "Messages",
-                "tmux": "Tmux",
-            }
-            sort_label = labels.get(self.sort_mode, "Date")
-            if self.session_count < self.total_count:
-                info = f"{self.session_count}/{self.total_count} sessions \u00b7 Sort: {sort_label}"
-            else:
-                n = self.session_count
-                info = f"{n} session{'s' if n != 1 else ''} \u00b7 Sort: {sort_label}"
-            text.append(
-                info,
-                style=Style(color=tc("accent-color", "#00cccc")),
-            )
+        # Line 4 -- info
+        labels = {
+            "date": "Date",
+            "name": "Name",
+            "project": "Project",
+            "tag": "Tag",
+            "messages": "Messages",
+            "tmux": "Tmux",
+        }
+        sort_label = labels.get(self.sort_mode, "Date")
+        n = self.session_count
+        info = f"{n} session{'s' if n != 1 else ''} \u00b7 Sort: {sort_label}"
+        text.append(
+            info,
+            style=Style(color=tc("accent-color", "#00cccc")),
+        )
 
         return text
 
@@ -1626,7 +1616,6 @@ class HelpModal(ModalScreen):
             text.append("Other\n", style=hdr)
             text.append("  P              Profile picker / manager\n")
             text.append("  H              Cycle theme\n")
-            text.append("  /              Search / filter sessions\n")
             text.append("  r              Refresh session list\n")
             text.append("  Esc / \u2190 / h    Back to Sessions list\n")
             text.append("  Ctrl-C         Quit\n")
@@ -1656,9 +1645,8 @@ class HelpModal(ModalScreen):
             text.append("  e              Start an ephemeral session\n\n")
             text.append("Other\n", style=hdr)
             text.append("  H              Cycle theme\n")
-            text.append("  /              Search / filter sessions\n")
             text.append("  r              Refresh session list\n")
-            text.append("  Esc            Clear filter, or quit\n")
+            text.append("  Esc            Quit\n")
             text.append("  Ctrl-C         Quit\n")
 
         text.append("\nPress any key to close", style=dim)
@@ -1986,65 +1974,6 @@ class SimpleInputModal(ModalScreen[str]):
         self.dismiss(val if val else None)
 
     def action_cancel(self):
-        self.dismiss(None)
-
-
-class SearchModal(ModalScreen[str]):
-    """Centered search popup with live filtering."""
-
-    DEFAULT_CSS = """
-    SearchModal {
-        align: center middle;
-        background: $background 25%;
-    }
-    #search-box {
-        width: 68;
-        height: auto;
-        border: heavy $accent;
-        background: $surface;
-        padding: 2 3;
-    }
-    #search-field {
-        margin-top: 1;
-    }
-    #search-hints { margin-top: 1; }
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel", show=False),
-    ]
-
-    def __init__(self, initial: str = "", on_change=None):
-        super().__init__()
-        self.initial = initial
-        self._on_change = on_change
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="search-box"):
-            yield Static(id="search-title")
-            yield Input(value=self.initial, placeholder="Search sessions...", id="search-field")
-            yield Static(id="search-hints")
-
-    def on_mount(self):
-        tc = lambda role, fb="": _tc(self.app, role, fb)
-        title = Text("/ Search", style=Style(color=tc("header-color", "#00ffff"), bold=True))
-        self.query_one("#search-title", Static).update(title)
-        hints = Text("\u23ce Confirm  \u00b7  Esc Clear & close", style=Style(color=tc("dim-color", "#888888")))
-        self.query_one("#search-hints", Static).update(hints)
-        inp = self.query_one("#search-field", Input)
-        inp.focus()
-        inp.cursor_position = len(self.initial)
-
-    def on_input_changed(self, event: Input.Changed):
-        if self._on_change:
-            self._on_change(event.value)
-
-    def on_input_submitted(self, event: Input.Submitted):
-        self.dismiss(event.value)
-
-    def action_cancel(self):
-        if self._on_change:
-            self._on_change("")
         self.dismiss(None)
 
 
@@ -2579,7 +2508,6 @@ class CCSApp(App):
         self.sessions = []
         self.filtered = []
         self.sort_mode = "date"
-        self.query = ""
         self.marked = set()
         self.view = "sessions"  # "sessions" | "detail"
 
@@ -2665,7 +2593,7 @@ class CCSApp(App):
                     -s.mtime,
                 )
             )
-        self._apply_filter()
+        self.filtered = list(self.sessions)
         self._git_cache.clear()
         # Prune stale pane cache
         stale = set(self.tmux_pane_cache) - set(self.tmux_sids)
@@ -2679,20 +2607,6 @@ class CCSApp(App):
         self._update_preview()
         self._update_header()
 
-    def _apply_filter(self):
-        if not self.query:
-            self.filtered = list(self.sessions)
-        else:
-            q = self.query.lower()
-            self.filtered = [
-                s
-                for s in self.sessions
-                if q in s.label.lower()
-                or q in s.project_display.lower()
-                or q in s.tag.lower()
-                or q in s.id.lower()
-                or q in s.cwd.lower()
-            ]
         valid_ids = {s.id for s in self.filtered}
         self.marked &= valid_ids
 
@@ -2775,7 +2689,6 @@ class CCSApp(App):
         header.session_count = len(self.filtered)
         header.total_count = len(self.sessions)
         header.sort_mode = self.sort_mode
-        header.filter_text = self.query
         if self.view == "detail":
             header.hints = (
                 "\u2190/Esc back \u00b7 Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
@@ -3220,9 +3133,6 @@ class CCSApp(App):
         if key == "H":
             self.action_cycle_theme()
             return
-        if key in ("slash", "/"):
-            self.action_search()
-            return
         if key in ("r", "f5"):
             self.action_refresh()
             return
@@ -3324,34 +3234,6 @@ class CCSApp(App):
 
     # -- Search ------------------------------------------------------------
 
-    def _show_search(self):
-        # Switch to sessions view so filtered list is visible
-        if self.view == "detail":
-            self._switch_to_sessions()
-
-        def on_live_change(value):
-            self.query = value
-            self._apply_filter()
-            self._rebuild_list()
-            self._update_header()
-
-        def on_result(result):
-            if result is None:
-                # Esc: clear filter
-                self.query = ""
-            else:
-                # Enter: keep the filter
-                self.query = result
-            self._apply_filter()
-            self._rebuild_list()
-            self._update_header()
-            self.query_one("#session-list", SessionListWidget).focus()
-
-        self.push_screen(
-            SearchModal(initial=self.query, on_change=on_live_change),
-            on_result,
-        )
-
     # -- Actions -----------------------------------------------------------
 
     def action_quit_confirm(self):
@@ -3445,9 +3327,6 @@ class CCSApp(App):
             on_result,
         )
 
-    def action_search(self):
-        self._show_search()
-
     def action_refresh(self):
         self._do_refresh(force=True)
         self._set_status("Refreshed session list")
@@ -3487,12 +3366,6 @@ class CCSApp(App):
     def action_escape_action(self):
         if self.view == "detail":
             self._switch_to_sessions()
-            return
-        if self.query:
-            self.query = ""
-            self._apply_filter()
-            self._rebuild_list()
-            self._update_header()
             return
         self.action_quit_confirm()
 
