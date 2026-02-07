@@ -2771,24 +2771,6 @@ class CCSApp(App):
             self.tmux_sids = {
                 info.get("session_id"): name for name, info in alive.items()
             }
-            # Inject virtual sessions for tmux-only (no Claude session file yet)
-            scanned_ids = {s.id for s in self.sessions}
-            tags = self.mgr._load(TAGS_FILE, {})
-            for sid, tmux_name in self.tmux_sids.items():
-                if sid and sid not in scanned_ids:
-                    info = alive.get(tmux_name, {})
-                    launched = info.get("launched", "")
-                    try:
-                        mt = datetime.datetime.fromisoformat(launched).timestamp()
-                    except Exception:
-                        mt = time.time()
-                    self.sessions.append(Session(
-                        id=sid, project_raw="", project_display="(tmux)",
-                        cwd="", summary="(waiting for input)",
-                        first_msg="", first_msg_long="",
-                        tag=tags.get(sid, ""), pinned=False,
-                        mtime=mt, path="",
-                    ))
         else:
             self.tmux_sids = {}
         # Re-sort for tmux mode
@@ -3027,34 +3009,26 @@ class CCSApp(App):
                 pass
 
     def _cleanup_gone_sessions(self, gone_sids):
-        """Auto-delete ephemeral sessions and clean up virtual sessions whose tmux has exited."""
+        """Auto-delete ephemeral sessions whose tmux has exited."""
         ephemeral_ids = self._load_ephemeral_ids()
-        scanned_ids = {s.id for s in self.sessions}
+        changed = False
         for sid in gone_sids:
             if sid in ephemeral_ids:
                 s = next((s for s in self.sessions if s.id == sid), None)
                 if s:
                     self.mgr.delete(s)
-                elif sid not in scanned_ids:
-                    # Virtual session (no Claude file) — clean up tags/cwds
-                    self.mgr.delete(Session(
-                        id=sid, project_raw="", project_display="",
-                        cwd="", summary="", first_msg="", first_msg_long="",
-                        tag="", pinned=False, mtime=0, path="",
-                    ))
-                self._set_status("Ephemeral session cleaned up")
+                self._cleanup_session_metadata(sid)
                 ephemeral_ids.discard(sid)
-            elif sid not in scanned_ids:
-                # Non-ephemeral virtual session gone — clean up tags/cwds
-                self.mgr.delete(Session(
-                    id=sid, project_raw="", project_display="",
-                    cwd="", summary="", first_msg="", first_msg_long="",
-                    tag="", pinned=False, mtime=0, path="",
-                ))
-        try:
-            EPHEMERAL_FILE.write_text("\n".join(ephemeral_ids) + "\n" if ephemeral_ids else "")
-        except Exception:
-            pass
+                changed = True
+                self._set_status("Ephemeral session cleaned up")
+            elif not self._session_file_exists(sid):
+                # No .jsonl — just clean up tags/cwds
+                self._cleanup_session_metadata(sid)
+        if changed:
+            try:
+                EPHEMERAL_FILE.write_text("\n".join(ephemeral_ids) + "\n" if ephemeral_ids else "")
+            except Exception:
+                pass
 
     def _poll_tmux_activity(self):
         if not HAS_TMUX:
@@ -3263,6 +3237,10 @@ class CCSApp(App):
         self.mgr.tmux_register(tmux_name, s.id, self.active_profile_name)
         self._tmux_attach(tmux_name, s.id)
 
+    def _session_file_exists(self, sid):
+        """Check if a Claude session .jsonl file exists for this ID."""
+        return bool(glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")))
+
     def _tmux_attach(self, tmux_name, session_id=None):
         try:
             with self.suspend():
@@ -3270,35 +3248,46 @@ class CCSApp(App):
         except Exception:
             self._set_status("Cannot suspend in this environment")
             return
-        alive = self.mgr.tmux_sessions()
-        if tmux_name not in alive:
+        if not session_id:
+            self._do_refresh()
+            return
+        is_ephemeral = session_id in self._load_ephemeral_ids()
+        tmux_alive = tmux_name in self.mgr.tmux_sessions()
+        has_session = self._session_file_exists(session_id)
+        if is_ephemeral:
+            # Ephemeral: always kill tmux + delete session + clean up
+            if tmux_alive:
+                subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
             self.mgr.tmux_unregister(tmux_name)
-            if session_id:
-                ephemeral_ids = self._load_ephemeral_ids()
-                is_ephemeral = session_id in ephemeral_ids
-                # Clean up session data (works for both real and virtual sessions)
+            if has_session:
                 s = next((s for s in self.sessions if s.id == session_id), None)
-                if is_ephemeral:
-                    if s:
-                        self.mgr.delete(s)
-                    else:
-                        # Virtual session — clean up tags/cwds
-                        self.mgr.delete(Session(
-                            id=session_id, project_raw="", project_display="",
-                            cwd="", summary="", first_msg="", first_msg_long="",
-                            tag="", pinned=False, mtime=0, path="",
-                        ))
-                    self._remove_ephemeral_id(session_id)
-                    self._set_status("Ephemeral session cleaned up")
-                elif not s:
-                    # Non-ephemeral virtual session ended — clean up tags/cwds
-                    self.mgr.delete(Session(
-                        id=session_id, project_raw="", project_display="",
-                        cwd="", summary="", first_msg="", first_msg_long="",
-                        tag="", pinned=False, mtime=0, path="",
-                    ))
-                    self._set_status("Session cleaned up")
+                if s:
+                    self.mgr.delete(s)
+            self._cleanup_session_metadata(session_id)
+            self._remove_ephemeral_id(session_id)
+            self._set_status("Ephemeral session cleaned up")
+        elif not has_session:
+            # No session file — nothing to keep, kill tmux + clean up
+            if tmux_alive:
+                subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+            self.mgr.tmux_unregister(tmux_name)
+            self._cleanup_session_metadata(session_id)
+            self._set_status("No session created — tmux killed")
+        elif not tmux_alive:
+            # Regular session, tmux ended naturally — just unregister
+            self.mgr.tmux_unregister(tmux_name)
         self._do_refresh()
+
+    def _cleanup_session_metadata(self, sid):
+        """Remove tags/cwds for a session ID that has no .jsonl file."""
+        tags = self.mgr._load(TAGS_FILE, {})
+        if sid in tags:
+            tags.pop(sid)
+            self.mgr._save(TAGS_FILE, tags)
+        cwds = self.mgr._load(CWDS_FILE, {})
+        if sid in cwds:
+            cwds.pop(sid)
+            self.mgr._save(CWDS_FILE, cwds)
 
     def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
