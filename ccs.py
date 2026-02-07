@@ -1054,6 +1054,9 @@ class CCSApp:
         prof_badge = f" {self.active_profile_name} "
         self._safe(1, 2, prof_badge,
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
+        view_label = "Session View" if self.view == "detail" else "Sessions"
+        vx = 2 + len(prof_badge) + 1
+        self._safe(1, vx, view_label, curses.color_pair(CP_ACCENT))
 
         if self.view == "detail":
             normal_hints = "← Back  ↑↓ Scroll  j/k Session  ⏎ Resume  K Kill  / Search  ? Help"
@@ -1311,17 +1314,9 @@ class CCSApp:
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
         if self.view == "detail":
-            label = " Detail "
-            if self.filtered:
-                s = self.filtered[self.cur]
-                if s.id in self.tmux_sids:
-                    label = " Live Detail "
+            label = " Session View "
         else:
-            label = " Preview "
-            if self.filtered:
-                s = self.filtered[self.cur]
-                if s.id in self.tmux_sids:
-                    label = " Live Preview "
+            label = " Info "
         self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
         # View indicator on right
         view_hint = " →: Detail " if self.view == "sessions" else " ←: Sessions "
