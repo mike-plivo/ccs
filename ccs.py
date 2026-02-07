@@ -1763,9 +1763,16 @@ class LaunchModal(ModalScreen[str]):
     }
     """
 
-    def __init__(self, label: str):
+    def __init__(self, label: str, show_view: bool = True):
         super().__init__()
         self.session_label = label
+        self.show_view = show_view
+        self._actions = list(self._ACTIONS)
+        self._labels = list(self._LABELS)
+        if not show_view:
+            # Remove "Session View" option (index 2)
+            self._actions.pop(2)
+            self._labels.pop(2)
         self.sel = 0 if HAS_TMUX else 1
 
     def compose(self) -> ComposeResult:
@@ -1791,12 +1798,15 @@ class LaunchModal(ModalScreen[str]):
         dim_style = Style(color=tc("dim-color", "#888888"))
         disabled_style = Style(color="#555555", dim=True)
 
+        cancel_idx = len(self._actions) - 1  # last item is Cancel
+        action_count = cancel_idx  # number of non-cancel actions
+
         # Row 1: action buttons
         row1 = Text(justify="center")
-        for i in range(3):
+        for i in range(action_count):
             if i > 0:
                 row1.append("   ", style=dim_style)
-            label = f"  {self._LABELS[i]}  "
+            label = f"  {self._labels[i]}  "
             if i == 0 and not HAS_TMUX:
                 row1.append(label, style=disabled_style)
             elif i == self.sel:
@@ -1807,8 +1817,8 @@ class LaunchModal(ModalScreen[str]):
 
         # Row 2: cancel
         row2 = Text(justify="center")
-        cancel_label = f"  {self._LABELS[3]} (Esc/n)  "
-        if self.sel == 3:
+        cancel_label = f"  {self._labels[cancel_idx]} (Esc/n)  "
+        if self.sel == cancel_idx:
             row2.append(cancel_label, style=sel_style)
         else:
             row2.append(cancel_label, style=dim_style)
@@ -1826,26 +1836,27 @@ class LaunchModal(ModalScreen[str]):
             self.dismiss(None)
             return
         if key in ("enter", "return"):
-            self.dismiss(self._ACTIONS[self.sel])
+            self.dismiss(self._actions[self.sel])
             return
 
-        max_sel = 3
+        cancel_idx = len(self._actions) - 1
+        action_count = cancel_idx
         if key in ("left", "h"):
-            self.sel = (self.sel - 1) % (max_sel + 1)
+            self.sel = (self.sel - 1) % (cancel_idx + 1)
             if self.sel == 0 and not HAS_TMUX:
-                self.sel = max_sel
+                self.sel = cancel_idx
         elif key in ("right", "l"):
-            self.sel = (self.sel + 1) % (max_sel + 1)
+            self.sel = (self.sel + 1) % (cancel_idx + 1)
             if self.sel == 0 and not HAS_TMUX:
                 self.sel = 1
         elif key in ("up", "k"):
-            if self.sel == 3:
+            if self.sel == cancel_idx:
                 self.sel = 1
             else:
-                self.sel = 3
+                self.sel = cancel_idx
         elif key in ("down", "j"):
-            if self.sel <= 2:
-                self.sel = 3
+            if self.sel < cancel_idx:
+                self.sel = cancel_idx
             else:
                 self.sel = 1
 
@@ -3490,7 +3501,7 @@ class CCSApp(App):
                     self.exit_action = ("resume", s.id, s.cwd, extra)
                     self.exit()
 
-        self.push_screen(LaunchModal(label), on_result)
+        self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
 
     def _handle_missing_cwd(self, s, extra, mode):
         self._set_status(f"Directory missing: {s.cwd}")
