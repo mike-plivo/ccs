@@ -1698,7 +1698,7 @@ class ConfirmModal(ModalScreen[bool]):
         key = event.key
         event.stop()
         event.prevent_default()
-        if key in ("y", "Y"):
+        if key in ("y", "Y", "ctrl+c"):
             self.dismiss(True)
         elif key in ("n", "N", "escape"):
             self.dismiss(False)
@@ -3299,6 +3299,8 @@ class CCSApp(App):
     # -- Actions -----------------------------------------------------------
 
     def action_quit_confirm(self):
+        if isinstance(self.screen, ModalScreen):
+            return
         def on_result(confirmed):
             if confirmed:
                 self.exit()
