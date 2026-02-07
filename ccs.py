@@ -1811,7 +1811,6 @@ class CCSApp:
             content_lines.append(("", 0))
         # Placeholder row for buttons (drawn separately)
         content_lines.append(("", 0))
-        content_lines.append(("  Yes (y/Y)  ·  No (n/N/Esc)", dim))
         content_lines.append(("", 0))
 
         max_content_w = max((len(t) + 4 for t, _ in content_lines), default=0)
