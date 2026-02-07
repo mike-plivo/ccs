@@ -2550,7 +2550,6 @@ class ContextMenuModal(ModalScreen[str]):
         with box:
             yield Static(self.title_text, id="ctx-menu-title")
             yield Static("", id="ctx-menu-items")
-        yield box
 
     def on_mount(self):
         self._refresh_display()
