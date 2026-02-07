@@ -1573,7 +1573,7 @@ class HelpModal(ModalScreen):
             text.append("  PgUp / PgDn    Page up / down\n")
             text.append("  g / G          Scroll to top / bottom\n\n")
             text.append("Actions\n", style=hdr)
-            text.append("  Enter          Resume / attach session\n")
+            text.append("  \u23ce              Resume / attach session\n")
             text.append("  K              Kill tmux session\n")
             text.append("  i              Send text to tmux (Ctrl+D to send)\n")
             text.append("  p              Toggle pin\n")
@@ -1596,7 +1596,7 @@ class HelpModal(ModalScreen):
             text.append("  PgUp / PgDn    Page up / down\n")
             text.append("  \u2192 / l          Open Session View\n\n")
             text.append("Actions\n", style=hdr)
-            text.append("  Enter          Resume with active profile\n")
+            text.append("  \u23ce              Resume with active profile\n")
             text.append("  P              Profile picker / manager\n")
             text.append("  p              Toggle pin (bulk if marked)\n")
             text.append("  t / T          Set / remove tag\n")
@@ -1862,7 +1862,7 @@ class InputModal(ModalScreen[str]):
         tc = lambda role, fb="": _tc(self.app, role, fb)
         title_text = Text(f"Send to {self.target_name}", style=Style(color=tc("header-color", "#00ffff"), bold=True))
         self.query_one("#input-title", Static).update(title_text)
-        hints = Text("Ctrl+D Send  \u00b7  Enter New line  \u00b7  Esc Cancel", style=Style(color=tc("dim-color", "#888888")))
+        hints = Text("Ctrl+D Send  \u00b7  \u23ce New line  \u00b7  Esc Cancel", style=Style(color=tc("dim-color", "#888888")))
         self.query_one("#input-hints", Static).update(hints)
         self.query_one("#input-area", TextArea).focus()
 
@@ -1916,7 +1916,7 @@ class SimpleInputModal(ModalScreen[str]):
         tc = lambda role, fb="": _tc(self.app, role, fb)
         title = Text(self.title_text, style=Style(color=tc("header-color", "#00ffff"), bold=True))
         self.query_one("#simple-input-title", Static).update(title)
-        hints = Text("Enter to confirm  \u00b7  Esc to cancel", style=Style(color=tc("dim-color", "#888888")))
+        hints = Text("\u23ce Confirm  \u00b7  Esc Cancel", style=Style(color=tc("dim-color", "#888888")))
         self.query_one("#simple-input-hints", Static).update(hints)
         inp = self.query_one("#simple-input-field", Input)
         inp.focus()
@@ -2567,12 +2567,12 @@ class CCSApp(App):
         header.filter_text = self.query
         if self.view == "detail":
             header.hints = (
-                "Tab panes \u00b7 Enter resume \u00b7 p pin \u00b7 t tag"
+                "Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
                 " \u00b7 d del \u00b7 K kill \u00b7 Esc back"
             )
         else:
             header.hints = (
-                "j/k nav \u00b7 Enter resume \u00b7 Space mark \u00b7 p pin"
+                "j/k nav \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
                 " \u00b7 t tag \u00b7 s sort \u00b7 ? help"
             )
 
