@@ -234,16 +234,6 @@ class SessionManager:
                 return c
         return ""
 
-    def create_session_stub(self, uid: str, cwd: str = None):
-        """Create an empty .jsonl so the scanner picks up the new session."""
-        proj_dir = cwd or os.getcwd()
-        encoded = proj_dir.replace("/", "-")
-        d = PROJECTS_DIR / encoded
-        d.mkdir(parents=True, exist_ok=True)
-        stub = d / f"{uid}.jsonl"
-        if not stub.exists():
-            stub.touch()
-
     def scan(self, sort_mode: str = "date", force: bool = False) -> List[Session]:
         tags = self._load(TAGS_FILE, {})
         pins = set(self._load(PINS_FILE, []))
@@ -329,6 +319,18 @@ class SessionManager:
             self._save(CACHE_FILE, pruned)
         except Exception:
             pass
+
+        # Add tagged sessions that don't have a .jsonl yet (newly created)
+        for sid, tag in tags.items():
+            if sid not in seen_sids and tag:
+                cwd = cwd_overrides.get(sid, "")
+                out.append(Session(
+                    id=sid, project_raw="", project_display="",
+                    cwd=cwd, summary="", first_msg="",
+                    first_msg_long="", tag=tag, pinned=sid in pins,
+                    mtime=time.time(), summaries=[], path="",
+                    msg_count=0,
+                ))
 
         out.sort(key=lambda s: s.get_sort_key(sort_mode))
         return out
@@ -3093,7 +3095,6 @@ class CCSApp(App):
             cwds = self.mgr._load(CWDS_FILE, {})
             cwds[uid] = cwd
             self.mgr._save(CWDS_FILE, cwds)
-        self.mgr.create_session_stub(uid, cwd)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if cwd and os.path.isdir(cwd):
@@ -3971,7 +3972,6 @@ def cmd_new(mgr: SessionManager, name: str, extra: List[str], cwd: str = None):
         mgr._save(CWDS_FILE, cwds)
         if os.path.isdir(cwd):
             os.chdir(cwd)
-    mgr.create_session_stub(uid, cwd)
     print(f"\033[1;36m◆\033[0m Starting named session: "
           f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
     cmd = ["claude", "--session-id", uid] + extra
