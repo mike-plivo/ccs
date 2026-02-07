@@ -4533,6 +4533,7 @@ def main():
 
     mgr = SessionManager()
     mgr.purge_ephemeral()
+    mgr.scan(force=True)  # clean up empty sessions on startup
 
     if not args:
         # Launch Textual TUI
