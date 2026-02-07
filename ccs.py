@@ -3152,15 +3152,32 @@ class CCSApp(App):
                 self._update_detail()
 
     def _tmux_send_key(self, tmux_name, key_str):
-        """Send a single key to tmux."""
+        """Send a single key to tmux (fire-and-forget)."""
         try:
-            subprocess.run(
+            subprocess.Popen(
                 ["tmux", "send-keys", "-t", tmux_name, key_str],
-                capture_output=True,
-                timeout=2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         except Exception:
             pass
+
+    def _tmux_send_literal(self, tmux_name, text):
+        """Send literal text to tmux (fire-and-forget)."""
+        try:
+            subprocess.Popen(
+                ["tmux", "send-keys", "-t", tmux_name, "-l", text],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    def _passthrough_refresh(self, sid, tmux_name):
+        """Immediate capture + display for passthrough responsiveness."""
+        self._capture_one_pane(sid, tmux_name)
+        if self.view == "detail":
+            self._update_detail()
 
     def _tmux_launch_detached(self, s):
         """Launch a detached tmux session for passthrough mode."""
@@ -3253,21 +3270,18 @@ class CCSApp(App):
                 self._exit_passthrough()
                 return
             tmux_name = self.tmux_sids[s.id]
+            sid = s.id
             # Map special keys
             tmux_key = self._TMUX_KEY_MAP.get(key)
             if tmux_key:
                 self._tmux_send_key(tmux_name, tmux_key)
             elif key.startswith("ctrl+") and len(key) > 5:
-                # ctrl+a -> C-a
                 ch = key[5:]
                 self._tmux_send_key(tmux_name, f"C-{ch}")
             elif len(key) == 1:
-                # Regular printable character — send literally
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", tmux_name, "-l", key],
-                    capture_output=True,
-                    timeout=2,
-                )
+                self._tmux_send_literal(tmux_name, key)
+            # Immediate refresh after a short delay for tmux to process
+            self.set_timer(0.05, lambda: self._passthrough_refresh(sid, tmux_name))
             return
 
         key = event.key
