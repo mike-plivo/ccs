@@ -354,7 +354,7 @@ class SessionManager:
     def set_tag(self, sid: str, tag: str):
         tags = self._load(TAGS_FILE, {})
         if tag:
-            tags[sid] = tag
+            tags[sid] = tag[:10]
         else:
             tags.pop(sid, None)
         self._save(TAGS_FILE, tags)
@@ -1659,6 +1659,9 @@ class HelpModal(ModalScreen):
         # Disable scrollable container bindings so keys reach on_key
         self.query_one("#help-box", ScrollableContainer).BINDINGS = []
 
+    def on_click(self, event):
+        self.dismiss()
+
     def on_key(self, event):
         event.stop()
         self.dismiss()
@@ -1739,6 +1742,17 @@ class ConfirmModal(ModalScreen[bool]):
         text.append(no_label, style=sel_style if self.sel == 1 else dim_style)
         self.query_one("#confirm-buttons", Static).update(text)
 
+    def on_click(self, event):
+        try:
+            btns = self.query_one("#confirm-buttons", Static)
+            r = btns.region
+            if r.contains(event.screen_x, event.screen_y):
+                mid = r.x + r.width // 2
+                self.dismiss(event.screen_x < mid)
+                return
+        except Exception:
+            pass
+
     def on_key(self, event):
         key = event.key
         event.stop()
@@ -1777,9 +1791,11 @@ class LaunchModal(ModalScreen[str]):
         text-align: center;
         margin-bottom: 1;
     }
-    #launch-options {
+    .launch-opt {
+        height: 1;
         text-align: center;
-        height: auto;
+        content-align: center middle;
+        padding: 0 1;
     }
     #launch-hints {
         text-align: center;
@@ -1794,7 +1810,6 @@ class LaunchModal(ModalScreen[str]):
         self._actions = list(self._ACTIONS)
         self._labels = list(self._LABELS)
         if not show_view:
-            # Remove "Session View" option (index 2)
             self._actions.pop(2)
             self._labels.pop(2)
         self.sel = 0 if HAS_TMUX else 1
@@ -1802,7 +1817,8 @@ class LaunchModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         with Vertical(id="launch-box"):
             yield Static(id="launch-title")
-            yield Static(id="launch-options")
+            for i in range(len(self._actions)):
+                yield Static(id=f"launch-opt-{i}", classes="launch-opt")
             yield Static(id="launch-hints")
 
     def on_mount(self):
@@ -1811,7 +1827,7 @@ class LaunchModal(ModalScreen[str]):
         title.append("Launch Mode\n\n", style=Style(color=tc("header-color", "#00ffff"), bold=True))
         title.append(f"Resume: {self.session_label}", style=Style(color=tc("header-color", "#00ffff")))
         self.query_one("#launch-title", Static).update(title)
-        hints = Text("\u2190/\u2192 Select  \u00b7  \u23ce Confirm  \u00b7  Esc/n Cancel",
+        hints = Text("\u2190/\u2192/\u2191/\u2193 Select  \u00b7  \u23ce Confirm  \u00b7  Esc/n Cancel",
                      style=Style(color=tc("dim-color", "#888888")), justify="center")
         self.query_one("#launch-hints", Static).update(hints)
         self._render_options()
@@ -1821,35 +1837,34 @@ class LaunchModal(ModalScreen[str]):
         sel_style = Style(color=tc("header-color", "#00ffff"), bold=True, reverse=True)
         dim_style = Style(color=tc("dim-color", "#888888"))
         disabled_style = Style(color="#555555", dim=True)
+        cancel_idx = len(self._actions) - 1
 
-        cancel_idx = len(self._actions) - 1  # last item is Cancel
-        action_count = cancel_idx  # number of non-cancel actions
-
-        # Row 1: action buttons
-        row1 = Text(justify="center")
-        for i in range(action_count):
-            if i > 0:
-                row1.append("   ", style=dim_style)
-            label = f"  {self._labels[i]}  "
+        for i in range(len(self._actions)):
+            label = self._labels[i]
+            if i == cancel_idx:
+                label = f"{label} (Esc/n)"
+            padded = f"  {label}  "
             if i == 0 and not HAS_TMUX:
-                row1.append(label, style=disabled_style)
+                style = disabled_style
             elif i == self.sel:
-                row1.append(label, style=sel_style)
+                style = sel_style
             else:
-                row1.append(label, style=dim_style)
-        row1.append("\n")
+                style = dim_style
+            self.query_one(f"#launch-opt-{i}", Static).update(
+                Text(padded, style=style, justify="center")
+            )
 
-        # Row 2: cancel
-        row2 = Text(justify="center")
-        cancel_label = f"  {self._labels[cancel_idx]} (Esc/n)  "
-        if self.sel == cancel_idx:
-            row2.append(cancel_label, style=sel_style)
-        else:
-            row2.append(cancel_label, style=dim_style)
-
-        combined = row1.copy()
-        combined.append(row2)
-        self.query_one("#launch-options", Static).update(combined)
+    def on_click(self, event):
+        for i in range(len(self._actions)):
+            try:
+                w = self.query_one(f"#launch-opt-{i}", Static)
+                if w.region.contains(event.screen_x, event.screen_y):
+                    if i == 0 and not HAS_TMUX:
+                        return
+                    self.dismiss(self._actions[i])
+                    return
+            except Exception:
+                pass
 
     def on_key(self, event):
         key = event.key
@@ -1864,24 +1879,13 @@ class LaunchModal(ModalScreen[str]):
             return
 
         cancel_idx = len(self._actions) - 1
-        action_count = cancel_idx
-        if key == "left":
+        if key in ("up", "left"):
             self.sel = (self.sel - 1) % (cancel_idx + 1)
             if self.sel == 0 and not HAS_TMUX:
                 self.sel = cancel_idx
-        elif key == "right":
+        elif key in ("down", "right"):
             self.sel = (self.sel + 1) % (cancel_idx + 1)
             if self.sel == 0 and not HAS_TMUX:
-                self.sel = 1
-        elif key == "up":
-            if self.sel == cancel_idx:
-                self.sel = 1
-            else:
-                self.sel = cancel_idx
-        elif key == "down":
-            if self.sel < cancel_idx:
-                self.sel = cancel_idx
-            else:
                 self.sel = 1
 
         self._render_options()
@@ -2070,6 +2074,21 @@ class ThemeModal(ModalScreen[str]):
         if self._on_preview:
             self._on_preview(name)
 
+    def on_click(self, event):
+        try:
+            widget = self.query_one("#theme-list-text", Static)
+            r = widget.content_region
+            if r.contains(event.screen_x, event.screen_y):
+                row = event.screen_y - r.y
+                if 0 <= row < len(THEME_NAMES):
+                    self.cur = row
+                    self._refresh_display()
+                    self._preview_current()
+                    self.dismiss(THEME_NAMES[self.cur])
+                    return
+        except Exception:
+            pass
+
     def on_key(self, event):
         key = event.key
         event.stop()
@@ -2191,6 +2210,25 @@ class ProfilesModal(ModalScreen[str]):
         if 0 <= self.cur < len(profiles):
             return profiles[self.cur].get("name", "")
         return ""
+
+    def on_click(self, event):
+        if self._delete_pending:
+            return
+        try:
+            widget = self.query_one("#profiles-list-text", Static)
+            r = widget.content_region
+            if r.contains(event.screen_x, event.screen_y):
+                row = event.screen_y - r.y
+                profiles = self._get_profiles()
+                if 0 <= row < len(profiles):
+                    self.cur = row
+                    self._refresh_display()
+                    name = self._get_selected_name()
+                    if name:
+                        self.dismiss(f"activate:{name}")
+                    return
+        except Exception:
+            pass
 
     def on_key(self, event):
         key = event.key
@@ -2490,6 +2528,20 @@ class ProfileEditModal(ModalScreen[dict]):
             self._edit_text_field(rtype)
         else:
             self._toggle_current(rtype, ridx)
+
+    def on_click(self, event):
+        try:
+            widget = self.query_one("#profedit-rows-text", Static)
+            r = widget.content_region
+            if r.contains(event.screen_x, event.screen_y):
+                row = event.screen_y - r.y
+                if 0 <= row < len(self.rows):
+                    self.cur = row
+                    self._refresh_display()
+                    self._activate_current()
+                    return
+        except Exception:
+            pass
 
     def on_key(self, event):
         key = event.key
@@ -3684,7 +3736,7 @@ class CCSApp(App):
         def on_result(tag):
             if tag:
                 self.mgr.set_tag(s.id, tag)
-                self._set_status(f"Tagged: [{tag}]")
+                self._set_status(f"Tagged: [{tag[:10]}]")
                 self._do_refresh()
 
         self.push_screen(
