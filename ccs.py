@@ -528,6 +528,43 @@ class SessionManager:
         EPHEMERAL_FILE.write_text("")
 
 
+# ── Styles cache ─────────────────────────────────────────────────────
+
+
+class Styles:
+    """Cache curses color_pair+attribute combos, refreshed on theme change."""
+    def __init__(self):
+        self.refresh()
+
+    def refresh(self):
+        self.bdr      = curses.color_pair(CP_BORDER)
+        self.bdr_bold = curses.color_pair(CP_BORDER) | curses.A_BOLD
+        self.hdr      = curses.color_pair(CP_HEADER) | curses.A_BOLD
+        self.dim      = curses.color_pair(CP_DIM) | curses.A_DIM
+        self.normal   = curses.color_pair(CP_NORMAL)
+        self.sel      = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        self.warn     = curses.color_pair(CP_WARN) | curses.A_BOLD
+        self.warn_bdr = curses.color_pair(CP_WARN)
+        self.accent   = curses.color_pair(CP_ACCENT) | curses.A_BOLD
+        self.tag      = curses.color_pair(CP_TAG) | curses.A_BOLD
+        self.pin      = curses.color_pair(CP_PIN) | curses.A_BOLD
+        self.proj     = curses.color_pair(CP_PROJECT)
+        self.inp      = curses.color_pair(CP_INPUT)
+        self.inp_bold = curses.color_pair(CP_INPUT) | curses.A_BOLD
+        self.status   = curses.color_pair(CP_STATUS) | curses.A_BOLD
+        self.badge    = curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD
+        self.sel_pin  = curses.color_pair(CP_SEL_PIN) | curses.A_BOLD
+        self.sel_tag  = curses.color_pair(CP_SEL_TAG) | curses.A_BOLD
+        self.sel_proj = curses.color_pair(CP_SEL_PROJ) | curses.A_BOLD
+        self.accent_rev = curses.color_pair(CP_ACCENT) | curses.A_BOLD | curses.A_REVERSE
+        self.dim_plain  = curses.color_pair(CP_DIM)
+        self.warn_dim   = curses.color_pair(CP_WARN) | curses.A_DIM
+        self.accent_plain = curses.color_pair(CP_ACCENT)
+        self.age_today  = curses.color_pair(CP_AGE_TODAY)
+        self.age_week   = curses.color_pair(CP_AGE_WEEK)
+        self.age_old    = curses.color_pair(CP_AGE_OLD) | curses.A_DIM
+
+
 # ── TUI Application ──────────────────────────────────────────────────
 
 
@@ -618,6 +655,7 @@ class CCSApp:
         self.kill_tmux_label = ""   # display label for confirmation
 
         self._init_colors()
+        self.sty = Styles()
         self._refresh()
 
         # Show startup warnings for missing tools
@@ -655,26 +693,28 @@ class CCSApp:
             cbn = color_map[bg] if bg >= 0 else -1
             curses.init_pair(i + 1, cfn, cbn)
         self.active_theme = name
+        if hasattr(self, 'sty'):
+            self.sty.refresh()
 
     def _age_color(self, mtime: float) -> int:
         delta = datetime.datetime.now() - datetime.datetime.fromtimestamp(mtime)
         if delta.days == 0:
-            return curses.color_pair(CP_AGE_TODAY)
+            return self.sty.age_today
         elif delta.days < 7:
-            return curses.color_pair(CP_AGE_WEEK)
-        return curses.color_pair(CP_AGE_OLD) | curses.A_DIM
+            return self.sty.age_week
+        return self.sty.age_old
 
     def _tmux_state_attr(self, sid: str, is_idle: bool) -> int:
         if is_idle:
-            return curses.color_pair(CP_DIM)
+            return self.sty.dim_plain
         state = self.tmux_claude_state.get(sid, "unknown")
         if state == "approval":
-            return curses.color_pair(CP_WARN) | curses.A_BOLD
+            return self.sty.warn
         elif state == "input":
-            return curses.color_pair(CP_INPUT) | curses.A_BOLD
+            return self.sty.inp_bold
         elif state == "done":
-            return curses.color_pair(CP_DIM)
-        return curses.color_pair(CP_STATUS) | curses.A_BOLD
+            return self.sty.dim_plain
+        return self.sty.status
 
     def _get_page_size(self) -> int:
         h, _ = self.scr.getmaxyx()
@@ -698,17 +738,7 @@ class CCSApp:
 
         # ── Overlay button clicks ──
         if self.mode in ("quit", "delete", "delete_empty", "kill_tmux", "launch") and (pressed or clicked or dbl_clicked):
-            for bx, by, bw, bh, val in self._geo_overlay_btns:
-                if bx <= mx < bx + bw and by <= my < by + bh:
-                    if val == "yes":
-                        curses.ungetch(ord("y"))
-                    elif val == "no":
-                        curses.ungetch(27)
-                    else:
-                        # Launch overlay: numeric selection
-                        self.confirm_sel = val
-                    return None
-            return None
+            return self._mouse_overlay(mx, my)
 
         if self.mode != "normal":
             return None
@@ -730,67 +760,78 @@ class CCSApp:
                     self.detail_focus = "info"
                 return None
 
-        # ── Session View (detail) ──
         if self.view == "detail":
-            iy, ih, _, iw = self._geo_info_pane
-            ty, th, _, tw = self._geo_tmux_pane
+            return self._mouse_detail(mx, my, pressed, clicked, dbl_clicked, scroll_up, scroll_down)
+        return self._mouse_list(mx, my, pressed, clicked, dbl_clicked, scroll_up, scroll_down)
 
-            # Click on info pane → focus info
-            if (pressed or clicked or dbl_clicked) and iy <= my < iy + ih:
-                self.detail_focus = "info"
-            # Click on tmux pane → focus tmux
-            elif (pressed or clicked or dbl_clicked) and ty <= my < ty + th:
-                self.detail_focus = "tmux"
-            # Click on info separator → focus info
-            elif (pressed or clicked or dbl_clicked) and iy > 0 and my == iy - 1:
-                self.detail_focus = "info"
-            # Click on tmux separator → focus tmux
-            elif (pressed or clicked or dbl_clicked) and ty > 0 and my == ty - 1:
-                self.detail_focus = "tmux"
+    def _mouse_overlay(self, mx: int, my: int) -> Optional[str]:
+        """Handle mouse clicks on overlay buttons."""
+        for bx, by, bw, bh, val in self._geo_overlay_btns:
+            if bx <= mx < bx + bw and by <= my < by + bh:
+                if val == "yes":
+                    curses.ungetch(ord("y"))
+                elif val == "no":
+                    curses.ungetch(27)
+                else:
+                    # Launch overlay: numeric selection
+                    self.confirm_sel = val
+                return None
+        return None
 
-            # Scroll wheel in info pane
-            if iy <= my < iy + ih or (iy > 0 and my == iy - 1):
-                if scroll_up:
-                    self.detail_scroll = max(0, self.detail_scroll - 3)
-                elif scroll_down:
-                    mx_s = max(0, self._info_lines_count - ih)
-                    self.detail_scroll = min(mx_s, self.detail_scroll + 3)
-            # Scroll wheel in tmux pane
-            elif ty <= my < ty + th or (ty > 0 and my == ty - 1):
-                if scroll_up:
-                    self.tmux_scroll = max(0, self.tmux_scroll - 3)
-                elif scroll_down:
-                    mx_s = max(0, self._tmux_lines_count - th)
-                    self.tmux_scroll = min(mx_s, self.tmux_scroll + 3)
+    def _mouse_detail(self, mx: int, my: int, pressed: bool, clicked: bool,
+                      dbl_clicked: bool, scroll_up: bool, scroll_down: bool) -> Optional[str]:
+        """Handle mouse events in the detail (session) view."""
+        iy, ih, _, iw = self._geo_info_pane
+        ty, th, _, tw = self._geo_tmux_pane
 
-            # Click on scrollbar track (columns 0-1) → jump scroll position
-            if (pressed or clicked) and mx <= 1 and iy <= my < iy + ih and self._info_lines_count > ih:
-                ratio = (my - iy) / max(1, ih - 1)
-                self.detail_scroll = int(ratio * max(0, self._info_lines_count - ih))
-            elif (pressed or clicked) and mx <= 1 and ty <= my < ty + th and self._tmux_lines_count > th:
-                ratio = (my - ty) / max(1, th - 1)
-                self.tmux_scroll = int(ratio * max(0, self._tmux_lines_count - th))
+        # Click on info pane -> focus info
+        if (pressed or clicked or dbl_clicked) and iy <= my < iy + ih:
+            self.detail_focus = "info"
+        # Click on tmux pane -> focus tmux
+        elif (pressed or clicked or dbl_clicked) and ty <= my < ty + th:
+            self.detail_focus = "tmux"
+        # Click on info separator -> focus info
+        elif (pressed or clicked or dbl_clicked) and iy > 0 and my == iy - 1:
+            self.detail_focus = "info"
+        # Click on tmux separator -> focus tmux
+        elif (pressed or clicked or dbl_clicked) and ty > 0 and my == ty - 1:
+            self.detail_focus = "tmux"
 
-            return None
+        # Scroll wheel in info pane
+        if iy <= my < iy + ih or (iy > 0 and my == iy - 1):
+            if scroll_up:
+                self.detail_scroll = max(0, self.detail_scroll - 3)
+            elif scroll_down:
+                mx_s = max(0, self._info_lines_count - ih)
+                self.detail_scroll = min(mx_s, self.detail_scroll + 3)
+        # Scroll wheel in tmux pane
+        elif ty <= my < ty + th or (ty > 0 and my == ty - 1):
+            if scroll_up:
+                self.tmux_scroll = max(0, self.tmux_scroll - 3)
+            elif scroll_down:
+                mx_s = max(0, self._tmux_lines_count - th)
+                self.tmux_scroll = min(mx_s, self.tmux_scroll + 3)
 
-        # ── Sessions View (list) ──
+        # Click on scrollbar track (columns 0-1) -> jump scroll position
+        if (pressed or clicked) and mx <= 1 and iy <= my < iy + ih and self._info_lines_count > ih:
+            ratio = (my - iy) / max(1, ih - 1)
+            self.detail_scroll = int(ratio * max(0, self._info_lines_count - ih))
+        elif (pressed or clicked) and mx <= 1 and ty <= my < ty + th and self._tmux_lines_count > th:
+            ratio = (my - ty) / max(1, th - 1)
+            self.tmux_scroll = int(ratio * max(0, self._tmux_lines_count - th))
+
+        return None
+
+    def _mouse_list(self, mx: int, my: int, pressed: bool, clicked: bool,
+                    dbl_clicked: bool, scroll_up: bool, scroll_down: bool) -> Optional[str]:
+        """Handle mouse events in the sessions list view."""
         ly, lh, _, lw = self._geo_list
         if ly <= my < ly + lh and self.filtered:
             row_idx = self.scroll + (my - ly)
             if row_idx < len(self.filtered):
                 if dbl_clicked:
                     self.cur = row_idx
-                    s = self.filtered[self.cur]
-                    profiles = self.mgr.load_profiles()
-                    active = next(
-                        (p for p in profiles if p.get("name") == self.active_profile_name),
-                        None,
-                    )
-                    extra = self._build_args_from_profile(active) if active else []
-                    self.launch_session = s
-                    self.launch_extra = extra
-                    self.confirm_sel = 0 if HAS_TMUX else 1
-                    self.mode = "launch"
+                    self._enter_launch_mode(self.filtered[self.cur])
                     return None
                 elif pressed or clicked:
                     self.cur = row_idx
@@ -1070,7 +1111,7 @@ class CCSApp:
 
         if h < 10 or w < 40:
             self._safe(0, 0, "Terminal too small! (min 40x10)",
-                       curses.color_pair(CP_WARN) | curses.A_BOLD)
+                       self.sty.warn)
             self.scr.refresh()
             return
 
@@ -1144,9 +1185,13 @@ class CCSApp:
         self.scr.refresh()
 
     def _draw_header(self, w: int):
-        bdr = curses.color_pair(CP_BORDER)
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        sty = self.sty
+        self._draw_header_box(w, sty)
+        self._draw_header_input_line(w, sty)
+
+    def _draw_header_box(self, w: int, sty):
+        """Draw header box: title, profile badge, view label, hints (rows 0-3)."""
+        bdr = sty.bdr
 
         # ┌─ Title ─────────────────────────────┐
         self._safe(0, 0, "┌", bdr)
@@ -1154,24 +1199,22 @@ class CCSApp:
         self._safe(0, w - 1, "┐", bdr)
         title = " ◆ CCS — Claude Code Session Manager "
         tx = max(2, (w - len(title)) // 2)
-        self._safe(0, tx, title, hdr)
+        self._safe(0, tx, title, sty.hdr)
 
         # │  Profile: [name]  View: [label]  │
         self._safe(1, 0, "│", bdr)
         self._safe(1, w - 1, "│", bdr)
         x = 2
-        self._safe(1, x, "Profile:", curses.color_pair(CP_DIM) | curses.A_DIM)
+        self._safe(1, x, "Profile:", sty.dim)
         x += 9
         prof_badge = f" {self.active_profile_name} "
-        self._safe(1, x, prof_badge,
-                   curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
+        self._safe(1, x, prof_badge, sty.badge)
         self._geo_profile_badge = (x, 1, len(prof_badge))
         x += len(prof_badge) + 1
-        self._safe(1, x, "View:", curses.color_pair(CP_DIM) | curses.A_DIM)
+        self._safe(1, x, "View:", sty.dim)
         x += 6
         view_label = " Session View " if self.view == "detail" else " Sessions "
-        self._safe(1, x, view_label,
-                   curses.color_pair(CP_TAG) | curses.A_BOLD)
+        self._safe(1, x, view_label, sty.tag)
         self._geo_view_label = (x, 1, len(view_label))
 
         # │  hints  │
@@ -1210,43 +1253,44 @@ class CCSApp:
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
-        self._safe(2, hx, hints, dim)
+        self._safe(2, hx, hints, sty.dim)
 
         # └──────────────────────────────────────┘
         self._safe(3, 0, "└", bdr)
         self._hline(3, 1, "─", w - 2, bdr)
         self._safe(3, w - 1, "┘", bdr)
 
-        # Row 4: input or info line
+    def _draw_header_input_line(self, w: int, sty):
+        """Draw row 4: mode-specific input/info content."""
         y = 4
         if self.mode == "search":
-            self._safe(y, 1, " /", curses.color_pair(CP_INPUT) | curses.A_BOLD)
+            self._safe(y, 1, " /", sty.inp_bold)
             base_x = 4
-            self._safe(y, base_x, self.query, curses.color_pair(CP_NORMAL))
-            self._safe(y, base_x + self.query_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
+            self._safe(y, base_x, self.query, sty.normal)
+            self._safe(y, base_x + self.query_cursor, "▏", sty.inp_bold)
         elif self.mode == "tag":
-            self._safe(y, 1, " Tag:", curses.color_pair(CP_TAG) | curses.A_BOLD)
+            self._safe(y, 1, " Tag:", sty.tag)
             base_x = 7
-            self._safe(y, base_x, self.ibuf, curses.color_pair(CP_NORMAL))
-            self._safe(y, base_x + self.ibuf_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
+            self._safe(y, base_x, self.ibuf, sty.normal)
+            self._safe(y, base_x + self.ibuf_cursor, "▏", sty.inp_bold)
         elif self.mode == "new":
-            self._safe(y, 1, " Name:", curses.color_pair(CP_HEADER) | curses.A_BOLD)
+            self._safe(y, 1, " Name:", sty.hdr)
             base_x = 8
-            self._safe(y, base_x, self.ibuf, curses.color_pair(CP_NORMAL))
-            self._safe(y, base_x + self.ibuf_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
+            self._safe(y, base_x, self.ibuf, sty.normal)
+            self._safe(y, base_x + self.ibuf_cursor, "▏", sty.inp_bold)
         elif self.mode == "chdir":
-            self._safe(y, 1, " CWD:", curses.color_pair(CP_WARN) | curses.A_BOLD)
+            self._safe(y, 1, " CWD:", sty.warn)
             base_x = 7
-            self._safe(y, base_x, self.ibuf, curses.color_pair(CP_NORMAL))
-            self._safe(y, base_x + self.ibuf_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
+            self._safe(y, base_x, self.ibuf, sty.normal)
+            self._safe(y, base_x + self.ibuf_cursor, "▏", sty.inp_bold)
         elif self.mode == "input":
             pass  # handled by overlay popup
         elif self.mode in ("quit", "delete", "delete_empty", "kill_tmux", "profiles", "profile_edit"):
             pass  # handled by overlay popups
         elif self.query:
-            self._safe(y, 1, f" Filter: {self.query}", dim)
+            self._safe(y, 1, f" Filter: {self.query}", sty.dim)
             cx = 10 + len(self.query) + 2
-            self._safe(y, cx, "(Esc to clear)", curses.color_pair(CP_DIM) | curses.A_DIM)
+            self._safe(y, cx, "(Esc to clear)", sty.dim)
         elif self.view == "sessions":
             n = len(self.filtered)
             total = len(self.sessions)
@@ -1257,19 +1301,20 @@ class CCSApp:
                 info = f" {n}/{total} sessions · Sort: {sort_label}"
             else:
                 info = f" {n} session{'s' if n != 1 else ''} · Sort: {sort_label}"
-            self._safe(y, 1, info, curses.color_pair(CP_ACCENT))
+            self._safe(y, 1, info, sty.accent)
             tip = "⏎ Launch "
-            self._safe(y, w - len(tip) - 1, tip, curses.color_pair(CP_DIM) | curses.A_DIM)
+            self._safe(y, w - len(tip) - 1, tip, sty.dim)
 
     def _draw_list(self, sy: int, height: int, w: int):
         if not self.filtered:
+            sty = self.sty
             msg = "No sessions found." if not self.query else "No matching sessions."
             self._safe(sy + height // 2, max(1, (w - len(msg)) // 2),
-                       msg, curses.color_pair(CP_DIM) | curses.A_DIM)
+                       msg, sty.dim)
             if not self.query:
                 hint = "Press 'n' to create a new session or 'e' for ephemeral"
                 self._safe(sy + height // 2 + 1, max(1, (w - len(hint)) // 2),
-                           hint, curses.color_pair(CP_DIM) | curses.A_DIM)
+                           hint, sty.dim)
             return
 
         # Adjust scroll to keep cursor visible
@@ -1299,6 +1344,7 @@ class CCSApp:
 
     def _draw_row(self, y: int, w: int, s: Session, sel: bool, tag_col_w: int = 0):
         """Draw a single session row with color-coded segments."""
+        sty = self.sty
         marked = s.id in self.marked
         has_tmux = s.id in self.tmux_sids
         is_idle = s.id in self.tmux_idle
@@ -1364,7 +1410,7 @@ class CCSApp:
 
         if sel:
             # Highlight entire row
-            base = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+            base = sty.sel
 
             line = f" {mark_ch} {pin_str}{tag_str}{s.ts}  {msg_str}{proj} {desc}"
             if len(line) < w - lm - 1:
@@ -1375,7 +1421,7 @@ class CCSApp:
             # Overlay colored segments on selection background
             x = lm + 3
             if s.pinned:
-                self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
+                self._safe(y, x, "★", sty.sel_pin)
             if has_tmux:
                 tx = x + 1 if s.pinned else x  # after ★ (1 col) or at start
                 tmux_attr = self._tmux_state_attr(s.id, is_idle)
@@ -1385,25 +1431,23 @@ class CCSApp:
                 disp_tag = f"[{s.tag}]"
                 if len(disp_tag) > tag_w - 1:
                     disp_tag = disp_tag[:tag_w - 2] + "]"
-                self._safe(y, x, disp_tag,
-                           curses.color_pair(CP_SEL_TAG) | curses.A_BOLD)
+                self._safe(y, x, disp_tag, sty.sel_tag)
             x += tag_w + ts_w + msg_w
-            self._safe(y, x, proj.rstrip(),
-                       curses.color_pair(CP_SEL_PROJ) | curses.A_BOLD)
+            self._safe(y, x, proj.rstrip(), sty.sel_proj)
             if marked:
-                self._safe(y, lm + 1, "●", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+                self._safe(y, lm + 1, "●", sty.accent)
         else:
             x = lm
             # Indicator
             if marked:
-                self._safe(y, x, f" ● ", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+                self._safe(y, x, f" ● ", sty.accent)
             else:
-                self._safe(y, x, "   ", curses.color_pair(CP_NORMAL))
+                self._safe(y, x, "   ", sty.normal)
             x += ind_w
 
             # Pin / tmux
             if s.pinned:
-                self._safe(y, x, "★", curses.color_pair(CP_PIN) | curses.A_BOLD)
+                self._safe(y, x, "★", sty.pin)
             if has_tmux:
                 tmux_attr = self._tmux_state_attr(s.id, is_idle)
                 self._safe(y, x + (1 if s.pinned else 0), tmux_ch, tmux_attr)
@@ -1414,8 +1458,7 @@ class CCSApp:
                 disp_tag = f"[{s.tag}] "
                 if len(disp_tag) > tag_w:
                     disp_tag = disp_tag[:tag_w - 2] + "] "
-                self._safe(y, x, disp_tag,
-                           curses.color_pair(CP_TAG) | curses.A_BOLD)
+                self._safe(y, x, disp_tag, sty.tag)
             x += tag_w
 
             # Timestamp (age-colored)
@@ -1424,81 +1467,92 @@ class CCSApp:
             x += ts_w
 
             # Message count
-            self._safe(y, x, msg_str, curses.color_pair(CP_DIM) | curses.A_DIM)
+            self._safe(y, x, msg_str, sty.dim)
             x += msg_w
 
             # Project
-            self._safe(y, x, proj, curses.color_pair(CP_PROJECT))
+            self._safe(y, x, proj, sty.proj)
             x += proj_w
 
             # Description
-            self._safe(y, x + 1, desc, curses.color_pair(CP_NORMAL))
+            self._safe(y, x + 1, desc, sty.normal)
 
     def _draw_separator(self, y: int, w: int):
-        bdr = curses.color_pair(CP_BORDER)
+        sty = self.sty
+        bdr = sty.bdr
         self._safe(y, 0, "├", bdr)
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
         label = " Info "
-        self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
+        self._safe(y, 2, label, sty.bdr_bold)
         view_hint = " →: Session View "
         if len(view_hint) + 4 < w:
-            self._safe(y, w - len(view_hint) - 2, view_hint,
-                       curses.color_pair(CP_DIM) | curses.A_DIM)
+            self._safe(y, w - len(view_hint) - 2, view_hint, sty.dim)
 
-    def _draw_preview(self, sy: int, h: int, w: int):
-        """Compact preview with tmux output when active."""
-        if not self.filtered:
-            self._safe(sy + 1, 3, "Select a session to preview",
-                       curses.color_pair(CP_DIM) | curses.A_DIM)
-            return
+    def _build_session_meta_lines(self, s, detail: bool = False) -> List[Tuple[str, int]]:
+        """Build common metadata lines for a session.
 
-        s = self.filtered[self.cur]
-        has_tmux = s.id in self.tmux_sids
+        When detail=True, tmux lines include '(K to kill)' hint.
+        When detail=False (preview), tmux lines include state labels instead.
+        """
+        sty = self.sty
         lines: List[Tuple[str, int]] = []
-
-        # Same metadata for all sessions
         if s.pinned:
-            lines.append(("  ★ PINNED", curses.color_pair(CP_PIN) | curses.A_BOLD))
+            lines.append(("  ★ PINNED", sty.pin))
         if s.tag:
-            lines.append((f"  Tag:     {s.tag}", curses.color_pair(CP_TAG) | curses.A_BOLD))
+            lines.append((f"  Tag:     {s.tag}", sty.tag))
         lines.append((f"  Session: {s.id[:36]}{'...' if len(s.id) > 36 else ''}",
-                       curses.color_pair(CP_DIM) | curses.A_DIM))
-        lines.append((f"  Project: {s.project_display}",
-                       curses.color_pair(CP_PROJECT)))
+                       sty.dim))
+        lines.append((f"  Project: {s.project_display}", sty.proj))
         if s.cwd:
             cwd_suffix = " (override)" if self.mgr._load(CWDS_FILE, {}).get(s.id) else ""
-            lines.append((f"  CWD:     {s.cwd}{cwd_suffix}", curses.color_pair(CP_DIM) | curses.A_DIM))
+            lines.append((f"  CWD:     {s.cwd}{cwd_suffix}", sty.dim))
         lines.append((f"  Modified: {s.ts}  ({s.age})", self._age_color(s.mtime)))
-        lines.append((f"  Messages: {s.msg_count}",
-                       curses.color_pair(CP_ACCENT)))
-        if has_tmux:
+        lines.append((f"  Messages: {s.msg_count}", sty.accent_plain))
+        # Tmux status
+        if s.id in self.tmux_sids:
             tmux_name = self.tmux_sids[s.id]
-            state = self.tmux_claude_state.get(s.id, "unknown")
-            state_labels = {
-                "thinking": "thinking...",
-                "input": "waiting for input",
-                "approval": "waiting for approval",
-                "done": "session ended",
-                "unknown": "active",
-            }
             if s.id in self.tmux_idle:
-                lines.append((f"  Tmux:    💤 {tmux_name} idle",
-                               curses.color_pair(CP_DIM)))
+                suffix = " (K to kill)" if detail else ""
+                lines.append((f"  Tmux:    💤 {tmux_name} idle{suffix}",
+                               sty.dim_plain))
             else:
-                lines.append((f"  Tmux:    ⚡ {tmux_name} ({state_labels.get(state, 'active')})",
-                               curses.color_pair(CP_STATUS) | curses.A_BOLD))
+                if detail:
+                    suffix = " (K to kill)"
+                else:
+                    state = self.tmux_claude_state.get(s.id, "unknown")
+                    state_labels = {
+                        "thinking": "thinking...",
+                        "input": "waiting for input",
+                        "approval": "waiting for approval",
+                        "done": "session ended",
+                        "unknown": "active",
+                    }
+                    suffix = f" ({state_labels.get(state, 'active')})"
+                lines.append((f"  Tmux:    ⚡ {tmux_name}{suffix}", sty.status))
+        # Git info
         if not HAS_GIT and s.cwd:
-            lines.append(("  Git:     (git not found)", curses.color_pair(CP_WARN) | curses.A_DIM))
+            lines.append(("  Git:     (git not found)", sty.warn_dim))
         else:
             git_info = self._get_git_info(s.cwd) if s.cwd else None
             if git_info:
                 repo_name, branch, commits = git_info
                 branch_str = f" ({branch})" if branch else ""
-                lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
-        if not has_tmux and not s.first_msg and not s.summary:
-            lines.append(("  (empty session — no messages yet)",
-                           curses.color_pair(CP_DIM) | curses.A_DIM))
+                lines.append((f"  Git:     {repo_name}{branch_str}", sty.accent_plain))
+        return lines
+
+    def _draw_preview(self, sy: int, h: int, w: int):
+        """Compact preview with tmux output when active."""
+        sty = self.sty
+        if not self.filtered:
+            self._safe(sy + 1, 3, "Select a session to preview", sty.dim)
+            return
+
+        s = self.filtered[self.cur]
+        lines = self._build_session_meta_lines(s, detail=False)
+
+        if s.id not in self.tmux_sids and not s.first_msg and not s.summary:
+            lines.append(("  (empty session — no messages yet)", sty.dim))
 
         # Render (offset by 3 for scrollbar + gap)
         for i, (text, attr) in enumerate(lines[:h]):
@@ -1506,21 +1560,23 @@ class CCSApp:
 
     def _draw_pane_separator(self, y: int, w: int, label: str, focused: bool):
         """Draw a labeled separator line for a pane."""
-        bdr = curses.color_pair(CP_BORDER)
+        sty = self.sty
+        bdr = sty.bdr
         self._safe(y, 0, "├", bdr)
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
         if focused:
-            self._safe(y, 2, label, curses.color_pair(CP_ACCENT) | curses.A_BOLD | curses.A_REVERSE)
+            self._safe(y, 2, label, sty.accent_rev)
         else:
-            self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
+            self._safe(y, 2, label, sty.bdr_bold)
 
     def _draw_scrollbar(self, sy: int, h: int, scroll: int, total: int):
         """Draw a scrollbar on the left edge (columns 0-1) of a pane."""
         if total <= h or h < 2:
             return
-        track_attr = curses.color_pair(CP_BORDER)
-        thumb_attr = curses.color_pair(CP_ACCENT) | curses.A_BOLD
+        sty = self.sty
+        track_attr = sty.bdr
+        thumb_attr = sty.accent
         # Thumb size and position
         thumb_h = max(1, h * h // total)
         max_scroll = total - h
@@ -1534,55 +1590,73 @@ class CCSApp:
             else:
                 self._safe(sy + i, 0, "░░", track_attr)
 
+    def _draw_box(self, sy: int, sx: int, box_h: int, box_w: int,
+                  title: str = "", bdr_attr: int = 0, title_attr: int = 0):
+        """Draw a bordered box with optional centered title, fill interior.
+        Returns (inner_y, inner_x, inner_h, inner_w)."""
+        self._safe(sy, sx, "┌", bdr_attr)
+        self._hline(sy, sx + 1, "─", box_w - 2, bdr_attr)
+        self._safe(sy, sx + box_w - 1, "┐", bdr_attr)
+        if title:
+            ttx = sx + max(1, (box_w - len(title)) // 2)
+            self._safe(sy, ttx, title, title_attr)
+        for i in range(box_h - 2):
+            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr_attr)
+        self._safe(sy + box_h - 1, sx, "└", bdr_attr)
+        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr_attr)
+        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr_attr)
+        return (sy + 1, sx + 1, box_h - 2, box_w - 2)
+
+    def _draw_overlay(self, h: int, w: int, content_h: int,
+                      max_w: int = 70, title: str = "",
+                      bdr_attr: int = 0, title_attr: int = 0):
+        """Center an overlay box on screen, draw it, return (sy, sx, box_h, box_w)."""
+        box_w = min(max_w, w - 4)
+        box_h = min(content_h + 2, h - 2)
+        sx = max(0, (w - box_w) // 2)
+        sy = max(0, (h - box_h) // 2)
+        self._draw_box(sy, sx, box_h, box_w, title, bdr_attr, title_attr)
+        return (sy, sx, box_h, box_w)
+
+    def _draw_button_row(self, y: int, sx: int, box_w: int,
+                         buttons: list, gap: int = 4):
+        """Draw centered buttons with highlight. buttons: [(label, value), ...].
+        Highlights button matching self.confirm_sel. Appends to self._geo_overlay_btns."""
+        sty = self.sty
+        total_w = sum(len(lbl) for lbl, _ in buttons) + gap * (len(buttons) - 1)
+        bx = sx + max(2, (box_w - total_w) // 2)
+        x = bx
+        for i, (label, value) in enumerate(buttons):
+            if isinstance(value, int):
+                attr = sty.sel if self.confirm_sel == value else sty.dim
+            else:
+                attr = sty.sel if (value == "yes" and self.confirm_sel == 1) else \
+                       sty.sel if (value == "no" and self.confirm_sel == 0) else sty.dim
+            self._safe(y, x, label, attr)
+            self._geo_overlay_btns.append((x, y, len(label), 1, value))
+            x += len(label) + gap
+
     def _draw_info_pane(self, sy: int, h: int, w: int):
         """Top pane: session metadata, git info, first message, topics."""
+        sty = self.sty
 
         if not self.filtered:
             self._safe(sy + 1, 3, "Select a session to preview",
-                       curses.color_pair(CP_DIM) | curses.A_DIM)
+                       sty.dim)
             return
 
         s = self.filtered[self.cur]
-        lines: List[Tuple[str, int]] = []
+        lines = self._build_session_meta_lines(s, detail=True)
 
-        # Session metadata
-        if s.pinned:
-            lines.append(("  ★ PINNED", curses.color_pair(CP_PIN) | curses.A_BOLD))
-        if s.tag:
-            lines.append((f"  Tag:     {s.tag}", curses.color_pair(CP_TAG) | curses.A_BOLD))
-        lines.append((f"  Session: {s.id[:36]}{'...' if len(s.id) > 36 else ''}",
-                       curses.color_pair(CP_DIM) | curses.A_DIM))
-        lines.append((f"  Project: {s.project_display}",
-                       curses.color_pair(CP_PROJECT)))
-        if s.cwd:
-            cwd_suffix = " (override)" if self.mgr._load(CWDS_FILE, {}).get(s.id) else ""
-            lines.append((f"  CWD:     {s.cwd}{cwd_suffix}", curses.color_pair(CP_DIM) | curses.A_DIM))
-        lines.append((f"  Modified: {s.ts}  ({s.age})", self._age_color(s.mtime)))
-        lines.append((f"  Messages: {s.msg_count}",
-                       curses.color_pair(CP_ACCENT)))
-        if s.id in self.tmux_sids:
-            tmux_name = self.tmux_sids[s.id]
-            if s.id in self.tmux_idle:
-                lines.append((f"  Tmux:    💤 {tmux_name} idle (K to kill)",
-                               curses.color_pair(CP_DIM)))
-            else:
-                lines.append((f"  Tmux:    ⚡ {tmux_name} (K to kill)",
-                               curses.color_pair(CP_STATUS) | curses.A_BOLD))
-
-        # Git info with full commit log
-        if not HAS_GIT and s.cwd:
-            lines.append(("  Git:     (git not found)", curses.color_pair(CP_WARN) | curses.A_DIM))
-        else:
-            git_info = self._get_git_info(s.cwd) if s.cwd else None
-            if git_info:
-                repo_name, branch, commits = git_info
-                branch_str = f" ({branch})" if branch else ""
-                lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
-                for sha, subject in commits:
-                    cl = f"    {sha} {subject}"
-                    if len(cl) > w - 4:
-                        cl = cl[:w - 7] + "..."
-                    lines.append((cl, curses.color_pair(CP_DIM)))
+        # Git commit log (detail view only)
+        git_info = self._get_git_info(s.cwd) if s.cwd else None
+        if git_info:
+            _repo_name, _branch, commits = git_info
+            for sha, subject in commits:
+                cl = f"    {sha} {subject}"
+                if len(cl) > w - 4:
+                    cl = cl[:w - 7] + "..."
+                lines.append((cl, sty.dim_plain))
 
         # First message + topics (shown in info pane)
         has_tmux = s.id in self.tmux_sids
@@ -1590,19 +1664,19 @@ class CCSApp:
             if s.first_msg_long:
                 lines.append(("", 0))
                 lines.append(("  First Message:",
-                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                               sty.hdr))
                 for wl in self._word_wrap(s.first_msg_long, w - 8):
-                    lines.append((f"    {wl}", curses.color_pair(CP_NORMAL)))
+                    lines.append((f"    {wl}", sty.normal))
             if s.summaries:
                 lines.append(("", 0))
                 lines.append(("  Topics:",
-                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                               sty.hdr))
                 for sm in s.summaries[-6:]:
                     tl = sm[:w - 10]
-                    lines.append((f"    • {tl}", curses.color_pair(CP_NORMAL)))
+                    lines.append((f"    • {tl}", sty.normal))
             elif not s.first_msg_long:
                 lines.append(("  (empty session — no messages yet)",
-                               curses.color_pair(CP_DIM) | curses.A_DIM))
+                               sty.dim))
 
         self._info_lines_count = len(lines)
 
@@ -1615,6 +1689,7 @@ class CCSApp:
 
     def _draw_tmux_pane(self, sy: int, h: int, w: int):
         """Bottom pane: live tmux output."""
+        sty = self.sty
         if not self.filtered:
             return
 
@@ -1624,7 +1699,7 @@ class CCSApp:
 
         if not HAS_TMUX:
             lines.append(("  (tmux not found — install tmux for live session output)",
-                           curses.color_pair(CP_WARN) | curses.A_DIM))
+                           sty.warn_dim))
         elif has_tmux:
             tmux_name = self.tmux_sids[s.id]
             captured = self._capture_tmux_pane(s.id, tmux_name)
@@ -1638,17 +1713,17 @@ class CCSApp:
                     "unknown": "active",
                 }
                 lines.append((f"  Output ({state_labels.get(state, 'active')}):",
-                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                               sty.hdr))
                 for cl in captured:
                     if len(cl) > w - 6:
                         cl = cl[:w - 9] + "..."
-                    lines.append((f"    {cl}", curses.color_pair(CP_NORMAL)))
+                    lines.append((f"    {cl}", sty.normal))
             else:
                 lines.append(("  (tmux session active, no output yet)",
-                               curses.color_pair(CP_DIM) | curses.A_DIM))
+                               sty.dim))
         else:
             lines.append(("  (no active tmux session)",
-                           curses.color_pair(CP_DIM) | curses.A_DIM))
+                           sty.dim))
 
         self._tmux_lines_count = len(lines)
 
@@ -1662,8 +1737,9 @@ class CCSApp:
 
     def _draw_help_overlay(self, h: int, w: int):
         """Draw a centered help box over the main UI."""
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        sty = self.sty
+        hdr = sty.hdr
+        dim = sty.dim
 
         if self.view == "detail":
             help_lines = [
@@ -1745,46 +1821,25 @@ class CCSApp:
                 ("", 0),
             ]
 
-        box_w = min(70, w - 4)
-        box_h = min(len(help_lines) + 2, h - 2)
-        sx = max(0, (w - box_w) // 2)
-        sy = max(0, (h - box_h) // 2)
-
-        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
-
-        # Top border
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
-        title = " ? Help "
-        ttx = sx + max(1, (box_w - len(title)) // 2)
-        self._safe(sy, ttx, title, curses.color_pair(CP_HEADER) | curses.A_BOLD)
+        sy, sx, box_h, box_w = self._draw_overlay(
+            h, w, len(help_lines), max_w=70,
+            title=" ? Help ", bdr_attr=sty.bdr_bold, title_attr=sty.hdr)
 
         # Content rows
         for i in range(box_h - 2):
-            y = sy + 1 + i
-            # Clear row inside box
-            self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
             if i < len(help_lines):
                 text, attr = help_lines[i]
-                # Default color for plain lines
                 if attr == 0:
-                    attr = curses.color_pair(CP_NORMAL)
-                self._safe(y, sx + 1, text[:box_w - 3], attr)
-
-        # Bottom border
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+                    attr = sty.normal
+                self._safe(sy + 1 + i, sx + 1, text[:box_w - 3], attr)
 
     def _draw_confirm_overlay(self, h: int, w: int,
                                title: str, message: str, detail: str):
         """Draw a centered y/n confirmation popup with arrow-selectable buttons."""
-        warn = curses.color_pair(CP_WARN) | curses.A_BOLD
-        bdr = curses.color_pair(CP_WARN)
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
-        normal = curses.color_pair(CP_NORMAL)
-        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        sty = self.sty
+        warn = sty.warn
+        bdr = sty.warn_bdr
+        normal = sty.normal
 
         # Button labels
         yes_label = " Yes (y/Y) "
@@ -1826,19 +1881,13 @@ class CCSApp:
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
 
-        # Top border
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
         ttl = f" {title} "
-        ttx = sx + max(1, (box_w - len(ttl)) // 2)
-        self._safe(sy, ttx, ttl, warn)
+        self._draw_box(sy, sx, box_h, box_w, ttl, bdr, warn)
 
         # Content rows
         btn_row = -1
         for i in range(box_h - 2):
             y = sy + 1 + i
-            self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
             if i < len(content_lines):
                 text, attr = content_lines[i]
                 # The button placeholder row (first empty after detail)
@@ -1850,30 +1899,17 @@ class CCSApp:
         # Draw buttons on their row (highlight selected)
         self._geo_overlay_btns = []
         if btn_row >= 0:
-            gap = 4
-            total_w = len(yes_label) + len(no_label) + gap
-            bx = sx + max(2, (box_w - total_w) // 2)
-            yes_a = sel_attr if self.confirm_sel == 1 else dim
-            no_a = sel_attr if self.confirm_sel == 0 else dim
-            self._safe(btn_row, bx, yes_label, yes_a)
-            self._safe(btn_row, bx + len(yes_label) + gap, no_label, no_a)
-            self._geo_overlay_btns = [
-                (bx, btn_row, len(yes_label), 1, "yes"),
-                (bx + len(yes_label) + gap, btn_row, len(no_label), 1, "no"),
-            ]
-
-        # Bottom border
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+            self._draw_button_row(btn_row, sx, box_w,
+                                  [(yes_label, "yes"), (no_label, "no")])
 
     def _draw_input_overlay(self, h: int, w: int):
         """Draw a popup for sending text to a tmux session."""
-        bdr = curses.color_pair(CP_BORDER)
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
-        normal = curses.color_pair(CP_NORMAL)
-        inp = curses.color_pair(CP_INPUT)
+        sty = self.sty
+        bdr = sty.bdr
+        hdr = sty.hdr
+        dim = sty.dim
+        normal = sty.normal
+        inp = sty.inp
 
         target = self.input_target_tmux or "tmux"
         title = f" Send to {target} "
@@ -1890,17 +1926,7 @@ class CCSApp:
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
 
-        # Top border with title
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
-        ttx = sx + max(1, (box_w - len(title)) // 2)
-        self._safe(sy, ttx, title, hdr)
-
-        # Fill interior rows
-        for i in range(inner_h):
-            y = sy + 1 + i
-            self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
+        self._draw_box(sy, sx, box_h, box_w, title, bdr, hdr)
 
         # Text area: show input lines with cursor at correct column
         text_sy = sy + 2  # after top border + 1 blank row
@@ -1927,29 +1953,16 @@ class CCSApp:
         hints_y = sy + box_h - 2  # last interior row
         self._safe(hints_y, sx + 2, hints[:box_w - 4], dim)
 
-        # Bottom border
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
-
     def _draw_launch_overlay(self, h: int, w: int, label: str):
         """Draw a launch mode selector: Tmux, Terminal, or View."""
-        bdr = curses.color_pair(CP_BORDER)
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
-        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+        sty = self.sty
+        bdr = sty.bdr
+        hdr = sty.hdr
 
         tmux_label = "  ⚡ Tmux  "
         term_label = "  Terminal  "
         view_label = "  Session View  "
         cancel_label = " Cancel (Esc/n) "
-        tmux_a = sel_attr if self.confirm_sel == 0 else dim
-        term_a = sel_attr if self.confirm_sel == 1 else dim
-        view_a = sel_attr if self.confirm_sel == 2 else dim
-        cancel_a = sel_attr if self.confirm_sel == 3 else dim
-        if not HAS_TMUX:
-            tmux_a = curses.color_pair(CP_DIM) | curses.A_DIM
-
         content_lines = [
             ("", 0),
             ("", 0),
@@ -1967,17 +1980,11 @@ class CCSApp:
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
 
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
-        ttl = " Launch Mode "
-        ttx = sx + max(1, (box_w - len(ttl)) // 2)
-        self._safe(sy, ttx, ttl, hdr)
+        self._draw_box(sy, sx, box_h, box_w, " Launch Mode ", bdr, hdr)
 
         btn_row = -1
         for i in range(box_h - 2):
             y = sy + 1 + i
-            self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
             if i < len(content_lines):
                 text, attr = content_lines[i]
                 if text == "" and attr == 0 and i > 2 and btn_row < 0:
@@ -1987,28 +1994,17 @@ class CCSApp:
 
         self._geo_overlay_btns = []
         if btn_row >= 0:
-            gap = 3
-            total_w = len(tmux_label) + len(term_label) + len(view_label) + gap * 2
-            bx = sx + max(2, (box_w - total_w) // 2)
-            self._safe(btn_row, bx, tmux_label, tmux_a)
-            x2 = bx + len(tmux_label) + gap
-            self._safe(btn_row, x2, term_label, term_a)
-            x3 = x2 + len(term_label) + gap
-            self._safe(btn_row, x3, view_label, view_a)
-            # Cancel button centered on next row
+            self._draw_button_row(btn_row, sx, box_w,
+                                  [(tmux_label, 0), (term_label, 1), (view_label, 2)],
+                                  gap=3)
+            if not HAS_TMUX:
+                # Redraw tmux button as disabled
+                bx = self._geo_overlay_btns[0][0]
+                self._safe(btn_row, bx, tmux_label, sty.dim)
+            # Cancel button on next row
             cancel_row = btn_row + 1
-            cx = sx + max(2, (box_w - len(cancel_label)) // 2)
-            self._safe(cancel_row, cx, cancel_label, cancel_a)
-            self._geo_overlay_btns = [
-                (bx, btn_row, len(tmux_label), 1, 0),       # Tmux = 0
-                (x2, btn_row, len(term_label), 1, 1),        # Terminal = 1
-                (x3, btn_row, len(view_label), 1, 2),        # Session View = 2
-                (cx, cancel_row, len(cancel_label), 1, "no"),  # Cancel
-            ]
-
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+            self._draw_button_row(cancel_row, sx, box_w,
+                                  [(cancel_label, "no")])
 
     def _launch_apply_profile(self, profile: dict):
         """Load a saved profile's settings into the launch state."""
@@ -2120,14 +2116,15 @@ class CCSApp:
 
     def _draw_profiles_overlay(self, h: int, w: int):
         """Unified profile picker / manager overlay."""
-        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
-        normal = curses.color_pair(CP_NORMAL)
-        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
-        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
-        warn = curses.color_pair(CP_WARN) | curses.A_BOLD
-        badge = curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD
+        sty = self.sty
+        bdr = sty.bdr_bold
+        hdr = sty.hdr
+        dim = sty.dim
+        normal = sty.normal
+        sel_attr = sty.sel
+        tag_attr = sty.tag
+        warn = sty.warn
+        badge = sty.badge
 
         profiles = self.mgr.load_profiles()
         box_w = min(62, w - 4)
@@ -2136,19 +2133,7 @@ class CCSApp:
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
 
-        # Box
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
-        title = " Profiles "
-        self._safe(sy, sx + max(1, (box_w - len(title)) // 2), title, hdr)
-
-        for i in range(box_h - 2):
-            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
-
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+        self._draw_box(sy, sx, box_h, box_w, " Profiles ", bdr, hdr)
 
         # Content
         if not profiles:
@@ -2219,14 +2204,15 @@ class CCSApp:
 
     def _draw_profile_edit_overlay(self, h: int, w: int):
         """Profile editor overlay."""
-        bdr = curses.color_pair(CP_BORDER) | curses.A_BOLD
-        hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
-        normal = curses.color_pair(CP_NORMAL)
-        sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
-        accent = curses.color_pair(CP_ACCENT) | curses.A_BOLD
-        tag_attr = curses.color_pair(CP_TAG) | curses.A_BOLD
-        warn = curses.color_pair(CP_WARN) | curses.A_BOLD
+        sty = self.sty
+        bdr = sty.bdr_bold
+        hdr = sty.hdr
+        dim = sty.dim
+        normal = sty.normal
+        sel_attr = sty.sel
+        accent = sty.accent
+        tag_attr = sty.tag
+        warn = sty.warn
 
         rows = self.prof_edit_rows
         is_new = self.prof_editing_existing is None
@@ -2293,7 +2279,7 @@ class CCSApp:
                 v = fmt_field(self.launch_custom, ROW_CUSTOM, field_w)
                 display.append((f"{prefix}Custom args: {v}", a))
             elif rtype == ROW_PROF_SAVE:
-                la = curses.color_pair(CP_STATUS) | curses.A_BOLD if is_sel(ri) else accent
+                la = sty.status if is_sel(ri) else accent
                 display.append((f"{prefix}>>> Save <<<", la))
 
         box_w = min(76, w - 4)
@@ -2301,18 +2287,7 @@ class CCSApp:
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
 
-        # Box
-        self._safe(sy, sx, "┌", bdr)
-        self._hline(sy, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy, sx + box_w - 1, "┐", bdr)
-        self._safe(sy, sx + max(1, (box_w - len(title_text)) // 2), title_text, hdr)
-
-        for i in range(box_h - 2):
-            self._safe(sy + 1 + i, sx, "│" + " " * (box_w - 2) + "│", bdr)
-
-        self._safe(sy + box_h - 1, sx, "└", bdr)
-        self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
-        self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
+        self._draw_box(sy, sx, box_h, box_w, title_text, bdr, hdr)
 
         # Content (scrollable)
         row_area_h = box_h - 3
@@ -2340,12 +2315,13 @@ class CCSApp:
                    hints[:box_w - 3], dim)
 
     def _draw_footer(self, y: int, w: int):
-        dim = curses.color_pair(CP_DIM) | curses.A_DIM
+        sty = self.sty
+        dim = sty.dim
 
         # Left: status or app name
         if self.status:
             self._safe(y, 1, f" {self.status} ",
-                       curses.color_pair(CP_STATUS) | curses.A_BOLD)
+                       sty.status)
         else:
             self._safe(y, 1, " ccs ", dim)
             self._safe(y, 6, "? help", dim)
@@ -2371,7 +2347,7 @@ class CCSApp:
             mode_label = f" [{self.mode.upper()}] "
             mx = (w - len(mode_label)) // 2
             self._safe(y, mx, mode_label,
-                       curses.color_pair(CP_INPUT) | curses.A_BOLD)
+                       sty.inp_bold)
 
     # ── Tmux launch helpers ────────────────────────────────────────
 
@@ -2440,6 +2416,22 @@ class CCSApp:
         self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
         self._tmux_attach(tmux_name)
 
+    def _active_profile_args(self) -> list:
+        """Return CLI args for the currently active profile."""
+        profiles = self.mgr.load_profiles()
+        active = next(
+            (p for p in profiles if p.get("name") == self.active_profile_name),
+            None,
+        )
+        return self._build_args_from_profile(active) if active else []
+
+    def _enter_launch_mode(self, s):
+        """Set up and enter the launch overlay for a session."""
+        self.launch_session = s
+        self.launch_extra = self._active_profile_args()
+        self.confirm_sel = 0 if HAS_TMUX else 1
+        self.mode = "launch"
+
     def _get_use_tmux(self) -> bool:
         """Check if the active profile wants tmux launch."""
         profiles = self.mgr.load_profiles()
@@ -2471,6 +2463,15 @@ class CCSApp:
         return lines
 
     # ── Input handling ────────────────────────────────────────────
+
+    def _confirm_nav(self, k: int) -> int:
+        """Handle arrow/Enter for Yes/No confirm dialogs. Returns rewritten k or -1 if consumed."""
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
+            self.confirm_sel = 1 - self.confirm_sel
+            return -1
+        if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            return ord("y") if self.confirm_sel == 1 else ord("n")
+        return k
 
     def _handle_input(self, k: int) -> Optional[str]:
         dispatch = {
@@ -2632,222 +2633,201 @@ class CCSApp:
         if _nav_handled:
             return None
 
-        # ── Session View actions ──
         if self.view == "detail":
-            if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    profiles = self.mgr.load_profiles()
-                    active = next(
-                        (p for p in profiles if p.get("name") == self.active_profile_name),
-                        None,
-                    )
-                    extra = self._build_args_from_profile(active) if active else []
-                    self.launch_session = s
-                    self.launch_extra = extra
-                    self.confirm_sel = 0 if HAS_TMUX else 1
-                    self.mode = "launch"
-            elif k == ord("p"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    pinned = self.mgr.toggle_pin(s.id)
-                    icon = "★ Pinned" if pinned else "Unpinned"
-                    self._set_status(f"{icon}: {s.tag or s.id[:12]}")
-                    self._refresh()
-            elif k == ord("t"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    self.mode = "tag"
-                    self.ibuf = s.tag if s.tag else ""
-                    self.ibuf_cursor = len(self.ibuf)
-            elif k == ord("T"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    if s.tag:
-                        self.mgr.remove_tag(s.id)
-                        self._set_status(f"Removed tag from: {s.id[:12]}")
-                        self._refresh()
-                    else:
-                        self._set_status("No tag to remove")
-            elif k == ord("c"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
-                    self.mode = "chdir"
-                    self.ibuf = s.cwd or str(Path.home())
-                    self.ibuf_cursor = len(self.ibuf)
-            elif k == ord("d"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    self.delete_label = s.tag or s.label[:40]
-                    self.confirm_sel = 0
-                    self.mode = "delete"
-            elif k == ord("K"):
-                if self.filtered and HAS_TMUX:
-                    s = self.filtered[self.cur]
-                    tmux_name = TMUX_PREFIX + s.id[:8]
-                    alive = self.mgr.tmux_sessions()
-                    if tmux_name in alive:
-                        self.kill_tmux_target = tmux_name
-                        self.kill_tmux_label = s.tag or s.id[:12]
-                        self.confirm_sel = 0
-                        self.mode = "kill_tmux"
-                    else:
-                        self._set_status("No active tmux session for this session")
-                elif not HAS_TMUX:
-                    self._set_status("tmux is not installed")
-            elif k == ord("i"):
-                if self.filtered and HAS_TMUX:
-                    s = self.filtered[self.cur]
-                    if s.id in self.tmux_sids:
-                        self.input_target_sid = s.id
-                        self.input_target_tmux = self.tmux_sids[s.id]
-                        self.mode = "input"
-                        self.input_lines = [""]
-                        self.input_cursor_line = 0
-                        self.input_cursor_col = 0
-                    else:
-                        self._set_status("No active tmux session")
-                elif not HAS_TMUX:
-                    self._set_status("tmux is not installed")
-            elif k == ord("/"):
-                self.mode = "search"
-                self.query_cursor = len(self.query)
-            elif k in (ord("r"), curses.KEY_F5):
-                self._refresh(force=True)
-                self._set_status("Refreshed session list")
+            return self._input_normal_detail(k)
+        return self._input_normal_list(k)
 
-        # ── Sessions List actions ──
-        else:
-            if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    profiles = self.mgr.load_profiles()
-                    active = next(
-                        (p for p in profiles if p.get("name") == self.active_profile_name),
-                        None,
-                    )
-                    extra = self._build_args_from_profile(active) if active else []
-                    self.launch_session = s
-                    self.launch_extra = extra
-                    self.confirm_sel = 0 if HAS_TMUX else 1
-                    self.mode = "launch"
-            elif k == ord(" "):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    if s.id in self.marked:
-                        self.marked.discard(s.id)
-                    else:
-                        self.marked.add(s.id)
-                    if self.cur < len(self.filtered) - 1:
-                        self.cur += 1
-            elif k == ord("u"):
-                if self.marked:
-                    self.marked.clear()
-                    self._set_status("Cleared all marks")
-            elif k == ord("p"):
-                if self.marked:
-                    for sid in self.marked:
-                        self.mgr.toggle_pin(sid)
-                    self._set_status(f"Toggled pin for {len(self.marked)} session(s)")
-                    self.marked.clear()
-                    self._refresh()
-                elif self.filtered:
-                    s = self.filtered[self.cur]
-                    pinned = self.mgr.toggle_pin(s.id)
-                    icon = "★ Pinned" if pinned else "Unpinned"
-                    self._set_status(f"{icon}: {s.tag or s.id[:12]}")
-                    self._refresh()
-            elif k == ord("t"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    self.mode = "tag"
-                    self.ibuf = s.tag if s.tag else ""
-                    self.ibuf_cursor = len(self.ibuf)
-            elif k == ord("T"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    if s.tag:
-                        self.mgr.remove_tag(s.id)
-                        self._set_status(f"Removed tag from: {s.id[:12]}")
-                        self._refresh()
-                    else:
-                        self._set_status("No tag to remove")
-            elif k == ord("c"):
-                if self.filtered:
-                    s = self.filtered[self.cur]
-                    self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
-                    self.mode = "chdir"
-                    self.ibuf = s.cwd or str(Path.home())
-                    self.ibuf_cursor = len(self.ibuf)
-            elif k == ord("d"):
-                if self.marked:
-                    self.delete_label = f"{len(self.marked)} marked sessions"
-                    self.confirm_sel = 0
-                    self.mode = "delete"
-                elif self.filtered:
-                    s = self.filtered[self.cur]
-                    self.delete_label = s.tag or s.label[:40]
-                    self.confirm_sel = 0
-                    self.mode = "delete"
-            elif k == ord("D"):
-                empty = [s for s in self.sessions if not s.first_msg and not s.summary]
-                if empty:
-                    self.empty_count = len(empty)
-                    self.confirm_sel = 0
-                    self.mode = "delete_empty"
-                else:
-                    self._set_status("No empty sessions to delete")
-            elif k == ord("n"):
-                self.mode = "new"
-                self.ibuf = ""
-                self.ibuf_cursor = 0
-            elif k == ord("e"):
-                use_tmux = self._get_use_tmux()
-                if use_tmux:
-                    if not HAS_TMUX:
-                        self._set_status("tmux is not installed — install it or disable in profile")
-                        return None
-                    profiles = self.mgr.load_profiles()
-                    active = next(
-                        (p for p in profiles if p.get("name") == self.active_profile_name),
-                        None,
-                    )
-                    extra = self._build_args_from_profile(active) if active else []
-                    self._tmux_launch_ephemeral(extra)
-                    self._refresh()
-                else:
-                    self.exit_action = ("tmp",)
-                    return "action"
-            elif k == ord("K"):
-                if self.filtered and HAS_TMUX:
-                    s = self.filtered[self.cur]
-                    tmux_name = TMUX_PREFIX + s.id[:8]
-                    alive = self.mgr.tmux_sessions()
-                    if tmux_name in alive:
-                        self.kill_tmux_target = tmux_name
-                        self.kill_tmux_label = s.tag or s.id[:12]
-                        self.confirm_sel = 0
-                        self.mode = "kill_tmux"
-                    else:
-                        self._set_status("No active tmux session for this session")
-                elif not HAS_TMUX:
-                    self._set_status("tmux is not installed")
-            elif k == ord("/"):
-                self.mode = "search"
-                self.query_cursor = len(self.query)
-            elif k == ord("s"):
-                modes = ["date", "name", "project", "tag", "messages", "tmux"]
-                idx = modes.index(self.sort_mode) if self.sort_mode in modes else 0
-                self.sort_mode = modes[(idx + 1) % len(modes)]
+    def _input_normal_detail(self, k: int) -> Optional[str]:
+        """Handle keys specific to the detail (session) view."""
+        if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.filtered:
+                self._enter_launch_mode(self.filtered[self.cur])
+        elif k == ord("p"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                pinned = self.mgr.toggle_pin(s.id)
+                icon = "★ Pinned" if pinned else "Unpinned"
+                self._set_status(f"{icon}: {s.tag or s.id[:12]}")
                 self._refresh()
-                labels = {"date": "Date", "name": "Name", "project": "Project",
-                          "tag": "Tag", "messages": "Messages", "tmux": "Tmux"}
-                self._set_status(f"Sort: {labels[self.sort_mode]}")
-            elif k in (ord("r"), curses.KEY_F5):
-                self._refresh(force=True)
-                self._set_status("Refreshed session list")
+        elif k == ord("t"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                self.mode = "tag"
+                self.ibuf = s.tag if s.tag else ""
+                self.ibuf_cursor = len(self.ibuf)
+        elif k == ord("T"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                if s.tag:
+                    self.mgr.remove_tag(s.id)
+                    self._set_status(f"Removed tag from: {s.id[:12]}")
+                    self._refresh()
+                else:
+                    self._set_status("No tag to remove")
+        elif k == ord("c"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
+                self.mode = "chdir"
+                self.ibuf = s.cwd or str(Path.home())
+                self.ibuf_cursor = len(self.ibuf)
+        elif k == ord("d"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                self.delete_label = s.tag or s.label[:40]
+                self.confirm_sel = 0
+                self.mode = "delete"
+        elif k == ord("K"):
+            if self.filtered and HAS_TMUX:
+                s = self.filtered[self.cur]
+                tmux_name = TMUX_PREFIX + s.id[:8]
+                alive = self.mgr.tmux_sessions()
+                if tmux_name in alive:
+                    self.kill_tmux_target = tmux_name
+                    self.kill_tmux_label = s.tag or s.id[:12]
+                    self.confirm_sel = 0
+                    self.mode = "kill_tmux"
+                else:
+                    self._set_status("No active tmux session for this session")
+            elif not HAS_TMUX:
+                self._set_status("tmux is not installed")
+        elif k == ord("i"):
+            if self.filtered and HAS_TMUX:
+                s = self.filtered[self.cur]
+                if s.id in self.tmux_sids:
+                    self.input_target_sid = s.id
+                    self.input_target_tmux = self.tmux_sids[s.id]
+                    self.mode = "input"
+                    self.input_lines = [""]
+                    self.input_cursor_line = 0
+                    self.input_cursor_col = 0
+                else:
+                    self._set_status("No active tmux session")
+            elif not HAS_TMUX:
+                self._set_status("tmux is not installed")
+        elif k == ord("/"):
+            self.mode = "search"
+            self.query_cursor = len(self.query)
+        elif k in (ord("r"), curses.KEY_F5):
+            self._refresh(force=True)
+            self._set_status("Refreshed session list")
+        return None
 
+    def _input_normal_list(self, k: int) -> Optional[str]:
+        """Handle keys specific to the sessions list view."""
+        if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.filtered:
+                self._enter_launch_mode(self.filtered[self.cur])
+        elif k == ord(" "):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                if s.id in self.marked:
+                    self.marked.discard(s.id)
+                else:
+                    self.marked.add(s.id)
+                if self.cur < len(self.filtered) - 1:
+                    self.cur += 1
+        elif k == ord("u"):
+            if self.marked:
+                self.marked.clear()
+                self._set_status("Cleared all marks")
+        elif k == ord("p"):
+            if self.marked:
+                for sid in self.marked:
+                    self.mgr.toggle_pin(sid)
+                self._set_status(f"Toggled pin for {len(self.marked)} session(s)")
+                self.marked.clear()
+                self._refresh()
+            elif self.filtered:
+                s = self.filtered[self.cur]
+                pinned = self.mgr.toggle_pin(s.id)
+                icon = "★ Pinned" if pinned else "Unpinned"
+                self._set_status(f"{icon}: {s.tag or s.id[:12]}")
+                self._refresh()
+        elif k == ord("t"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                self.mode = "tag"
+                self.ibuf = s.tag if s.tag else ""
+                self.ibuf_cursor = len(self.ibuf)
+        elif k == ord("T"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                if s.tag:
+                    self.mgr.remove_tag(s.id)
+                    self._set_status(f"Removed tag from: {s.id[:12]}")
+                    self._refresh()
+                else:
+                    self._set_status("No tag to remove")
+        elif k == ord("c"):
+            if self.filtered:
+                s = self.filtered[self.cur]
+                self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
+                self.mode = "chdir"
+                self.ibuf = s.cwd or str(Path.home())
+                self.ibuf_cursor = len(self.ibuf)
+        elif k == ord("d"):
+            if self.marked:
+                self.delete_label = f"{len(self.marked)} marked sessions"
+                self.confirm_sel = 0
+                self.mode = "delete"
+            elif self.filtered:
+                s = self.filtered[self.cur]
+                self.delete_label = s.tag or s.label[:40]
+                self.confirm_sel = 0
+                self.mode = "delete"
+        elif k == ord("D"):
+            empty = [s for s in self.sessions if not s.first_msg and not s.summary]
+            if empty:
+                self.empty_count = len(empty)
+                self.confirm_sel = 0
+                self.mode = "delete_empty"
+            else:
+                self._set_status("No empty sessions to delete")
+        elif k == ord("n"):
+            self.mode = "new"
+            self.ibuf = ""
+            self.ibuf_cursor = 0
+        elif k == ord("e"):
+            use_tmux = self._get_use_tmux()
+            if use_tmux:
+                if not HAS_TMUX:
+                    self._set_status("tmux is not installed — install it or disable in profile")
+                    return None
+                extra = self._active_profile_args()
+                self._tmux_launch_ephemeral(extra)
+                self._refresh()
+            else:
+                self.exit_action = ("tmp",)
+                return "action"
+        elif k == ord("K"):
+            if self.filtered and HAS_TMUX:
+                s = self.filtered[self.cur]
+                tmux_name = TMUX_PREFIX + s.id[:8]
+                alive = self.mgr.tmux_sessions()
+                if tmux_name in alive:
+                    self.kill_tmux_target = tmux_name
+                    self.kill_tmux_label = s.tag or s.id[:12]
+                    self.confirm_sel = 0
+                    self.mode = "kill_tmux"
+                else:
+                    self._set_status("No active tmux session for this session")
+            elif not HAS_TMUX:
+                self._set_status("tmux is not installed")
+        elif k == ord("/"):
+            self.mode = "search"
+            self.query_cursor = len(self.query)
+        elif k == ord("s"):
+            modes = ["date", "name", "project", "tag", "messages", "tmux"]
+            idx = modes.index(self.sort_mode) if self.sort_mode in modes else 0
+            self.sort_mode = modes[(idx + 1) % len(modes)]
+            self._refresh()
+            labels = {"date": "Date", "name": "Name", "project": "Project",
+                      "tag": "Tag", "messages": "Messages", "tmux": "Tmux"}
+            self._set_status(f"Sort: {labels[self.sort_mode]}")
+        elif k in (ord("r"), curses.KEY_F5):
+            self._refresh(force=True)
+            self._set_status("Refreshed session list")
         return None
 
     def _input_search(self, k: int) -> Optional[str]:
@@ -2885,13 +2865,9 @@ class CCSApp:
         return None
 
     def _input_delete(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
-            self.confirm_sel = 1 - self.confirm_sel
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if self.confirm_sel == 1:
-                k = ord("y")
-            else:
-                k = ord("n")
+        k = self._confirm_nav(k)
+        if k == -1:
+            return None
         if k in (ord("y"), ord("Y")):
             if self.marked:
                 count = 0
@@ -2915,13 +2891,9 @@ class CCSApp:
         return None
 
     def _input_delete_empty(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
-            self.confirm_sel = 1 - self.confirm_sel
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if self.confirm_sel == 1:
-                k = ord("y")
-            else:
-                k = ord("n")
+        k = self._confirm_nav(k)
+        if k == -1:
+            return None
         if k in (ord("y"), ord("Y")):
             empty = [s for s in self.sessions if not s.first_msg and not s.summary]
             count = 0
@@ -2936,13 +2908,9 @@ class CCSApp:
         return None
 
     def _input_kill_tmux(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
-            self.confirm_sel = 1 - self.confirm_sel
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if self.confirm_sel == 1:
-                k = ord("y")
-            else:
-                k = ord("n")
+        k = self._confirm_nav(k)
+        if k == -1:
+            return None
         if k in (ord("y"), ord("Y")):
             tmux_name = self.kill_tmux_target
             subprocess.run(["tmux", "kill-session", "-t", tmux_name],
@@ -2971,12 +2939,7 @@ class CCSApp:
                         self._set_status("tmux is not installed — install it or disable in profile")
                         self.mode = "normal"
                         return None
-                    profiles = self.mgr.load_profiles()
-                    active = next(
-                        (p for p in profiles if p.get("name") == self.active_profile_name),
-                        None,
-                    )
-                    extra = self._build_args_from_profile(active) if active else []
+                    extra = self._active_profile_args()
                     self.mode = "normal"
                     self._tmux_launch_new(name, extra)
                     self._refresh()
@@ -3322,13 +3285,9 @@ class CCSApp:
                 break
 
     def _input_quit(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
-            self.confirm_sel = 1 - self.confirm_sel
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if self.confirm_sel == 1:
-                return self._input_quit(ord("y"))
-            else:
-                return self._input_quit(ord("n"))
+        k = self._confirm_nav(k)
+        if k == -1:
+            return None
         if k in (ord("y"), ord("Y")):
             return "quit"
         elif k in (ord("n"), ord("N"), 27):
