@@ -1413,7 +1413,7 @@ class CCSApp:
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
         if focused:
-            self._safe(y, 2, label, curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+            self._safe(y, 2, label, curses.color_pair(CP_ACCENT) | curses.A_BOLD | curses.A_REVERSE)
         else:
             self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
 
