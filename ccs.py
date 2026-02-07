@@ -606,12 +606,16 @@ class CCSApp:
         self._geo_tmux_pane = (0, 0, 0, 0)
         self._geo_list = (0, 0, 0, 0)
         self._geo_overlay_btns: list = []  # [(x, y, w, h, value), ...]
+        self._geo_profile_badge = (0, 0, 0)  # (x, y, w)
+        self._geo_view_label = (0, 0, 0)     # (x, y, w)
 
         self.status = ""
         self.status_ttl = 0
         self.exit_action: Optional[Tuple] = None
         self.last_ctrl_c: float = 0.0
         self.confirm_sel = 0  # 0=No (default), 1=Yes — for y/n popups
+        self.kill_tmux_target = ""  # tmux session name to kill
+        self.kill_tmux_label = ""   # display label for confirmation
 
         self._init_colors()
         self._refresh()
@@ -692,15 +696,38 @@ class CCSApp:
         scroll_down = bool(bstate & getattr(curses, "BUTTON5_PRESSED", 0))
 
         # ── Overlay button clicks ──
-        if self.mode in ("quit", "delete", "delete_empty", "launch") and (clicked or dbl_clicked):
+        if self.mode in ("quit", "delete", "delete_empty", "kill_tmux", "launch") and (clicked or dbl_clicked):
             for bx, by, bw, bh, val in self._geo_overlay_btns:
                 if bx <= mx < bx + bw and by <= my < by + bh:
-                    self.confirm_sel = val
+                    if val == "yes":
+                        curses.ungetch(ord("y"))
+                    elif val == "no":
+                        curses.ungetch(27)
+                    else:
+                        # Launch overlay: numeric selection
+                        self.confirm_sel = val
                     return None
             return None
 
         if self.mode != "normal":
             return None
+
+        # ── Header clicks: profile badge and view label ──
+        if clicked or dbl_clicked:
+            px, py, pw = self._geo_profile_badge
+            if my == py and px <= mx < px + pw:
+                self.mode = "profiles"
+                return None
+            vx, vy, vw = self._geo_view_label
+            if my == vy and vx <= mx < vx + vw:
+                if self.view == "detail":
+                    self.view = "sessions"
+                elif self.filtered:
+                    self.view = "detail"
+                    self.detail_scroll = 0
+                    self.tmux_scroll = 0
+                    self.detail_focus = "info"
+                return None
 
         # ── Session View (detail) ──
         if self.view == "detail":
@@ -735,11 +762,11 @@ class CCSApp:
                     mx_s = max(0, self._tmux_lines_count - th)
                     self.tmux_scroll = min(mx_s, self.tmux_scroll + 3)
 
-            # Click on scrollbar track → jump scroll position
-            if clicked and mx == iw - 1 and iy <= my < iy + ih and self._info_lines_count > ih:
+            # Click on scrollbar track (column 0) → jump scroll position
+            if clicked and mx == 0 and iy <= my < iy + ih and self._info_lines_count > ih:
                 ratio = (my - iy) / max(1, ih - 1)
                 self.detail_scroll = int(ratio * max(0, self._info_lines_count - ih))
-            elif clicked and mx == tw - 1 and ty <= my < ty + th and self._tmux_lines_count > th:
+            elif clicked and mx == 0 and ty <= my < ty + th and self._tmux_lines_count > th:
                 ratio = (my - ty) / max(1, th - 1)
                 self.tmux_scroll = int(ratio * max(0, self._tmux_lines_count - th))
 
@@ -1097,6 +1124,11 @@ class CCSApp:
                 "⚠ Delete Empty Sessions",
                 f"Delete {self.empty_count} empty session{'s' if self.empty_count != 1 else ''}?",
                 "WARNING: This will permanently delete all empty Claude sessions. This action is NOT recoverable!")
+        elif self.mode == "kill_tmux":
+            self._draw_confirm_overlay(h, w,
+                "Kill Tmux Session",
+                f"Kill tmux for '{self.kill_tmux_label}'?",
+                "This only stops the tmux process. The Claude session itself is preserved.")
         elif self.mode == "input":
             self._draw_input_overlay(h, w)
         elif self.mode == "launch":
@@ -1132,12 +1164,14 @@ class CCSApp:
         prof_badge = f" {self.active_profile_name} "
         self._safe(1, x, prof_badge,
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
+        self._geo_profile_badge = (x, 1, len(prof_badge))
         x += len(prof_badge) + 1
         self._safe(1, x, "View:", curses.color_pair(CP_DIM) | curses.A_DIM)
         x += 6
         view_label = " Session View " if self.view == "detail" else " Sessions "
         self._safe(1, x, view_label,
                    curses.color_pair(CP_TAG) | curses.A_BOLD)
+        self._geo_view_label = (x, 1, len(view_label))
 
         # │  hints  │
         self._safe(2, 0, "│", bdr)
@@ -1151,9 +1185,10 @@ class CCSApp:
             "normal":  normal_hints,
             "search":  "Type to filter  ·  ↑/↓ Navigate results  ·  ⏎ Done  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply tag  ·  Esc Cancel",
-            "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y Yes / n No  ·  Esc Cancel",
-            "delete":  "←/→ Select  ·  ⏎ Confirm  ·  y Yes / n No  ·  Esc Cancel",
-            "delete_empty": "←/→ Select  ·  ⏎ Confirm  ·  y Yes / n No  ·  Esc Cancel",
+            "quit":    "y/Y Yes  ·  n/N/Esc No",
+            "delete":  "y/Y Yes  ·  n/N/Esc No",
+            "delete_empty": "y/Y Yes  ·  n/N/Esc No",
+            "kill_tmux": "y/Y Yes  ·  n/N/Esc No",
             "chdir":   "Type directory path  ·  ⏎ Apply  ·  Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create session  ·  Esc Cancel",
             "profiles": "⏎ Set active profile  n New  e Edit  d Delete  Esc Go back",
@@ -1205,7 +1240,7 @@ class CCSApp:
             self._safe(y, base_x + self.ibuf_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
         elif self.mode == "input":
             pass  # handled by overlay popup
-        elif self.mode in ("quit", "delete", "delete_empty", "profiles", "profile_edit"):
+        elif self.mode in ("quit", "delete", "delete_empty", "kill_tmux", "profiles", "profile_edit"):
             pass  # handled by overlay popups
         elif self.query:
             self._safe(y, 1, f" Filter: {self.query}", dim)
@@ -1259,14 +1294,7 @@ class CCSApp:
             sel = (idx == self.cur)
             self._draw_row(sy + i, w, s, sel, max_tag_w)
 
-        # Scroll indicators
-        if self.scroll > 0:
-            self._safe(sy, w - 3, " ▲ ",
-                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
-        if self.scroll + height < len(self.filtered):
-            last = min(height - 1, len(self.filtered) - self.scroll - 1)
-            self._safe(sy + last, w - 3, " ▼ ",
-                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        self._draw_scrollbar(sy, height, self.scroll, len(self.filtered))
 
     def _draw_row(self, y: int, w: int, s: Session, sel: bool, tag_col_w: int = 0):
         """Draw a single session row with color-coded segments."""
@@ -1482,11 +1510,11 @@ class CCSApp:
         else:
             self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
 
-    def _draw_scrollbar(self, sy: int, h: int, w: int, scroll: int, total: int):
-        """Draw a scrollbar on the right edge of a pane."""
+    def _draw_scrollbar(self, sy: int, h: int, scroll: int, total: int):
+        """Draw a scrollbar on the left edge (column 0) of a pane."""
         if total <= h or h < 2:
             return
-        col = w - 1
+        col = 0
         track_attr = curses.color_pair(CP_BORDER)
         thumb_attr = curses.color_pair(CP_ACCENT) | curses.A_BOLD
         # Thumb size and position
@@ -1579,7 +1607,7 @@ class CCSApp:
         for i, (text, attr) in enumerate(scrolled[:h]):
             self._safe(sy + i, 0, text[:w - 2], attr)
 
-        self._draw_scrollbar(sy, h, w, self.detail_scroll, len(lines))
+        self._draw_scrollbar(sy, h, self.detail_scroll, len(lines))
 
     def _draw_tmux_pane(self, sy: int, h: int, w: int):
         """Bottom pane: live tmux output."""
@@ -1625,7 +1653,7 @@ class CCSApp:
         for i, (text, attr) in enumerate(scrolled[:h]):
             self._safe(sy + i, 0, text[:w - 2], attr)
 
-        self._draw_scrollbar(sy, h, w, self.tmux_scroll, len(lines))
+        self._draw_scrollbar(sy, h, self.tmux_scroll, len(lines))
 
 
     def _draw_help_overlay(self, h: int, w: int):
@@ -1755,10 +1783,8 @@ class CCSApp:
         sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
 
         # Button labels
-        yes_label = "  Yes  "
-        no_label = "  No   "
-        yes_a = sel_attr if self.confirm_sel == 1 else dim
-        no_a = sel_attr if self.confirm_sel == 0 else dim
+        yes_label = " y Yes "
+        no_label = " n No "
 
         content_lines = [
             ("", 0),
@@ -1785,7 +1811,7 @@ class CCSApp:
             content_lines.append(("", 0))
         # Placeholder row for buttons (drawn separately)
         content_lines.append(("", 0))
-        content_lines.append(("  ←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc", dim))
+        content_lines.append(("  y/Y Yes  ·  n/N/Esc No", dim))
         content_lines.append(("", 0))
 
         max_content_w = max((len(t) + 4 for t, _ in content_lines), default=0)
@@ -1821,11 +1847,11 @@ class CCSApp:
             gap = 4
             total_w = len(yes_label) + len(no_label) + gap
             bx = sx + max(2, (box_w - total_w) // 2)
-            self._safe(btn_row, bx, yes_label, yes_a)
-            self._safe(btn_row, bx + len(yes_label) + gap, no_label, no_a)
+            self._safe(btn_row, bx, yes_label, warn)
+            self._safe(btn_row, bx + len(yes_label) + gap, no_label, dim)
             self._geo_overlay_btns = [
-                (bx, btn_row, len(yes_label), 1, 1),  # Yes = 1
-                (bx + len(yes_label) + gap, btn_row, len(no_label), 1, 0),  # No = 0
+                (bx, btn_row, len(yes_label), 1, "yes"),
+                (bx + len(yes_label) + gap, btn_row, len(no_label), 1, "no"),
             ]
 
         # Bottom border
@@ -2317,7 +2343,7 @@ class CCSApp:
             self._safe(y, w - len(right_text) - 2, f" {right_text} ", dim)
 
         # Center: mode indicator
-        if self.mode not in ("normal", "help", "delete", "delete_empty", "quit", "launch", "profiles", "profile_edit"):
+        if self.mode not in ("normal", "help", "delete", "delete_empty", "kill_tmux", "quit", "launch", "profiles", "profile_edit"):
             mode_label = f" [{self.mode.upper()}] "
             mx = (w - len(mode_label)) // 2
             self._safe(y, mx, mode_label,
@@ -2430,6 +2456,7 @@ class CCSApp:
             "chdir": self._input_chdir,
             "delete": self._input_delete,
             "delete_empty": self._input_delete_empty,
+            "kill_tmux": self._input_kill_tmux,
             "new": self._input_new,
             "profiles": self._input_profiles,
             "profile_edit": self._input_profile_edit,
@@ -2637,11 +2664,9 @@ class CCSApp:
                     tmux_name = TMUX_PREFIX + s.id[:8]
                     alive = self.mgr.tmux_sessions()
                     if tmux_name in alive:
-                        subprocess.run(["tmux", "kill-session", "-t", tmux_name],
-                                       capture_output=True)
-                        self.mgr.tmux_unregister(tmux_name)
-                        self.tmux_sids.pop(s.id, None)
-                        self._set_status(f"Killed tmux: {s.tag or s.id[:12]}")
+                        self.kill_tmux_target = tmux_name
+                        self.kill_tmux_label = s.tag or s.id[:12]
+                        self.mode = "kill_tmux"
                     else:
                         self._set_status("No active tmux session for this session")
                 elif not HAS_TMUX:
@@ -2775,11 +2800,9 @@ class CCSApp:
                     tmux_name = TMUX_PREFIX + s.id[:8]
                     alive = self.mgr.tmux_sessions()
                     if tmux_name in alive:
-                        subprocess.run(["tmux", "kill-session", "-t", tmux_name],
-                                       capture_output=True)
-                        self.mgr.tmux_unregister(tmux_name)
-                        self.tmux_sids.pop(s.id, None)
-                        self._set_status(f"Killed tmux: {s.tag or s.id[:12]}")
+                        self.kill_tmux_target = tmux_name
+                        self.kill_tmux_label = s.tag or s.id[:12]
+                        self.mode = "kill_tmux"
                     else:
                         self._set_status("No active tmux session for this session")
                 elif not HAS_TMUX:
@@ -2836,7 +2859,7 @@ class CCSApp:
         return None
 
     def _input_delete(self, k: int) -> Optional[str]:
-        if k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
+        if k in (ord("y"), ord("Y")):
             if self.marked:
                 count = 0
                 for s in list(self.sessions):
@@ -2854,14 +2877,12 @@ class CCSApp:
             if self.view == "detail":
                 self.view = "sessions"
             self.mode = "normal"
-        elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
-            self.confirm_sel = 1 - self.confirm_sel
-        elif k == ord("n") or k == 27 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 0):
+        elif k in (ord("n"), ord("N"), 27):
             self.mode = "normal"
         return None
 
     def _input_delete_empty(self, k: int) -> Optional[str]:
-        if k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
+        if k in (ord("y"), ord("Y")):
             empty = [s for s in self.sessions if not s.first_msg and not s.summary]
             count = 0
             for s in empty:
@@ -2870,9 +2891,24 @@ class CCSApp:
             self._set_status(f"Deleted {count} empty session{'s' if count != 1 else ''}")
             self._refresh()
             self.mode = "normal"
-        elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
-            self.confirm_sel = 1 - self.confirm_sel
-        elif k == ord("n") or k == 27 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 0):
+        elif k in (ord("n"), ord("N"), 27):
+            self.mode = "normal"
+        return None
+
+    def _input_kill_tmux(self, k: int) -> Optional[str]:
+        if k in (ord("y"), ord("Y")):
+            tmux_name = self.kill_tmux_target
+            subprocess.run(["tmux", "kill-session", "-t", tmux_name],
+                           capture_output=True)
+            self.mgr.tmux_unregister(tmux_name)
+            # Remove from tmux_sids
+            sid = next((sid for sid, name in self.tmux_sids.items()
+                        if name == tmux_name), None)
+            if sid:
+                self.tmux_sids.pop(sid, None)
+            self._set_status(f"Killed tmux: {self.kill_tmux_label}")
+            self.mode = "normal"
+        elif k in (ord("n"), ord("N"), 27):
             self.mode = "normal"
         return None
 
@@ -3040,8 +3076,7 @@ class CCSApp:
 
         # Delete confirmation sub-mode
         if self.prof_delete_confirm:
-            if (k == ord("y") or (k in (ord("\n"), curses.KEY_ENTER, 10, 13)
-                                  and self.confirm_sel == 1)) and profiles:
+            if k in (ord("y"), ord("Y")) and profiles:
                 pname = profiles[self.prof_cur].get("name", "")
                 self.mgr.delete_profile(pname)
                 self._set_status(f"Deleted profile: {pname}")
@@ -3052,9 +3087,7 @@ class CCSApp:
                     self.active_profile_name = "default"
                     self.mgr.save_active_profile_name("default")
                 self.prof_delete_confirm = False
-            elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
-                self.confirm_sel = 1 - self.confirm_sel
-            else:
+            elif k in (ord("n"), ord("N"), 27):
                 self.prof_delete_confirm = False
             return None
 
@@ -3242,11 +3275,9 @@ class CCSApp:
                 break
 
     def _input_quit(self, k: int) -> Optional[str]:
-        if k == ord("y") or k == 3 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 1):
+        if k in (ord("y"), ord("Y")) or k == 3:
             return "quit"
-        elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
-            self.confirm_sel = 1 - self.confirm_sel
-        elif k == ord("n") or k == 27 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 0):
+        elif k in (ord("n"), ord("N"), 27):
             self.mode = "normal"
         return None
 
