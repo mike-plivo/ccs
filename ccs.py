@@ -3072,26 +3072,7 @@ def cmd_help():
   --tools <tools>                        Tools
   --mcp-config <path>                    MCP config path
 
-\033[1mTUI Keybindings:\033[0m
-  \033[36m↑/↓\033[0m or \033[36mj/k\033[0m       Navigate sessions
-  \033[36mEnter\033[0m             Resume with active profile
-  \033[36mR\033[0m                 Quick resume most recent session
-  \033[36mP\033[0m                 Profile picker / manager
-  \033[36mH\033[0m                 Cycle theme
-  \033[36ms\033[0m                 Cycle sort (date/name/project)
-  \033[36mp\033[0m                 Toggle pin (bulk if marked)
-  \033[36mt\033[0m / \033[36mT\033[0m             Set/rename tag / remove tag
-  \033[36mc\033[0m                 Change session working directory
-  \033[36md\033[0m / \033[36mD\033[0m             Delete session / delete empties
-  \033[36mSpace\033[0m             Mark/unmark session for bulk ops
-  \033[36mu\033[0m                 Unmark all
-  \033[36mn\033[0m                 New named session
-  \033[36me\033[0m                 Ephemeral session
-  \033[36m/\033[0m                 Search / filter
-  \033[36mK\033[0m                 Kill tmux session for selected session
-  \033[36mr\033[0m                 Refresh
-  \033[36mq\033[0m                 Quit
-  Mouse: click select, double-click resume, scroll navigate""")
+\033[2mPress ? in the TUI for keybindings help.\033[0m""")
 
 
 def cmd_list(mgr: SessionManager):
