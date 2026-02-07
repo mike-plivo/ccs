@@ -1328,6 +1328,10 @@ class CCSApp:
                     label = " Live Detail "
         else:
             label = " Preview "
+            if self.filtered:
+                s = self.filtered[self.cur]
+                if s.id in self.tmux_sids:
+                    label = " Live Preview "
         self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
         # View indicator on right
         view_hint = " →: Detail " if self.view == "sessions" else " ←: Sessions "
@@ -1382,7 +1386,21 @@ class CCSApp:
             repo_name, branch, commits = git_info
             branch_str = f" ({branch})" if branch else ""
             lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
-        if not s.first_msg and not s.summary and s.id not in self.tmux_sids:
+
+        # Show last tmux output lines in remaining space
+        if s.id in self.tmux_sids:
+            tmux_name = self.tmux_sids[s.id]
+            captured = self._capture_tmux_pane(s.id, tmux_name)
+            if captured:
+                lines.append(("", 0))
+                remaining = h - len(lines) - 1  # leave 1 line margin
+                if remaining > 0:
+                    show = captured[-remaining:]
+                    for cl in show:
+                        if len(cl) > w - 6:
+                            cl = cl[:w - 9] + "..."
+                        lines.append((f"    {cl}", curses.color_pair(CP_NORMAL)))
+        elif not s.first_msg and not s.summary:
             lines.append(("  (empty session — no messages yet)",
                            curses.color_pair(CP_DIM) | curses.A_DIM))
 
