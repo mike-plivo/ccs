@@ -3206,7 +3206,7 @@ class CCSApp(App):
             self._set_status("Cannot suspend in this environment")
             return
         if not session_id:
-            self._do_refresh()
+            self._do_refresh(force=True)
             return
         is_ephemeral = self.mgr._get_meta(session_id).get("ephemeral", False)
         tmux_alive = subprocess.run(
@@ -3231,7 +3231,7 @@ class CCSApp(App):
                 subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
             self.mgr._delete_meta(session_id)
             self._set_status("No session created — tmux killed")
-        self._do_refresh(force=is_ephemeral or not has_session)
+        self._do_refresh(force=True)
 
     def _cleanup_session_metadata(self, sid):
         """Remove all metadata for a session ID."""
