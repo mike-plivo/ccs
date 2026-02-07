@@ -1081,9 +1081,9 @@ class CCSApp:
             if s.id in self.tmux_sids:
                 state = self.tmux_claude_state.get(s.id, "unknown")
                 if self.view == "detail":
-                    hints = "i Input  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
+                    hints = "i Send to tmux  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
                 else:
-                    hints = "i Input  → Detail  K Kill  ⏎ Attach  s Sort  ? Help"
+                    hints = "i Send to tmux  → Detail  K Kill  ⏎ Attach  s Sort  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1528,7 +1528,7 @@ class CCSApp:
             ("", 0),
             ("  Tmux (requires tmux)", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
-            ("    i              Send input to tmux session", 0),
+            ("    i              Send text to tmux session", 0),
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
