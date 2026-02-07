@@ -1156,6 +1156,8 @@ class CCSApp:
             else:
                 info = f" {n} session{'s' if n != 1 else ''} · Sort: {sort_label}"
             self._safe(y, 1, info, curses.color_pair(CP_ACCENT))
+            tip = "⏎ Launch "
+            self._safe(y, w - len(tip) - 1, tip, curses.color_pair(CP_DIM) | curses.A_DIM)
 
     def _draw_list(self, sy: int, height: int, w: int):
         if not self.filtered:
