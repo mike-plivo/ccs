@@ -1079,9 +1079,9 @@ class CCSApp:
                    curses.color_pair(CP_TAG) | curses.A_BOLD)
 
         if self.view == "detail":
-            normal_hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del  K Kill  ? Help"
+            normal_hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del session  K Kill tmux  ? Help"
         else:
-            normal_hints = "⏎ Resume  → Detail  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help"
+            normal_hints = "⏎ Resume  → Detail  K Kill tmux  s Sort  Space Mark  P Profiles  d Del session  n New  / Search  ? Help"
         hints_map = {
             "normal":  normal_hints,
             "search":  "Type to filter  ·  ↑/↓ Navigate  ·  ⏎ Done  ·  Esc Cancel",
@@ -1103,9 +1103,9 @@ class CCSApp:
             s = self.filtered[self.cur]
             if self.view == "detail":
                 if s.id in self.tmux_sids:
-                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Attach  i Send  K Kill  p Pin  t Tag  d Del  ? Help"
+                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Attach  i Send  K Kill tmux  p Pin  t Tag  d Del session  ? Help"
                 else:
-                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del  ? Help"
+                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del session  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1575,13 +1575,13 @@ class CCSApp:
                 ("", 0),
                 ("  Actions", hdr),
                 ("    Enter          Resume / attach session", 0),
-                ("    K              Kill session's tmux", 0),
+                ("    K              Kill tmux session", 0),
                 ("    i              Send text to tmux (Ctrl+D to send)", 0),
                 ("    p              Toggle pin", 0),
                 ("    t              Set / rename tag", 0),
                 ("    T              Remove tag", 0),
                 ("    c              Change session CWD", 0),
-                ("    d              Delete session", 0),
+                ("    d              Delete Claude session", 0),
                 ("", 0),
                 ("  Other", hdr),
                 ("    P              Profile picker / manager", 0),
@@ -1615,9 +1615,9 @@ class CCSApp:
                 ("    t              Set / rename tag", 0),
                 ("    T              Remove tag from session", 0),
                 ("    c              Change session CWD", 0),
-                ("    d              Delete session (bulk if marked)", 0),
-                ("    D              Delete all empty sessions", 0),
-                ("    K              Kill session's tmux", 0),
+                ("    d              Delete Claude session (bulk if marked)", 0),
+                ("    D              Delete all empty Claude sessions", 0),
+                ("    K              Kill tmux session", 0),
                 ("", 0),
                 ("  Bulk & Sort", hdr),
                 ("    Space          Mark / unmark session", 0),
