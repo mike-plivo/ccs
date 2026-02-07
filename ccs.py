@@ -595,8 +595,11 @@ class CCSApp:
         self.launch_session: Optional[Session] = None
         self.launch_extra: List[str] = []
         self.view = "sessions"  # "sessions" | "detail"
-        self.detail_scroll = 0  # scroll offset for detail view content
-        self._detail_lines_count = 0  # total lines in last detail render
+        self.detail_scroll = 0  # scroll offset for info pane
+        self._info_lines_count = 0  # total lines in info pane
+        self.tmux_scroll = 0  # scroll offset for tmux pane
+        self._tmux_lines_count = 0  # total lines in tmux pane
+        self.detail_focus = "info"  # "info" | "tmux" — which pane has focus
 
         self.status = ""
         self.status_ttl = 0
@@ -999,10 +1002,15 @@ class CCSApp:
             self._draw_list(hdr_h, list_h, w)
             self._draw_separator(hdr_h + list_h, w)
             self._draw_preview(hdr_h + list_h + sep_h, preview_h, w)
-        else:  # detail view
-            detail_h = h - hdr_h - ftr_h
+        else:  # detail view — two panes: Info (top) + Tmux (bottom)
+            content_h = h - hdr_h - ftr_h
+            info_h = min(content_h // 2, 14)
+            sep2_h = 1
+            tmux_h = content_h - info_h - sep2_h
             self._draw_header(w)
-            self._draw_detail(hdr_h, detail_h, w)
+            self._draw_info_pane(hdr_h, info_h, w)
+            self._draw_detail_separator(hdr_h + info_h, w)
+            self._draw_tmux_pane(hdr_h + info_h + sep2_h, tmux_h, w)
 
         self._draw_footer(h - ftr_h, w)
 
@@ -1088,8 +1096,11 @@ class CCSApp:
         hints = hints_map.get(hint_key, "")
         if hint_key == "normal" and self.filtered:
             s = self.filtered[self.cur]
-            if s.id in self.tmux_sids and self.view == "detail":
-                hints = "i Send to tmux  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
+            if self.view == "detail":
+                if s.id in self.tmux_sids:
+                    hints = "Tab Pane  ↑↓ Scroll  i Send to tmux  K Kill  ⏎ Attach  ← Back  ? Help"
+                else:
+                    hints = "Tab Pane  ↑↓ Scroll  ⏎ Resume  ← Back  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1323,13 +1334,9 @@ class CCSApp:
         self._safe(y, 0, "├", bdr)
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
-        if self.view == "detail":
-            label = " Session View "
-        else:
-            label = " Info "
+        label = " Info "
         self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
-        # View indicator on right
-        view_hint = " →: Detail " if self.view == "sessions" else " ←: Sessions "
+        view_hint = " →: Session View "
         if len(view_hint) + 4 < w:
             self._safe(y, w - len(view_hint) - 2, view_hint,
                        curses.color_pair(CP_DIM) | curses.A_DIM)
@@ -1389,8 +1396,24 @@ class CCSApp:
         for i, (text, attr) in enumerate(lines[:h]):
             self._safe(sy + i, 0, text[:w - 1], attr)
 
-    def _draw_detail(self, sy: int, h: int, w: int):
-        """Full detail view: all metadata + git log + live output or first msg + topics."""
+    def _draw_detail_separator(self, y: int, w: int):
+        """Draw separator between Info and Tmux panes in Session View."""
+        bdr = curses.color_pair(CP_BORDER)
+        self._safe(y, 0, "├", bdr)
+        self._hline(y, 1, "─", w - 2, bdr)
+        self._safe(y, w - 1, "┤", bdr)
+        label = " Tmux "
+        focus_attr = curses.color_pair(CP_BORDER) | curses.A_BOLD
+        self._safe(y, 2, label, focus_attr)
+        # Show which pane is focused
+        if self.detail_focus == "tmux":
+            self._safe(y, w - 5, " ◆ ", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+
+    def _draw_info_pane(self, sy: int, h: int, w: int):
+        """Top pane: session metadata, git info, first message, topics."""
+        # Focus indicator
+        focused = self.detail_focus == "info"
+
         if not self.filtered:
             self._safe(sy + 1, 3, "Select a session to preview",
                        curses.color_pair(CP_DIM) | curses.A_DIM)
@@ -1404,7 +1427,6 @@ class CCSApp:
             lines.append(("  ★ PINNED", curses.color_pair(CP_PIN) | curses.A_BOLD))
         if s.tag:
             lines.append((f"  Tag:     {s.tag}", curses.color_pair(CP_TAG) | curses.A_BOLD))
-
         lines.append((f"  Session: {s.id[:36]}{'...' if len(s.id) > 36 else ''}",
                        curses.color_pair(CP_DIM) | curses.A_DIM))
         lines.append((f"  Project: {s.project_display}",
@@ -1436,11 +1458,57 @@ class CCSApp:
                     cl = cl[:w - 7] + "..."
                 lines.append((cl, curses.color_pair(CP_DIM)))
 
-        lines.append(("", 0))
-
+        # First message + topics (shown in info pane)
         has_tmux = s.id in self.tmux_sids
+        if not has_tmux or not self.tmux_pane_cache.get(s.id):
+            if s.first_msg_long:
+                lines.append(("", 0))
+                lines.append(("  First Message:",
+                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                for wl in self._word_wrap(s.first_msg_long, w - 8):
+                    lines.append((f"    {wl}", curses.color_pair(CP_NORMAL)))
+            if s.summaries:
+                lines.append(("", 0))
+                lines.append(("  Topics:",
+                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                for sm in s.summaries[-6:]:
+                    tl = sm[:w - 10]
+                    lines.append((f"    • {tl}", curses.color_pair(CP_NORMAL)))
+            elif not s.first_msg_long:
+                lines.append(("  (empty session — no messages yet)",
+                               curses.color_pair(CP_DIM) | curses.A_DIM))
+
+        self._info_lines_count = len(lines)
+
+        # Apply scroll and render
+        scrolled = lines[self.detail_scroll:]
+        for i, (text, attr) in enumerate(scrolled[:h]):
+            self._safe(sy + i, 0, text[:w - 1], attr)
+
+        # Scroll indicators
+        if self.detail_scroll > 0:
+            self._safe(sy, w - 3, " ▲ ",
+                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        if self.detail_scroll + h < len(lines):
+            self._safe(sy + h - 1, w - 3, " ▼ ",
+                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+
+        # Focus indicator on first row
+        if focused:
+            self._safe(sy, 0, "◆", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+
+    def _draw_tmux_pane(self, sy: int, h: int, w: int):
+        """Bottom pane: live tmux output."""
+        focused = self.detail_focus == "tmux"
+
+        if not self.filtered:
+            return
+
+        s = self.filtered[self.cur]
+        lines: List[Tuple[str, int]] = []
+        has_tmux = s.id in self.tmux_sids
+
         if has_tmux:
-            # Live output from tmux pane
             tmux_name = self.tmux_sids[s.id]
             captured = self._capture_tmux_pane(s.id, tmux_name)
             if captured:
@@ -1461,40 +1529,28 @@ class CCSApp:
             else:
                 lines.append(("  (tmux session active, no output yet)",
                                curses.color_pair(CP_DIM) | curses.A_DIM))
+        else:
+            lines.append(("  (no active tmux session)",
+                           curses.color_pair(CP_DIM) | curses.A_DIM))
 
-        # Always show first message and topics (even with tmux, as fallback content)
-        if not has_tmux or not self.tmux_pane_cache.get(s.id):
-            if s.first_msg_long:
-                lines.append(("  First Message:",
-                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
-                for wl in self._word_wrap(s.first_msg_long, w - 8):
-                    lines.append((f"    {wl}", curses.color_pair(CP_NORMAL)))
-                lines.append(("", 0))
-            if s.summaries:
-                lines.append(("  Topics:",
-                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
-                for sm in s.summaries[-6:]:
-                    tl = sm[:w - 10]
-                    lines.append((f"    • {tl}", curses.color_pair(CP_NORMAL)))
-            elif not s.first_msg_long:
-                lines.append(("  (empty session — no messages yet)",
-                               curses.color_pair(CP_DIM) | curses.A_DIM))
-
-        # Track total lines for scroll bounds
-        self._detail_lines_count = len(lines)
+        self._tmux_lines_count = len(lines)
 
         # Apply scroll and render
-        scrolled = lines[self.detail_scroll:]
+        scrolled = lines[self.tmux_scroll:]
         for i, (text, attr) in enumerate(scrolled[:h]):
             self._safe(sy + i, 0, text[:w - 1], attr)
 
         # Scroll indicators
-        if self.detail_scroll > 0:
+        if self.tmux_scroll > 0:
             self._safe(sy, w - 3, " ▲ ",
                        curses.color_pair(CP_ACCENT) | curses.A_BOLD)
-        if self.detail_scroll + h < len(lines):
+        if self.tmux_scroll + h < len(lines):
             self._safe(sy + h - 1, w - 3, " ▼ ",
                        curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+
+        # Focus indicator
+        if focused:
+            self._safe(sy, 0, "◆", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
 
     def _draw_help_overlay(self, h: int, w: int):
         """Draw a centered help box over the main UI."""
@@ -1537,11 +1593,11 @@ class CCSApp:
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    → / l          Session View", 0),
+            ("    → / l          Session View (Info + Tmux panes)", 0),
             ("    ← / h          Sessions", 0),
-            ("    ↑/↓            Scroll (in Session View)", 0),
-            ("    Shift+↑/↓      Fast scroll (in Session View)", 0),
-            ("    j / k          Switch session (in Session View)", 0),
+            ("    Tab            Switch focus between Info and Tmux panes", 0),
+            ("    ↑/↓            Scroll focused pane", 0),
+            ("    Shift+↑/↓      Fast scroll focused pane", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
@@ -2291,6 +2347,8 @@ class CCSApp:
             if self.view == "sessions":
                 self.view = "detail"
                 self.detail_scroll = 0
+                self.tmux_scroll = 0
+                self.detail_focus = "info"
             return None
         elif k in (curses.KEY_LEFT, ord("h")):
             if self.view == "detail":
@@ -2299,34 +2357,64 @@ class CCSApp:
 
         _nav_handled = False
         if self.view == "detail":
-            # In detail view: arrows scroll detail, j/k change session
-            if k == curses.KEY_UP:
-                self.detail_scroll = max(0, self.detail_scroll - 1)
+            # Tab switches focus between Info and Tmux panes
+            if k == 9:  # Tab
+                self.detail_focus = "tmux" if self.detail_focus == "info" else "info"
+                _nav_handled = True
+            # Scroll the focused pane
+            elif k == curses.KEY_UP:
+                if self.detail_focus == "info":
+                    self.detail_scroll = max(0, self.detail_scroll - 1)
+                else:
+                    self.tmux_scroll = max(0, self.tmux_scroll - 1)
                 _nav_handled = True
             elif k == curses.KEY_DOWN:
-                max_scroll = max(0, self._detail_lines_count - 3)
-                self.detail_scroll = min(max_scroll, self.detail_scroll + 1)
+                if self.detail_focus == "info":
+                    mx = max(0, self._info_lines_count - 3)
+                    self.detail_scroll = min(mx, self.detail_scroll + 1)
+                else:
+                    mx = max(0, self._tmux_lines_count - 3)
+                    self.tmux_scroll = min(mx, self.tmux_scroll + 1)
                 _nav_handled = True
             elif k == curses.KEY_SR:  # Shift+Up
-                self.detail_scroll = max(0, self.detail_scroll - 10)
+                if self.detail_focus == "info":
+                    self.detail_scroll = max(0, self.detail_scroll - 10)
+                else:
+                    self.tmux_scroll = max(0, self.tmux_scroll - 10)
                 _nav_handled = True
             elif k == curses.KEY_SF:  # Shift+Down
-                max_scroll = max(0, self._detail_lines_count - 3)
-                self.detail_scroll = min(max_scroll, self.detail_scroll + 10)
+                if self.detail_focus == "info":
+                    mx = max(0, self._info_lines_count - 3)
+                    self.detail_scroll = min(mx, self.detail_scroll + 10)
+                else:
+                    mx = max(0, self._tmux_lines_count - 3)
+                    self.tmux_scroll = min(mx, self.tmux_scroll + 10)
                 _nav_handled = True
             elif k == curses.KEY_PPAGE:
-                self.detail_scroll = max(0, self.detail_scroll - 20)
+                if self.detail_focus == "info":
+                    self.detail_scroll = max(0, self.detail_scroll - 20)
+                else:
+                    self.tmux_scroll = max(0, self.tmux_scroll - 20)
                 _nav_handled = True
             elif k == curses.KEY_NPAGE:
-                max_scroll = max(0, self._detail_lines_count - 3)
-                self.detail_scroll = min(max_scroll, self.detail_scroll + 20)
+                if self.detail_focus == "info":
+                    mx = max(0, self._info_lines_count - 3)
+                    self.detail_scroll = min(mx, self.detail_scroll + 20)
+                else:
+                    mx = max(0, self._tmux_lines_count - 3)
+                    self.tmux_scroll = min(mx, self.tmux_scroll + 20)
                 _nav_handled = True
             elif k in (curses.KEY_HOME, ord("g")):
-                self.detail_scroll = 0
+                if self.detail_focus == "info":
+                    self.detail_scroll = 0
+                else:
+                    self.tmux_scroll = 0
                 _nav_handled = True
             elif k == ord("G"):
-                max_scroll = max(0, self._detail_lines_count - 3)
-                self.detail_scroll = max_scroll
+                if self.detail_focus == "info":
+                    self.detail_scroll = max(0, self._info_lines_count - 3)
+                else:
+                    self.tmux_scroll = max(0, self._tmux_lines_count - 3)
                 _nav_handled = True
         else:
             # Sessions view: normal navigation
