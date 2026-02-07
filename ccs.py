@@ -3014,9 +3014,12 @@ class CCSApp(App):
         changed = False
         for sid in gone_sids:
             if sid in ephemeral_ids:
-                s = next((s for s in self.sessions if s.id == sid), None)
-                if s:
-                    self.mgr.delete(s)
+                # Delete .jsonl file directly
+                for f in glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
                 self._cleanup_session_metadata(sid)
                 ephemeral_ids.discard(sid)
                 changed = True
@@ -3259,10 +3262,12 @@ class CCSApp(App):
             if tmux_alive:
                 subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
             self.mgr.tmux_unregister(tmux_name)
-            if has_session:
-                s = next((s for s in self.sessions if s.id == session_id), None)
-                if s:
-                    self.mgr.delete(s)
+            # Delete .jsonl file directly (self.sessions may be stale)
+            for f in glob.glob(str(PROJECTS_DIR / "*" / f"{session_id}.jsonl")):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
             self._cleanup_session_metadata(session_id)
             self._remove_ephemeral_id(session_id)
             self._set_status("Ephemeral session cleaned up")
