@@ -2722,7 +2722,6 @@ class CCSApp(App):
         self._last_click_time = 0.0
         self._last_click_idx = -1
         self._last_header_click_time = 0.0
-        self._ctrl_c_time = 0.0
 
     def compose(self) -> ComposeResult:
         yield HeaderBox(id="header")
@@ -3423,26 +3422,18 @@ class CCSApp(App):
 
     def on_key(self, event) -> None:
         """Central key handler — mirrors the curses _handle_input dispatch."""
-        key = event.key
-
-        # Ctrl-C twice or Ctrl-C + c = immediate quit
-        if (time.monotonic() - self._ctrl_c_time) < 1.0 and key in ("c", "ctrl+c"):
-            self._ctrl_c_time = 0.0
-            self.exit()
-            return
-
         # Don't handle keys when a modal screen is active
         if isinstance(self.screen, ModalScreen):
             return
 
+        key = event.key
         event.stop()
         event.prevent_default()
         sl = self.query_one("#session-list", SessionListWidget)
 
         # ── Global keys ──────────────────────────────────────────
         if key == "ctrl+c":
-            self._ctrl_c_time = time.monotonic()
-            self._set_status("Press Ctrl-C or c again to quit")
+            self.action_quit_confirm()
             return
         if key in ("question_mark", "?"):
             self.action_help()
