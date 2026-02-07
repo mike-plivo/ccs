@@ -3219,33 +3219,10 @@ class CCSApp(App):
             if idx == self._last_click_idx and (now - self._last_click_time) < 0.4:
                 self._last_click_time = 0.0
                 self._last_click_idx = -1
-                self.action_launch()
+                self._show_session_context_menu()
             else:
                 self._last_click_time = now
                 self._last_click_idx = idx
-
-    def on_click(self, event) -> None:
-        """Handle right-click context menus."""
-        if event.button != 3:
-            return
-        if isinstance(self.screen, ModalScreen):
-            return
-        event.stop()
-        event.prevent_default()
-
-        # Check if click is on header area
-        try:
-            header = self.query_one("#header", HeaderBox)
-            header_region = header.region
-            if header_region.contains(event.screen_x, event.screen_y):
-                self._show_header_context_menu()
-                return
-        except Exception:
-            pass
-
-        # Check if click is on session list
-        if self.view == "sessions":
-            self._show_session_context_menu()
 
     def _show_session_context_menu(self):
         s = self._current_session()
@@ -3253,7 +3230,7 @@ class CCSApp(App):
             return
         label = s.tag or s.label[:30] or s.id[:12]
         items = [
-            ("Resume Session", "launch"),
+            ("Launch Session", "launch"),
             ("Toggle Pin", "pin"),
             ("Set Tag", "tag"),
             ("Change CWD", "cwd"),
@@ -3278,23 +3255,6 @@ class CCSApp(App):
                 self.action_delete_session()
 
         self.push_screen(ContextMenuModal(label, items), on_result)
-
-    def _show_header_context_menu(self):
-        items = [
-            ("New Session", "new"),
-            ("New Ephemeral Session", "ephemeral"),
-            ("Delete All Empty", "delete_empty"),
-        ]
-
-        def on_result(action):
-            if action == "new":
-                self.action_new_session()
-            elif action == "ephemeral":
-                self.action_ephemeral_session()
-            elif action == "delete_empty":
-                self.action_delete_empty()
-
-        self.push_screen(ContextMenuModal("Actions", items), on_result)
 
     def on_key(self, event) -> None:
         """Central key handler — mirrors the curses _handle_input dispatch."""
