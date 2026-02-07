@@ -1079,6 +1079,21 @@ def _tmux_state_style(app, state: Optional[str], is_idle: bool) -> Style:
     return Style(color=tc("tmux-thinking", "#00cc00"), bold=True)
 
 
+def _tmux_state_label(state: Optional[str], is_idle: bool) -> str:
+    """Short label for tmux state shown after the icon."""
+    if is_idle:
+        return "idle"
+    if state == "approval":
+        return "APPROVE"
+    if state == "input":
+        return "input"
+    if state == "done":
+        return "done"
+    if state == "thinking":
+        return "working"
+    return ""
+
+
 def _age_style(app, mtime: float) -> Style:
     """Return a Rich Style based on session age."""
     tc = lambda role, fb="": _tc(app, role, fb)
@@ -1112,21 +1127,30 @@ def build_session_row(
     else:
         text.append("   ")
 
-    # Pin / tmux icons (3 display-cols)
+    # Pin / tmux icons + state label
     pin_style = Style(color=tc("pin-color", "#ffff00"), bold=True)
     tmux_ch = "\U0001f4a4" if is_idle else "\u26a1"
     tmux_sty = _tmux_state_style(app, tmux_state, is_idle)
+    tmux_label = _tmux_state_label(tmux_state, is_idle) if has_tmux else ""
+    # Total tmux column width: icon(1-2) + label + space
+    tmux_col_w = 10  # fixed column width for alignment
 
     if s.pinned and has_tmux:
         text.append("\u2605", style=pin_style)
-        text.append(tmux_ch, style=tmux_sty)
+        cell = tmux_ch + tmux_label
+        text.append(cell, style=tmux_sty)
+        pad = max(1, tmux_col_w - len(cell) - 1)
+        text.append(" " * pad)
     elif s.pinned:
-        text.append("\u2605  ", style=pin_style)
+        text.append("\u2605", style=pin_style)
+        text.append(" " * tmux_col_w)
     elif has_tmux:
-        text.append(tmux_ch, style=tmux_sty)
-        text.append(" ")
+        cell = tmux_ch + tmux_label
+        text.append(cell, style=tmux_sty)
+        pad = max(1, tmux_col_w + 1 - len(cell))
+        text.append(" " * pad)
     else:
-        text.append("   ")
+        text.append(" " * (tmux_col_w + 1))
 
     # Tag column
     if s.tag:
@@ -1290,29 +1314,26 @@ def _append_session_meta(
     # Tmux status
     if s.id in tmux_sids:
         tmux_name = tmux_sids[s.id]
-        if s.id in tmux_idle:
-            suffix = " (K to kill)" if detail else ""
-            text.append(
-                f"  Tmux:    \U0001f4a4 {tmux_name} idle{suffix}\n",
-                style=Style(color=tc("tmux-idle", "#666666")),
-            )
+        is_idle = s.id in tmux_idle
+        state = tmux_claude_state.get(s.id, "unknown")
+        state_sty = _tmux_state_style(app, state, is_idle)
+        state_labels = {
+            "thinking": "working...",
+            "input": "waiting for input",
+            "approval": "\u26a0 WAITING FOR APPROVAL",
+            "done": "session ended",
+            "unknown": "active",
+        }
+        if is_idle:
+            icon = "\U0001f4a4"
+            label = "idle"
         else:
-            if detail:
-                suffix = " (K to kill)"
-            else:
-                state = tmux_claude_state.get(s.id, "unknown")
-                state_labels = {
-                    "thinking": "thinking...",
-                    "input": "waiting for input",
-                    "approval": "waiting for approval",
-                    "done": "session ended",
-                    "unknown": "active",
-                }
-                suffix = f" ({state_labels.get(state, 'active')})"
-            text.append(
-                f"  Tmux:    \u26a1 {tmux_name}{suffix}\n",
-                style=Style(color=tc("status-color", "#00ff00"), bold=True),
-            )
+            icon = "\u26a1"
+            label = state_labels.get(state, "active")
+        kill_hint = "  (K to kill)" if detail else ""
+        text.append(f"  Tmux:    {icon} {tmux_name} — ", style=Style(color=tc("dim-color", "#888888")))
+        text.append(f"{label}", style=state_sty)
+        text.append(f"{kill_hint}\n", style=Style(color=tc("dim-color", "#888888")))
 
     # Git info
     cwd = s.cwd
