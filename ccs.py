@@ -1004,13 +1004,17 @@ class CCSApp:
             self._draw_preview(hdr_h + list_h + sep_h, preview_h, w)
         else:  # detail view — two panes: Session Info (top) + Tmux View (bottom)
             content_h = h - hdr_h - ftr_h
-            info_h = min(content_h // 2, 14)
-            sep2_h = 1
-            tmux_h = content_h - info_h - sep2_h
+            sep_info_h = 1  # "Session Info" separator
+            sep_tmux_h = 1  # "Tmux View" separator
+            usable = content_h - sep_info_h - sep_tmux_h
+            info_h = min(usable // 2, 13)
+            tmux_h = usable - info_h
+            y0 = hdr_h
             self._draw_header(w)
-            self._draw_info_pane(hdr_h, info_h, w)
-            self._draw_detail_separator(hdr_h + info_h, w)
-            self._draw_tmux_pane(hdr_h + info_h + sep2_h, tmux_h, w)
+            self._draw_pane_separator(y0, w, " Session Info ", self.detail_focus == "info")
+            self._draw_info_pane(y0 + sep_info_h, info_h, w)
+            self._draw_pane_separator(y0 + sep_info_h + info_h, w, " Tmux View ", self.detail_focus == "tmux")
+            self._draw_tmux_pane(y0 + sep_info_h + info_h + sep_tmux_h, tmux_h, w)
 
         self._draw_footer(h - ftr_h, w)
 
@@ -1396,23 +1400,19 @@ class CCSApp:
         for i, (text, attr) in enumerate(lines[:h]):
             self._safe(sy + i, 0, text[:w - 1], attr)
 
-    def _draw_detail_separator(self, y: int, w: int):
-        """Draw separator between Session Info and Tmux View panes."""
+    def _draw_pane_separator(self, y: int, w: int, label: str, focused: bool):
+        """Draw a labeled separator line for a pane."""
         bdr = curses.color_pair(CP_BORDER)
         self._safe(y, 0, "├", bdr)
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
-        label = " Tmux View "
-        focus_attr = curses.color_pair(CP_BORDER) | curses.A_BOLD
-        self._safe(y, 2, label, focus_attr)
-        # Show which pane is focused
-        if self.detail_focus == "tmux":
-            self._safe(y, w - 5, " ◆ ", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        if focused:
+            self._safe(y, 2, label, curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        else:
+            self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
 
     def _draw_info_pane(self, sy: int, h: int, w: int):
         """Top pane: session metadata, git info, first message, topics."""
-        # Focus indicator
-        focused = self.detail_focus == "info"
 
         if not self.filtered:
             self._safe(sy + 1, 3, "Select a session to preview",
@@ -1493,14 +1493,8 @@ class CCSApp:
             self._safe(sy + h - 1, w - 3, " ▼ ",
                        curses.color_pair(CP_ACCENT) | curses.A_BOLD)
 
-        # Focus indicator on first row
-        if focused:
-            self._safe(sy, 0, "◆", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
-
     def _draw_tmux_pane(self, sy: int, h: int, w: int):
         """Bottom pane: live tmux output."""
-        focused = self.detail_focus == "tmux"
-
         if not self.filtered:
             return
 
@@ -1548,9 +1542,6 @@ class CCSApp:
             self._safe(sy + h - 1, w - 3, " ▼ ",
                        curses.color_pair(CP_ACCENT) | curses.A_BOLD)
 
-        # Focus indicator
-        if focused:
-            self._safe(sy, 0, "◆", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
 
     def _draw_help_overlay(self, h: int, w: int):
         """Draw a centered help box over the main UI."""
