@@ -44,18 +44,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Container, ScrollableContainer, Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.theme import Theme
-from textual.widget import Widget
-from textual.widgets import Static, OptionList, RichLog, Input, TextArea, Button, Label
-from textual.widgets.option_list import Option
-from textual.reactive import reactive
-from textual import work, on
-from rich.text import Text
-from rich.style import Style
+try:
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.containers import Container, ScrollableContainer, Horizontal, Vertical
+    from textual.screen import ModalScreen
+    from textual.theme import Theme
+    from textual.widget import Widget
+    from textual.widgets import Static, OptionList, RichLog, Input, TextArea, Button, Label
+    from textual.widgets.option_list import Option
+    from textual.reactive import reactive
+    from textual import work, on
+    from rich.text import Text
+    from rich.style import Style
+except ImportError as e:
+    print(f"\033[31mError: Missing required dependency: {e}\033[0m")
+    print("Install with: pip install textual rich")
+    sys.exit(1)
 
 VERSION = "1.0.0"
 
@@ -2692,12 +2697,12 @@ class CCSApp(App):
         if self.view == "detail":
             header.hints = (
                 "\u2190/Esc back \u00b7 Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
-                " \u00b7 d del \u00b7 K kill"
+                " \u00b7 d del \u00b7 K kill tmux"
             )
         else:
             header.hints = (
                 "\u2191/\u2193 j/k nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
-                " \u00b7 t tag \u00b7 s sort \u00b7 ? help"
+                " \u00b7 t tag \u00b7 d del \u00b7 K kill tmux \u00b7 s sort \u00b7 ? help"
             )
 
     def _update_footer(self):
@@ -3536,7 +3541,11 @@ class CCSApp(App):
                     self._do_refresh()
 
             self.push_screen(
-                ConfirmModal("Delete", f"Delete {count} marked sessions?"),
+                ConfirmModal(
+                    "Delete",
+                    f"Delete {count} marked sessions?",
+                    "WARNING: This will permanently delete the Claude session data and cannot be recovered.",
+                ),
                 on_result,
             )
             return
@@ -3554,7 +3563,12 @@ class CCSApp(App):
                 self._do_refresh()
 
         self.push_screen(
-            ConfirmModal("Delete", f"Delete '{label}'?"), on_result
+            ConfirmModal(
+                "Delete",
+                f"Delete '{label}'?",
+                "WARNING: This will permanently delete the Claude session data and cannot be recovered.",
+            ),
+            on_result,
         )
 
     def action_delete_empty(self):
@@ -3607,7 +3621,9 @@ class CCSApp(App):
 
         self.push_screen(
             ConfirmModal(
-                "Kill Tmux", f"Kill tmux session for '{label}'?"
+                "Kill Tmux",
+                f"Kill tmux session for '{label}'?",
+                "The Claude session data is preserved and can be resumed later.",
             ),
             on_result,
         )
