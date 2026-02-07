@@ -1079,9 +1079,9 @@ class CCSApp:
                    curses.color_pair(CP_TAG) | curses.A_BOLD)
 
         if self.view == "detail":
-            normal_hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  K Kill  / Search  ? Help"
+            normal_hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del  K Kill  ? Help"
         else:
-            normal_hints = "⏎ Resume  → Detail  R Last  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help"
+            normal_hints = "⏎ Resume  → Detail  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help"
         hints_map = {
             "normal":  normal_hints,
             "search":  "Type to filter  ·  ↑/↓ Navigate  ·  ⏎ Done  ·  Esc Cancel",
@@ -1103,9 +1103,9 @@ class CCSApp:
             s = self.filtered[self.cur]
             if self.view == "detail":
                 if s.id in self.tmux_sids:
-                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  i Send to tmux  K Kill  ⏎ Attach  ? Help"
+                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Attach  i Send  K Kill  p Pin  t Tag  d Del  ? Help"
                 else:
-                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  ? Help"
+                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1580,8 +1580,11 @@ class CCSApp:
                 ("    p              Toggle pin", 0),
                 ("    t              Set / rename tag", 0),
                 ("    T              Remove tag", 0),
+                ("    c              Change session CWD", 0),
+                ("    d              Delete session", 0),
                 ("", 0),
                 ("  Other", hdr),
+                ("    P              Profile picker / manager", 0),
                 ("    H              Cycle theme", 0),
                 ("    /              Search / filter sessions", 0),
                 ("    r              Refresh session list", 0),
@@ -1607,7 +1610,6 @@ class CCSApp:
                 ("", 0),
                 ("  Actions", hdr),
                 ("    Enter          Resume with active profile", 0),
-                ("    R              Quick resume most recent", 0),
                 ("    P              Profile picker / manager", 0),
                 ("    p              Toggle pin (bulk if marked)", 0),
                 ("    t              Set / rename tag", 0),
@@ -2480,192 +2482,223 @@ class CCSApp:
         if _nav_handled:
             return None
 
-        # Actions
-        if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
-            if self.filtered:
-                s = self.filtered[self.cur]
-                profiles = self.mgr.load_profiles()
-                active = next(
-                    (p for p in profiles if p.get("name") == self.active_profile_name),
-                    None,
-                )
-                extra = self._build_args_from_profile(active) if active else []
-                self.launch_session = s
-                self.launch_extra = extra
-                self.confirm_sel = 0 if HAS_TMUX else 1  # 0=Tmux, 1=Terminal
-                self.mode = "launch"
-        elif k == ord(" "):
-            # Toggle mark
-            if self.filtered:
-                s = self.filtered[self.cur]
-                if s.id in self.marked:
-                    self.marked.discard(s.id)
-                else:
-                    self.marked.add(s.id)
-                if self.cur < len(self.filtered) - 1:
-                    self.cur += 1
-        elif k == ord("u"):
-            if self.marked:
-                self.marked.clear()
-                self._set_status("Cleared all marks")
-        elif k == ord("p"):
-            if self.marked:
-                for sid in self.marked:
-                    self.mgr.toggle_pin(sid)
-                self._set_status(f"Toggled pin for {len(self.marked)} session(s)")
-                self.marked.clear()
-                self._refresh()
-            elif self.filtered:
-                s = self.filtered[self.cur]
-                pinned = self.mgr.toggle_pin(s.id)
-                icon = "★ Pinned" if pinned else "Unpinned"
-                self._set_status(f"{icon}: {s.tag or s.id[:12]}")
-                self._refresh()
-        elif k == ord("t"):
-            if self.filtered:
-                s = self.filtered[self.cur]
-                self.mode = "tag"
-                self.ibuf = s.tag if s.tag else ""
-                self.ibuf_cursor = len(self.ibuf)
-        elif k == ord("T"):
-            if self.filtered:
-                s = self.filtered[self.cur]
-                if s.tag:
-                    self.mgr.remove_tag(s.id)
-                    self._set_status(f"Removed tag from: {s.id[:12]}")
+        # ── Session View actions ──
+        if self.view == "detail":
+            if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    profiles = self.mgr.load_profiles()
+                    active = next(
+                        (p for p in profiles if p.get("name") == self.active_profile_name),
+                        None,
+                    )
+                    extra = self._build_args_from_profile(active) if active else []
+                    self.launch_session = s
+                    self.launch_extra = extra
+                    self.confirm_sel = 0 if HAS_TMUX else 1
+                    self.mode = "launch"
+            elif k == ord("p"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    pinned = self.mgr.toggle_pin(s.id)
+                    icon = "★ Pinned" if pinned else "Unpinned"
+                    self._set_status(f"{icon}: {s.tag or s.id[:12]}")
                     self._refresh()
-                else:
-                    self._set_status("No tag to remove")
-        elif k == ord("c"):
-            if self.filtered:
-                s = self.filtered[self.cur]
-                self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
-                self.mode = "chdir"
-                self.ibuf = s.cwd or str(Path.home())
-                self.ibuf_cursor = len(self.ibuf)
-        elif k == ord("d"):
-            if self.marked:
-                self.delete_label = f"{len(self.marked)} marked sessions"
-                self.confirm_sel = 0
-                self.mode = "delete"
-            elif self.filtered:
-                s = self.filtered[self.cur]
-                self.delete_label = s.tag or s.label[:40]
-                self.confirm_sel = 0
-                self.mode = "delete"
-        elif k == ord("D"):
-            empty = [s for s in self.sessions if not s.first_msg and not s.summary]
-            if empty:
-                self.empty_count = len(empty)
-                self.confirm_sel = 0
-                self.mode = "delete_empty"
-            else:
-                self._set_status("No empty sessions to delete")
-        elif k == ord("n"):
-            self.mode = "new"
-            self.ibuf = ""
-            self.ibuf_cursor = 0
-        elif k == ord("e"):
-            use_tmux = self._get_use_tmux()
-            if use_tmux:
-                if not HAS_TMUX:
-                    self._set_status("tmux is not installed — install it or disable in profile")
-                    return None
-                profiles = self.mgr.load_profiles()
-                active = next(
-                    (p for p in profiles if p.get("name") == self.active_profile_name),
-                    None,
-                )
-                extra = self._build_args_from_profile(active) if active else []
-                self._tmux_launch_ephemeral(extra)
-                self._refresh()
-            else:
-                self.exit_action = ("tmp",)
-                return "action"
-        elif k == ord("K"):
-            # Kill tmux session for selected session
-            if self.filtered and HAS_TMUX:
-                s = self.filtered[self.cur]
-                tmux_name = TMUX_PREFIX + s.id[:8]
-                alive = self.mgr.tmux_sessions()
-                if tmux_name in alive:
-                    subprocess.run(["tmux", "kill-session", "-t", tmux_name],
-                                   capture_output=True)
-                    self.mgr.tmux_unregister(tmux_name)
-                    self.tmux_sids.pop(s.id, None)
-                    self._set_status(f"Killed tmux: {s.tag or s.id[:12]}")
-                else:
-                    self._set_status("No active tmux session for this session")
-            elif not HAS_TMUX:
-                self._set_status("tmux is not installed")
-        elif k == ord("i"):
-            # Send input to tmux session (only in detail/session view)
-            if self.view != "detail":
-                return None
-            if self.filtered and HAS_TMUX:
-                s = self.filtered[self.cur]
-                if s.id in self.tmux_sids:
-                    self.input_target_sid = s.id
-                    self.input_target_tmux = self.tmux_sids[s.id]
-                    self.mode = "input"
-                    self.input_lines = [""]  # multiline buffer
-                    self.input_cursor_line = 0
-                    self.input_cursor_col = 0
-                else:
-                    self._set_status("No active tmux session")
-            elif not HAS_TMUX:
-                self._set_status("tmux is not installed")
-        elif k == ord("/"):
-            self.mode = "search"
-            self.query_cursor = len(self.query)
-        elif k == ord("R"):
-            # Quick resume most recent session
-            if self.sessions:
-                most_recent = max(self.sessions, key=lambda s: s.mtime)
-                profiles = self.mgr.load_profiles()
-                active = next(
-                    (p for p in profiles if p.get("name") == self.active_profile_name),
-                    None,
-                )
-                extra = self._build_args_from_profile(active) if active else []
-                use_tmux = active.get("tmux", True) if active else True
+            elif k == ord("t"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    self.mode = "tag"
+                    self.ibuf = s.tag if s.tag else ""
+                    self.ibuf_cursor = len(self.ibuf)
+            elif k == ord("T"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    if s.tag:
+                        self.mgr.remove_tag(s.id)
+                        self._set_status(f"Removed tag from: {s.id[:12]}")
+                        self._refresh()
+                    else:
+                        self._set_status("No tag to remove")
+            elif k == ord("c"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
+                    self.mode = "chdir"
+                    self.ibuf = s.cwd or str(Path.home())
+                    self.ibuf_cursor = len(self.ibuf)
+            elif k == ord("d"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    self.delete_label = s.tag or s.label[:40]
+                    self.confirm_sel = 0
+                    self.mode = "delete"
+            elif k == ord("K"):
+                if self.filtered and HAS_TMUX:
+                    s = self.filtered[self.cur]
+                    tmux_name = TMUX_PREFIX + s.id[:8]
+                    alive = self.mgr.tmux_sessions()
+                    if tmux_name in alive:
+                        subprocess.run(["tmux", "kill-session", "-t", tmux_name],
+                                       capture_output=True)
+                        self.mgr.tmux_unregister(tmux_name)
+                        self.tmux_sids.pop(s.id, None)
+                        self._set_status(f"Killed tmux: {s.tag or s.id[:12]}")
+                    else:
+                        self._set_status("No active tmux session for this session")
+                elif not HAS_TMUX:
+                    self._set_status("tmux is not installed")
+            elif k == ord("i"):
+                if self.filtered and HAS_TMUX:
+                    s = self.filtered[self.cur]
+                    if s.id in self.tmux_sids:
+                        self.input_target_sid = s.id
+                        self.input_target_tmux = self.tmux_sids[s.id]
+                        self.mode = "input"
+                        self.input_lines = [""]
+                        self.input_cursor_line = 0
+                        self.input_cursor_col = 0
+                    else:
+                        self._set_status("No active tmux session")
+                elif not HAS_TMUX:
+                    self._set_status("tmux is not installed")
+            elif k == ord("/"):
+                self.mode = "search"
+                self.query_cursor = len(self.query)
+            elif k in (ord("r"), curses.KEY_F5):
+                self._refresh(force=True)
+                self._set_status("Refreshed session list")
 
+        # ── Sessions List actions ──
+        else:
+            if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    profiles = self.mgr.load_profiles()
+                    active = next(
+                        (p for p in profiles if p.get("name") == self.active_profile_name),
+                        None,
+                    )
+                    extra = self._build_args_from_profile(active) if active else []
+                    self.launch_session = s
+                    self.launch_extra = extra
+                    self.confirm_sel = 0 if HAS_TMUX else 1
+                    self.mode = "launch"
+            elif k == ord(" "):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    if s.id in self.marked:
+                        self.marked.discard(s.id)
+                    else:
+                        self.marked.add(s.id)
+                    if self.cur < len(self.filtered) - 1:
+                        self.cur += 1
+            elif k == ord("u"):
+                if self.marked:
+                    self.marked.clear()
+                    self._set_status("Cleared all marks")
+            elif k == ord("p"):
+                if self.marked:
+                    for sid in self.marked:
+                        self.mgr.toggle_pin(sid)
+                    self._set_status(f"Toggled pin for {len(self.marked)} session(s)")
+                    self.marked.clear()
+                    self._refresh()
+                elif self.filtered:
+                    s = self.filtered[self.cur]
+                    pinned = self.mgr.toggle_pin(s.id)
+                    icon = "★ Pinned" if pinned else "Unpinned"
+                    self._set_status(f"{icon}: {s.tag or s.id[:12]}")
+                    self._refresh()
+            elif k == ord("t"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    self.mode = "tag"
+                    self.ibuf = s.tag if s.tag else ""
+                    self.ibuf_cursor = len(self.ibuf)
+            elif k == ord("T"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    if s.tag:
+                        self.mgr.remove_tag(s.id)
+                        self._set_status(f"Removed tag from: {s.id[:12]}")
+                        self._refresh()
+                    else:
+                        self._set_status("No tag to remove")
+            elif k == ord("c"):
+                if self.filtered:
+                    s = self.filtered[self.cur]
+                    self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
+                    self.mode = "chdir"
+                    self.ibuf = s.cwd or str(Path.home())
+                    self.ibuf_cursor = len(self.ibuf)
+            elif k == ord("d"):
+                if self.marked:
+                    self.delete_label = f"{len(self.marked)} marked sessions"
+                    self.confirm_sel = 0
+                    self.mode = "delete"
+                elif self.filtered:
+                    s = self.filtered[self.cur]
+                    self.delete_label = s.tag or s.label[:40]
+                    self.confirm_sel = 0
+                    self.mode = "delete"
+            elif k == ord("D"):
+                empty = [s for s in self.sessions if not s.first_msg and not s.summary]
+                if empty:
+                    self.empty_count = len(empty)
+                    self.confirm_sel = 0
+                    self.mode = "delete_empty"
+                else:
+                    self._set_status("No empty sessions to delete")
+            elif k == ord("n"):
+                self.mode = "new"
+                self.ibuf = ""
+                self.ibuf_cursor = 0
+            elif k == ord("e"):
+                use_tmux = self._get_use_tmux()
                 if use_tmux:
                     if not HAS_TMUX:
                         self._set_status("tmux is not installed — install it or disable in profile")
                         return None
-                    if most_recent.cwd and not os.path.isdir(most_recent.cwd):
-                        self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
-                        self.mode = "chdir"
-                        self.ibuf = str(Path.home())
-                        self.ibuf_cursor = len(self.ibuf)
-                        self._set_status(f"Directory missing: {most_recent.cwd}")
-                    else:
-                        self._tmux_launch(most_recent, extra)
-                        self._refresh()
+                    profiles = self.mgr.load_profiles()
+                    active = next(
+                        (p for p in profiles if p.get("name") == self.active_profile_name),
+                        None,
+                    )
+                    extra = self._build_args_from_profile(active) if active else []
+                    self._tmux_launch_ephemeral(extra)
+                    self._refresh()
                 else:
-                    if most_recent.cwd and not os.path.isdir(most_recent.cwd):
-                        self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
-                        self.mode = "chdir"
-                        self.ibuf = str(Path.home())
-                        self.ibuf_cursor = len(self.ibuf)
-                        self._set_status(f"Directory missing: {most_recent.cwd}")
+                    self.exit_action = ("tmp",)
+                    return "action"
+            elif k == ord("K"):
+                if self.filtered and HAS_TMUX:
+                    s = self.filtered[self.cur]
+                    tmux_name = TMUX_PREFIX + s.id[:8]
+                    alive = self.mgr.tmux_sessions()
+                    if tmux_name in alive:
+                        subprocess.run(["tmux", "kill-session", "-t", tmux_name],
+                                       capture_output=True)
+                        self.mgr.tmux_unregister(tmux_name)
+                        self.tmux_sids.pop(s.id, None)
+                        self._set_status(f"Killed tmux: {s.tag or s.id[:12]}")
                     else:
-                        self.exit_action = ("resume", most_recent.id, most_recent.cwd, extra)
-                        return "action"
-            else:
-                self._set_status("No sessions to resume")
-        elif k == ord("s"):
-            modes = ["date", "name", "project", "tag", "messages", "tmux"]
-            idx = modes.index(self.sort_mode) if self.sort_mode in modes else 0
-            self.sort_mode = modes[(idx + 1) % len(modes)]
-            self._refresh()
-            labels = {"date": "Date", "name": "Name", "project": "Project",
-                      "tag": "Tag", "messages": "Messages", "tmux": "Tmux"}
-            self._set_status(f"Sort: {labels[self.sort_mode]}")
-        elif k in (ord("r"), curses.KEY_F5):
-            self._refresh(force=True)
-            self._set_status("Refreshed session list")
+                        self._set_status("No active tmux session for this session")
+                elif not HAS_TMUX:
+                    self._set_status("tmux is not installed")
+            elif k == ord("/"):
+                self.mode = "search"
+                self.query_cursor = len(self.query)
+            elif k == ord("s"):
+                modes = ["date", "name", "project", "tag", "messages", "tmux"]
+                idx = modes.index(self.sort_mode) if self.sort_mode in modes else 0
+                self.sort_mode = modes[(idx + 1) % len(modes)]
+                self._refresh()
+                labels = {"date": "Date", "name": "Name", "project": "Project",
+                          "tag": "Tag", "messages": "Messages", "tmux": "Tmux"}
+                self._set_status(f"Sort: {labels[self.sort_mode]}")
+            elif k in (ord("r"), curses.KEY_F5):
+                self._refresh(force=True)
+                self._set_status("Refreshed session list")
 
         return None
 
@@ -2719,6 +2752,8 @@ class CCSApp:
                 self.mgr.delete(s)
                 self._set_status(f"Deleted: {s.tag or s.id[:12]}")
                 self._refresh()
+            if self.view == "detail":
+                self.view = "sessions"
             self.mode = "normal"
         elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
             self.confirm_sel = 1 - self.confirm_sel
