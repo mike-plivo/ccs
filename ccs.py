@@ -1082,7 +1082,7 @@ class CCSApp:
             "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
             "profile_edit": "↑↓ Navigate  Type to edit  Space Toggle  Tab Expert/Structured  ⏎ Save  Esc Back",
             "help":    "Press any key to close",
-            "input":   "Type message  ·  ⏎ Send  ·  Esc Cancel",
+            "input":   "Type message  ·  Ctrl+⏎ Send  ·  ⏎ New line  ·  Esc Cancel",
             "launch":  "←/→ Select  ·  ⏎ Launch  ·  Esc Cancel",
         }
         hint_key = self.mode
@@ -1526,7 +1526,7 @@ class CCSApp:
             ("", 0),
             ("  Tmux (requires tmux)", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
-            ("    i              Send text to tmux (Session View)", 0),
+            ("    i              Send text to tmux (Session View, Ctrl+⏎ send)", 0),
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
@@ -1698,7 +1698,7 @@ class CCSApp:
                     self._safe(y, sx + 3, display, normal)
 
         # Hints row at bottom of interior
-        hints = "⏎ Send  ·  Ctrl+J New line  ·  ↑↓ Lines  ·  Esc Cancel"
+        hints = "Ctrl+⏎ Send  ·  ⏎ New line  ·  ↑↓ Lines  ·  Esc Cancel"
         hints_y = sy + box_h - 2  # last interior row
         self._safe(hints_y, sx + 2, hints[:box_w - 4], dim)
 
@@ -3022,7 +3022,11 @@ class CCSApp:
             self.input_target_sid = None
             self.input_target_tmux = None
         elif k in (curses.KEY_ENTER, 13):
-            # Enter — send the text
+            # Enter — new line
+            self.input_lines.insert(self.input_cursor_line + 1, "")
+            self.input_cursor_line += 1
+        elif k == 10:
+            # Ctrl+Enter / Ctrl+J — send the text
             text = "\n".join(self.input_lines)
             if text.strip() and self.input_target_tmux:
                 self._tmux_send_text(self.input_target_tmux, text)
@@ -3032,10 +3036,6 @@ class CCSApp:
             self.mode = "normal"
             self.input_target_sid = None
             self.input_target_tmux = None
-        elif k == 10:
-            # Ctrl+J / Line feed — new line
-            self.input_lines.insert(self.input_cursor_line + 1, "")
-            self.input_cursor_line += 1
         elif k in (curses.KEY_BACKSPACE, 127, 8):
             line = self.input_lines[self.input_cursor_line]
             if line:
