@@ -1745,7 +1745,7 @@ class CCSApp:
                 ("", 0),
             ]
 
-        box_w = min(54, w - 4)
+        box_w = min(70, w - 4)
         box_h = min(len(help_lines) + 2, h - 2)
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
@@ -1792,7 +1792,9 @@ class CCSApp:
 
         content_lines = [
             ("", 0),
+            ("", 0),
             (f"  {message}", warn),
+            ("", 0),
             ("", 0),
         ]
         if detail:
@@ -1816,9 +1818,10 @@ class CCSApp:
         # Placeholder row for buttons (drawn separately)
         content_lines.append(("", 0))
         content_lines.append(("", 0))
+        content_lines.append(("", 0))
 
         max_content_w = max((len(t) + 4 for t, _ in content_lines), default=0)
-        box_w = min(max(len(message) + 6, max_content_w, len(title) + 8, 40), w - 4)
+        box_w = min(max(len(message) + 10, max_content_w, len(title) + 12, 56), w - 4)
         box_h = len(content_lines) + 2
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
@@ -1949,14 +1952,17 @@ class CCSApp:
 
         content_lines = [
             ("", 0),
+            ("", 0),
             (f"  Resume: {label}", hdr),
+            ("", 0),
             ("", 0),
             ("", 0),  # button placeholder
             ("", 0),  # cancel button row
             ("", 0),
+            ("", 0),
         ]
 
-        box_w = min(max(len(f"  Resume: {label}") + 6, 56), w - 4)
+        box_w = min(max(len(f"  Resume: {label}") + 10, 64), w - 4)
         box_h = len(content_lines) + 2
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
@@ -2879,7 +2885,7 @@ class CCSApp:
         return None
 
     def _input_delete(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
             self.confirm_sel = 1 - self.confirm_sel
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.confirm_sel == 1:
@@ -2909,7 +2915,7 @@ class CCSApp:
         return None
 
     def _input_delete_empty(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
             self.confirm_sel = 1 - self.confirm_sel
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.confirm_sel == 1:
@@ -2930,7 +2936,7 @@ class CCSApp:
         return None
 
     def _input_kill_tmux(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
             self.confirm_sel = 1 - self.confirm_sel
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.confirm_sel == 1:
@@ -3316,7 +3322,7 @@ class CCSApp:
                 break
 
     def _input_quit(self, k: int) -> Optional[str]:
-        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
             self.confirm_sel = 1 - self.confirm_sel
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.confirm_sel == 1:
@@ -3346,6 +3352,21 @@ class CCSApp:
             # Skip tmux if not installed
             if self.confirm_sel == 0 and not HAS_TMUX:
                 self.confirm_sel = 1
+        elif k in (curses.KEY_UP, ord("k")):
+            # Move between action row (0-2) and cancel row (3)
+            if self.confirm_sel == 3:
+                self.confirm_sel = 1  # go to middle action button
+                if not HAS_TMUX and self.confirm_sel == 0:
+                    self.confirm_sel = 1
+            else:
+                self.confirm_sel = 3
+        elif k in (curses.KEY_DOWN, ord("j")):
+            if self.confirm_sel <= 2:
+                self.confirm_sel = 3
+            else:
+                self.confirm_sel = 1  # go to middle action button
+                if not HAS_TMUX and self.confirm_sel == 0:
+                    self.confirm_sel = 1
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if not s or self.confirm_sel == 3:
                 self.mode = "normal"
