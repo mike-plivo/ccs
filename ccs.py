@@ -601,6 +601,12 @@ class CCSApp:
         self._tmux_lines_count = 0  # total lines in tmux pane
         self.detail_focus = "info"  # "info" | "tmux" — which pane has focus
 
+        # Geometry for mouse hit-testing (updated each draw)
+        self._geo_info_pane = (0, 0, 0, 0)   # (y, h, x, w)
+        self._geo_tmux_pane = (0, 0, 0, 0)
+        self._geo_list = (0, 0, 0, 0)
+        self._geo_overlay_btns: list = []  # [(x, y, w, h, value), ...]
+
         self.status = ""
         self.status_ttl = 0
         self.exit_action: Optional[Tuple] = None
@@ -679,23 +685,72 @@ class CCSApp:
             _, mx, my, _, bstate = curses.getmouse()
         except curses.error:
             return None
+
+        clicked = bool(bstate & curses.BUTTON1_CLICKED)
+        dbl_clicked = bool(bstate & curses.BUTTON1_DOUBLE_CLICKED)
+        scroll_up = bool(bstate & getattr(curses, "BUTTON4_PRESSED", 0))
+        scroll_down = bool(bstate & getattr(curses, "BUTTON5_PRESSED", 0))
+
+        # ── Overlay button clicks ──
+        if self.mode in ("quit", "delete", "delete_empty", "launch") and (clicked or dbl_clicked):
+            for bx, by, bw, bh, val in self._geo_overlay_btns:
+                if bx <= mx < bx + bw and by <= my < by + bh:
+                    self.confirm_sel = val
+                    return None
+            return None
+
         if self.mode != "normal":
             return None
-        h, w = self.scr.getmaxyx()
-        hdr_h = 5
-        ftr_h = 1
-        sep_h = 1
+
+        # ── Session View (detail) ──
         if self.view == "detail":
-            list_h = min(5, max(3, len(self.filtered)))
-        else:
-            preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
-            list_h = h - hdr_h - ftr_h - sep_h - preview_h
-        list_top = hdr_h
-        list_bot = list_top + list_h
-        if list_top <= my < list_bot and self.filtered:
-            row_idx = self.scroll + (my - list_top)
+            iy, ih, _, iw = self._geo_info_pane
+            ty, th, _, tw = self._geo_tmux_pane
+
+            # Click on info pane → focus info
+            if (clicked or dbl_clicked) and iy <= my < iy + ih:
+                self.detail_focus = "info"
+            # Click on tmux pane → focus tmux
+            elif (clicked or dbl_clicked) and ty <= my < ty + th:
+                self.detail_focus = "tmux"
+            # Click on info separator → focus info
+            elif (clicked or dbl_clicked) and iy > 0 and my == iy - 1:
+                self.detail_focus = "info"
+            # Click on tmux separator → focus tmux
+            elif (clicked or dbl_clicked) and ty > 0 and my == ty - 1:
+                self.detail_focus = "tmux"
+
+            # Scroll wheel in info pane
+            if iy <= my < iy + ih or (iy > 0 and my == iy - 1):
+                if scroll_up:
+                    self.detail_scroll = max(0, self.detail_scroll - 3)
+                elif scroll_down:
+                    mx_s = max(0, self._info_lines_count - ih)
+                    self.detail_scroll = min(mx_s, self.detail_scroll + 3)
+            # Scroll wheel in tmux pane
+            elif ty <= my < ty + th or (ty > 0 and my == ty - 1):
+                if scroll_up:
+                    self.tmux_scroll = max(0, self.tmux_scroll - 3)
+                elif scroll_down:
+                    mx_s = max(0, self._tmux_lines_count - th)
+                    self.tmux_scroll = min(mx_s, self.tmux_scroll + 3)
+
+            # Click on scrollbar track → jump scroll position
+            if clicked and mx == iw - 1 and iy <= my < iy + ih and self._info_lines_count > ih:
+                ratio = (my - iy) / max(1, ih - 1)
+                self.detail_scroll = int(ratio * max(0, self._info_lines_count - ih))
+            elif clicked and mx == tw - 1 and ty <= my < ty + th and self._tmux_lines_count > th:
+                ratio = (my - ty) / max(1, th - 1)
+                self.tmux_scroll = int(ratio * max(0, self._tmux_lines_count - th))
+
+            return None
+
+        # ── Sessions View (list) ──
+        ly, lh, _, lw = self._geo_list
+        if ly <= my < ly + lh and self.filtered:
+            row_idx = self.scroll + (my - ly)
             if row_idx < len(self.filtered):
-                if bstate & curses.BUTTON1_DOUBLE_CLICKED:
+                if dbl_clicked:
                     self.cur = row_idx
                     s = self.filtered[self.cur]
                     profiles = self.mgr.load_profiles()
@@ -709,11 +764,12 @@ class CCSApp:
                     self.confirm_sel = 0 if HAS_TMUX else 1
                     self.mode = "launch"
                     return None
-                elif bstate & curses.BUTTON1_CLICKED:
+                elif clicked:
                     self.cur = row_idx
-        if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+
+        if scroll_up:
             self.cur = max(0, self.cur - 3)
-        elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+        elif scroll_down:
             if self.filtered:
                 self.cur = min(len(self.filtered) - 1, self.cur + 3)
         return None
@@ -998,6 +1054,7 @@ class CCSApp:
         if self.view == "sessions":
             preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
             list_h = h - hdr_h - ftr_h - sep_h - preview_h
+            self._geo_list = (hdr_h, list_h, 0, w)
             self._draw_header(w)
             self._draw_list(hdr_h, list_h, w)
             self._draw_separator(hdr_h + list_h, w)
@@ -1010,12 +1067,16 @@ class CCSApp:
             info_h = min(usable // 2, 13)
             tmux_h = usable - info_h
             y0 = hdr_h
+            info_top = y0 + sep_info_h
+            tmux_top = y0 + sep_info_h + info_h + sep_tmux_h
+            self._geo_info_pane = (info_top, info_h, 0, w)
+            self._geo_tmux_pane = (tmux_top, tmux_h, 0, w)
             self._draw_header(w)
             self._draw_pane_separator(y0, w, " Session Info ", self.detail_focus == "info")
-            self._draw_info_pane(y0 + sep_info_h, info_h, w)
+            self._draw_info_pane(info_top, info_h, w)
             tmux_label = " Tmux View " if HAS_TMUX else " Tmux View (not found) "
             self._draw_pane_separator(y0 + sep_info_h + info_h, w, tmux_label, self.detail_focus == "tmux")
-            self._draw_tmux_pane(y0 + sep_info_h + info_h + sep_tmux_h, tmux_h, w)
+            self._draw_tmux_pane(tmux_top, tmux_h, w)
 
         self._draw_footer(h - ftr_h, w)
 
@@ -1421,6 +1482,26 @@ class CCSApp:
         else:
             self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
 
+    def _draw_scrollbar(self, sy: int, h: int, w: int, scroll: int, total: int):
+        """Draw a scrollbar on the right edge of a pane."""
+        if total <= h or h < 2:
+            return
+        col = w - 1
+        track_attr = curses.color_pair(CP_BORDER)
+        thumb_attr = curses.color_pair(CP_ACCENT) | curses.A_BOLD
+        # Thumb size and position
+        thumb_h = max(1, h * h // total)
+        max_scroll = total - h
+        if max_scroll > 0:
+            thumb_y = scroll * (h - thumb_h) // max_scroll
+        else:
+            thumb_y = 0
+        for i in range(h):
+            if thumb_y <= i < thumb_y + thumb_h:
+                self._safe(sy + i, col, "┃", thumb_attr)
+            else:
+                self._safe(sy + i, col, "│", track_attr)
+
     def _draw_info_pane(self, sy: int, h: int, w: int):
         """Top pane: session metadata, git info, first message, topics."""
 
@@ -1496,15 +1577,9 @@ class CCSApp:
         # Apply scroll and render
         scrolled = lines[self.detail_scroll:]
         for i, (text, attr) in enumerate(scrolled[:h]):
-            self._safe(sy + i, 0, text[:w - 1], attr)
+            self._safe(sy + i, 0, text[:w - 2], attr)
 
-        # Scroll indicators
-        if self.detail_scroll > 0:
-            self._safe(sy, w - 3, " ▲ ",
-                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
-        if self.detail_scroll + h < len(lines):
-            self._safe(sy + h - 1, w - 3, " ▼ ",
-                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        self._draw_scrollbar(sy, h, w, self.detail_scroll, len(lines))
 
     def _draw_tmux_pane(self, sy: int, h: int, w: int):
         """Bottom pane: live tmux output."""
@@ -1548,15 +1623,9 @@ class CCSApp:
         # Apply scroll and render
         scrolled = lines[self.tmux_scroll:]
         for i, (text, attr) in enumerate(scrolled[:h]):
-            self._safe(sy + i, 0, text[:w - 1], attr)
+            self._safe(sy + i, 0, text[:w - 2], attr)
 
-        # Scroll indicators
-        if self.tmux_scroll > 0:
-            self._safe(sy, w - 3, " ▲ ",
-                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
-        if self.tmux_scroll + h < len(lines):
-            self._safe(sy + h - 1, w - 3, " ▼ ",
-                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        self._draw_scrollbar(sy, h, w, self.tmux_scroll, len(lines))
 
 
     def _draw_help_overlay(self, h: int, w: int):
@@ -1747,12 +1816,17 @@ class CCSApp:
                     self._safe(y, sx + 1, text[:box_w - 3], attr)
 
         # Draw buttons on their row
+        self._geo_overlay_btns = []
         if btn_row >= 0:
             gap = 4
             total_w = len(yes_label) + len(no_label) + gap
             bx = sx + max(2, (box_w - total_w) // 2)
             self._safe(btn_row, bx, yes_label, yes_a)
             self._safe(btn_row, bx + len(yes_label) + gap, no_label, no_a)
+            self._geo_overlay_btns = [
+                (bx, btn_row, len(yes_label), 1, 1),  # Yes = 1
+                (bx + len(yes_label) + gap, btn_row, len(no_label), 1, 0),  # No = 0
+            ]
 
         # Bottom border
         self._safe(sy + box_h - 1, sx, "└", bdr)
@@ -1870,12 +1944,17 @@ class CCSApp:
                 else:
                     self._safe(y, sx + 1, text[:box_w - 3], attr)
 
+        self._geo_overlay_btns = []
         if btn_row >= 0:
             gap = 4
             total_w = len(tmux_label) + len(term_label) + gap
             bx = sx + max(2, (box_w - total_w) // 2)
             self._safe(btn_row, bx, tmux_label, tmux_a)
             self._safe(btn_row, bx + len(tmux_label) + gap, term_label, term_a)
+            self._geo_overlay_btns = [
+                (bx, btn_row, len(tmux_label), 1, 0),  # Tmux = 0
+                (bx + len(tmux_label) + gap, btn_row, len(term_label), 1, 1),  # Terminal = 1
+            ]
 
         self._safe(sy + box_h - 1, sx, "└", bdr)
         self._hline(sy + box_h - 1, sx + 1, "─", box_w - 2, bdr)
