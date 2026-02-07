@@ -1185,10 +1185,10 @@ class CCSApp:
             "normal":  normal_hints,
             "search":  "Type to filter  ·  ↑/↓ Navigate results  ·  ⏎ Done  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply tag  ·  Esc Cancel",
-            "quit":    "y/Y Yes  ·  n/N/Esc No",
-            "delete":  "y/Y Yes  ·  n/N/Esc No",
-            "delete_empty": "y/Y Yes  ·  n/N/Esc No",
-            "kill_tmux": "y/Y Yes  ·  n/N/Esc No",
+            "quit":    "Yes (y/Y)  ·  No (n/N/Esc)",
+            "delete":  "Yes (y/Y)  ·  No (n/N/Esc)",
+            "delete_empty": "Yes (y/Y)  ·  No (n/N/Esc)",
+            "kill_tmux": "Yes (y/Y)  ·  No (n/N/Esc)",
             "chdir":   "Type directory path  ·  ⏎ Apply  ·  Esc Cancel",
             "new":     "Type session name  ·  ⏎ Create session  ·  Esc Cancel",
             "profiles": "⏎ Set active profile  n New  e Edit  d Delete  Esc Go back",
@@ -1783,8 +1783,8 @@ class CCSApp:
         sel_attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
 
         # Button labels
-        yes_label = " y Yes "
-        no_label = " n No "
+        yes_label = " Yes (y/Y) "
+        no_label = " No (n/N/Esc) "
 
         content_lines = [
             ("", 0),
@@ -1811,7 +1811,7 @@ class CCSApp:
             content_lines.append(("", 0))
         # Placeholder row for buttons (drawn separately)
         content_lines.append(("", 0))
-        content_lines.append(("  y/Y Yes  ·  n/N/Esc No", dim))
+        content_lines.append(("  Yes (y/Y)  ·  No (n/N/Esc)", dim))
         content_lines.append(("", 0))
 
         max_content_w = max((len(t) + 4 for t, _ in content_lines), default=0)
@@ -3275,7 +3275,7 @@ class CCSApp:
                 break
 
     def _input_quit(self, k: int) -> Optional[str]:
-        if k in (ord("y"), ord("Y")) or k == 3:
+        if k in (ord("y"), ord("Y")):
             return "quit"
         elif k in (ord("n"), ord("N"), 27):
             self.mode = "normal"
