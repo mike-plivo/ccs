@@ -1930,7 +1930,7 @@ class CCSApp:
         self._safe(sy + box_h - 1, sx + box_w - 1, "┘", bdr)
 
     def _draw_launch_overlay(self, h: int, w: int, label: str):
-        """Draw a launch mode selector: Tmux or Terminal."""
+        """Draw a launch mode selector: Tmux, Terminal, or View."""
         bdr = curses.color_pair(CP_BORDER)
         hdr = curses.color_pair(CP_HEADER) | curses.A_BOLD
         dim = curses.color_pair(CP_DIM) | curses.A_DIM
@@ -1938,8 +1938,10 @@ class CCSApp:
 
         tmux_label = "  ⚡ Tmux  "
         term_label = "  Terminal  "
+        view_label = "  Session View  "
         tmux_a = sel_attr if self.confirm_sel == 0 else dim
         term_a = sel_attr if self.confirm_sel == 1 else dim
+        view_a = sel_attr if self.confirm_sel == 2 else dim
         if not HAS_TMUX:
             tmux_a = curses.color_pair(CP_DIM) | curses.A_DIM
 
@@ -1952,7 +1954,7 @@ class CCSApp:
             ("", 0),
         ]
 
-        box_w = min(max(len(f"  Resume: {label}") + 6, 44), w - 4)
+        box_w = min(max(len(f"  Resume: {label}") + 6, 56), w - 4)
         box_h = len(content_lines) + 2
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
@@ -1977,14 +1979,18 @@ class CCSApp:
 
         self._geo_overlay_btns = []
         if btn_row >= 0:
-            gap = 4
-            total_w = len(tmux_label) + len(term_label) + gap
+            gap = 3
+            total_w = len(tmux_label) + len(term_label) + len(view_label) + gap * 2
             bx = sx + max(2, (box_w - total_w) // 2)
             self._safe(btn_row, bx, tmux_label, tmux_a)
-            self._safe(btn_row, bx + len(tmux_label) + gap, term_label, term_a)
+            x2 = bx + len(tmux_label) + gap
+            self._safe(btn_row, x2, term_label, term_a)
+            x3 = x2 + len(term_label) + gap
+            self._safe(btn_row, x3, view_label, view_a)
             self._geo_overlay_btns = [
-                (bx, btn_row, len(tmux_label), 1, 0),  # Tmux = 0
-                (bx + len(tmux_label) + gap, btn_row, len(term_label), 1, 1),  # Terminal = 1
+                (bx, btn_row, len(tmux_label), 1, 0),   # Tmux = 0
+                (x2, btn_row, len(term_label), 1, 1),    # Terminal = 1
+                (x3, btn_row, len(view_label), 1, 2),    # Session View = 2
             ]
 
         self._safe(sy + box_h - 1, sx, "└", bdr)
@@ -3319,20 +3325,38 @@ class CCSApp:
     def _input_launch(self, k: int) -> Optional[str]:
         s = self.launch_session
         extra = self.launch_extra
+        max_sel = 2  # 0=Tmux, 1=Terminal, 2=Session View
         if k == 27:  # Esc
             self.mode = "normal"
             return None
-        elif k in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l")):
-            self.confirm_sel = 1 - self.confirm_sel
-            # Don't allow selecting tmux if not installed
+        elif k in (curses.KEY_LEFT, ord("h")):
+            self.confirm_sel = (self.confirm_sel - 1) % (max_sel + 1)
+            # Skip tmux if not installed
+            if self.confirm_sel == 0 and not HAS_TMUX:
+                self.confirm_sel = max_sel
+        elif k in (curses.KEY_RIGHT, ord("l")):
+            self.confirm_sel = (self.confirm_sel + 1) % (max_sel + 1)
+            # Skip tmux if not installed
             if self.confirm_sel == 0 and not HAS_TMUX:
                 self.confirm_sel = 1
         elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if not s:
                 self.mode = "normal"
                 return None
-            use_tmux = self.confirm_sel == 0
-            if use_tmux:
+            if self.confirm_sel == 2:
+                # Session View
+                self.mode = "normal"
+                self.view = "detail"
+                self.detail_scroll = 0
+                self.tmux_scroll = 0
+                self.detail_focus = "info"
+                # Make sure cursor points to this session
+                for i, fs in enumerate(self.filtered):
+                    if fs.id == s.id:
+                        self.cur = i
+                        break
+            elif self.confirm_sel == 0:
+                # Tmux
                 if s.cwd and not os.path.isdir(s.cwd):
                     self.chdir_pending = ("resume", s.id, s.cwd, extra)
                     self.mode = "chdir"
@@ -3344,6 +3368,7 @@ class CCSApp:
                     self._refresh()
                     self.mode = "normal"
             else:
+                # Terminal
                 if s.cwd and not os.path.isdir(s.cwd):
                     self.chdir_pending = ("resume", s.id, s.cwd, extra)
                     self.mode = "chdir"
