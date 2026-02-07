@@ -1071,12 +1071,17 @@ class HeaderBox(Static):
         sort_label = labels.get(self.sort_mode, "Date")
         n = self.session_count
         info = f"{n} session{'s' if n != 1 else ''} \u00b7 Sort: {sort_label}"
-        if self.search_query:
-            info += f" \u00b7 Filter: {self.search_query}"
         text.append(
             info,
             style=Style(color=tc("accent-color", "#00cccc")),
         )
+        if self.search_query:
+            text.append("  \u00b7 Filter: ", style=Style(color=tc("dim-color", "#888888")))
+            text.append(
+                f" {self.search_query} ",
+                style=Style(color=tc("warn-color", "#ff4444"), bold=True, reverse=True),
+            )
+            text.append(" (Esc to clear)", style=Style(color=tc("dim-color", "#888888")))
 
         return text
 
@@ -3645,6 +3650,14 @@ class CCSApp(App):
     def action_escape_action(self):
         if self.view == "detail":
             self._switch_to_sessions()
+            return
+        if self.search_query:
+            self.search_query = ""
+            self._apply_filter()
+            self._rebuild_list()
+            self._update_preview()
+            self._update_header()
+            self._set_status("Filter cleared")
             return
         self.action_quit_confirm()
 
