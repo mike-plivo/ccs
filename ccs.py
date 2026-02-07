@@ -3190,7 +3190,7 @@ class CCSApp(App):
         tmux_name = TMUX_PREFIX + s.id[:8]
         existing = self.mgr.tmux_sessions()
         if tmux_name in existing:
-            self._tmux_attach(tmux_name)
+            self._tmux_attach(tmux_name, s.id)
             return
         cmd_parts = ["claude", "--resume", s.id] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
@@ -3214,9 +3214,9 @@ class CCSApp(App):
             ]
         )
         self.mgr.tmux_register(tmux_name, s.id, self.active_profile_name)
-        self._tmux_attach(tmux_name)
+        self._tmux_attach(tmux_name, s.id)
 
-    def _tmux_attach(self, tmux_name):
+    def _tmux_attach(self, tmux_name, session_id=None):
         try:
             with self.suspend():
                 os.system(f"tmux attach-session -t {shlex.quote(tmux_name)}")
@@ -3226,6 +3226,19 @@ class CCSApp(App):
         alive = self.mgr.tmux_sessions()
         if tmux_name not in alive:
             self.mgr.tmux_unregister(tmux_name)
+            # Auto-delete ephemeral sessions when tmux exits
+            if session_id:
+                ephemeral_ids = self._load_ephemeral_ids()
+                if session_id in ephemeral_ids:
+                    s = next((s for s in self.sessions if s.id == session_id), None)
+                    if s:
+                        self.mgr.delete(s)
+                    ephemeral_ids.discard(session_id)
+                    try:
+                        EPHEMERAL_FILE.write_text("\n".join(ephemeral_ids) + "\n" if ephemeral_ids else "")
+                    except Exception:
+                        pass
+                    self._set_status("Ephemeral session cleaned up")
         self._do_refresh()
 
     def _tmux_launch_new(self, name, extra, cwd=None):
@@ -3261,7 +3274,7 @@ class CCSApp(App):
             ]
         )
         self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
-        self._tmux_attach(tmux_name)
+        self._tmux_attach(tmux_name, uid)
 
     def _tmux_launch_ephemeral(self, extra):
         uid = str(uuid_mod.uuid4())
@@ -3288,7 +3301,7 @@ class CCSApp(App):
             ]
         )
         self.mgr.tmux_register(tmux_name, uid, self.active_profile_name)
-        self._tmux_attach(tmux_name)
+        self._tmux_attach(tmux_name, uid)
 
     def _active_profile_args(self):
         profiles = self.mgr.load_profiles()
@@ -3846,14 +3859,21 @@ class CCSApp(App):
 
     def _kill_tmux_for_session(self, sid):
         """Kill tmux session for a given session ID if it exists."""
+        if not HAS_TMUX:
+            return
         tmux_name = self.tmux_sids.get(sid)
-        if tmux_name and HAS_TMUX:
-            subprocess.run(
-                ["tmux", "kill-session", "-t", tmux_name],
-                capture_output=True,
-            )
-            self.mgr.tmux_unregister(tmux_name)
-            self.tmux_sids.pop(sid, None)
+        if not tmux_name:
+            # Check registered sessions in case poller hasn't run yet
+            tmux_name = TMUX_PREFIX + sid[:8]
+            alive = self.mgr.tmux_sessions()
+            if tmux_name not in alive:
+                return
+        subprocess.run(
+            ["tmux", "kill-session", "-t", tmux_name],
+            capture_output=True,
+        )
+        self.mgr.tmux_unregister(tmux_name)
+        self.tmux_sids.pop(sid, None)
 
     def action_delete_session(self):
         if self.view == "sessions" and self.marked:
