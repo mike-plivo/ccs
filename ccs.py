@@ -1083,23 +1083,23 @@ class CCSApp:
         self._safe(2, w - 1, "│", bdr)
 
         if self.view == "detail":
-            normal_hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del session  K Kill tmux  ? Help"
+            normal_hints = "Esc/← Go back  Tab Switch pane  ↑↓ Scroll  ⏎ Resume session  p Toggle pin  t Set tag  c Change CWD  d Delete session  K Kill tmux  ? Help"
         else:
-            normal_hints = "⏎ Resume  → Detail  K Kill tmux  s Sort  Space Mark  P Profiles  d Del session  n New  / Search  ? Help"
+            normal_hints = "⏎ Resume session  → Session detail  K Kill tmux  s Cycle sort  Space Toggle mark  P Profiles  d Delete session  n New session  / Search  ? Help"
         hints_map = {
             "normal":  normal_hints,
-            "search":  "Type to filter  ·  ↑/↓ Navigate  ·  ⏎ Done  ·  Esc Cancel",
-            "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
-            "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
-            "delete":  "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
-            "delete_empty": "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
+            "search":  "Type to filter  ·  ↑/↓ Navigate results  ·  ⏎ Done  ·  Esc Cancel",
+            "tag":     "Type tag name  ·  ⏎ Apply tag  ·  Esc Cancel",
+            "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y Yes / n No  ·  Esc Cancel",
+            "delete":  "←/→ Select  ·  ⏎ Confirm  ·  y Yes / n No  ·  Esc Cancel",
+            "delete_empty": "←/→ Select  ·  ⏎ Confirm  ·  y Yes / n No  ·  Esc Cancel",
             "chdir":   "Type directory path  ·  ⏎ Apply  ·  Esc Cancel",
-            "new":     "Type session name  ·  ⏎ Create  ·  Esc Cancel",
-            "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
-            "profile_edit": "↑↓ Navigate  Type to edit  Space Toggle  Tab Expert/Structured  ⏎ Save  Esc Back",
+            "new":     "Type session name  ·  ⏎ Create session  ·  Esc Cancel",
+            "profiles": "⏎ Set active profile  n New  e Edit  d Delete  Esc Go back",
+            "profile_edit": "↑↓ Navigate fields  Type to edit  Space Toggle  Tab Expert/Structured  ⏎ Save  Esc Go back",
             "help":    "Press any key to close",
-            "input":   "Type message  ·  Ctrl+D Send  ·  ⏎ New line  ·  Esc Cancel",
-            "launch":  "←/→ Select  ·  ⏎ Launch  ·  Esc Cancel",
+            "input":   "Type message  ·  Ctrl+D Send to tmux  ·  ⏎ New line  ·  Esc Cancel",
+            "launch":  "←/→ Select mode  ·  ⏎ Launch session  ·  Esc Cancel",
         }
         hint_key = self.mode
         hints = hints_map.get(hint_key, "")
@@ -1107,9 +1107,9 @@ class CCSApp:
             s = self.filtered[self.cur]
             if self.view == "detail":
                 if s.id in self.tmux_sids:
-                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Attach  i Send  K Kill tmux  p Pin  t Tag  d Del session  ? Help"
+                    hints = "Esc/← Go back  Tab Switch pane  ↑↓ Scroll  ⏎ Attach tmux  i Send to tmux  K Kill tmux  p Toggle pin  t Set tag  d Delete session  ? Help"
                 else:
-                    hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del session  ? Help"
+                    hints = "Esc/← Go back  Tab Switch pane  ↑↓ Scroll  ⏎ Resume session  p Toggle pin  t Set tag  c Change CWD  d Delete session  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
