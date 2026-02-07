@@ -1028,14 +1028,14 @@ class CCSApp:
             self._draw_help_overlay(h, w)
         elif self.mode == "delete":
             self._draw_confirm_overlay(h, w,
-                "Delete Session",
+                "⚠ Delete Session",
                 f"Delete '{self.delete_label}'?",
-                "This cannot be undone.")
+                "WARNING: This will permanently delete the Claude session. This action is NOT recoverable!")
         elif self.mode == "delete_empty":
             self._draw_confirm_overlay(h, w,
-                "Delete Empty Sessions",
+                "⚠ Delete Empty Sessions",
                 f"Delete {self.empty_count} empty session{'s' if self.empty_count != 1 else ''}?",
-                "All sessions with no messages will be removed.")
+                "WARNING: This will permanently delete all empty Claude sessions. This action is NOT recoverable!")
         elif self.mode == "input":
             self._draw_input_overlay(h, w)
         elif self.mode == "launch":
@@ -1693,14 +1693,30 @@ class CCSApp:
             ("", 0),
         ]
         if detail:
-            content_lines.append((f"  {detail}", normal))
+            detail_attr = warn if detail.startswith("WARNING") else normal
+            # Wrap long detail text
+            max_detail_w = min(w - 8, 60)
+            words = detail.split()
+            lines_buf: list[str] = []
+            cur_line = ""
+            for word in words:
+                if cur_line and len(cur_line) + 1 + len(word) > max_detail_w:
+                    lines_buf.append(cur_line)
+                    cur_line = word
+                else:
+                    cur_line = f"{cur_line} {word}" if cur_line else word
+            if cur_line:
+                lines_buf.append(cur_line)
+            for dl in lines_buf:
+                content_lines.append((f"  {dl}", detail_attr))
             content_lines.append(("", 0))
         # Placeholder row for buttons (drawn separately)
         content_lines.append(("", 0))
         content_lines.append(("  ←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc", dim))
         content_lines.append(("", 0))
 
-        box_w = min(max(len(message) + 6, len(detail) + 6 if detail else 0, len(title) + 8, 40), w - 4)
+        max_content_w = max((len(t) + 4 for t, _ in content_lines), default=0)
+        box_w = min(max(len(message) + 6, max_content_w, len(title) + 8, 40), w - 4)
         box_h = len(content_lines) + 2
         sx = max(0, (w - box_w) // 2)
         sy = max(0, (h - box_h) // 2)
