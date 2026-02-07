@@ -3198,6 +3198,19 @@ class CCSApp(App):
         """Check if a Claude session .jsonl file exists for this ID."""
         return bool(glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")))
 
+    def _session_is_empty(self, sid):
+        """Check if a session .jsonl has no user/assistant messages."""
+        for f in glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")):
+            try:
+                with open(f) as fh:
+                    for line in fh:
+                        d = json.loads(line)
+                        if d.get("type") in ("user", "assistant"):
+                            return False
+            except Exception:
+                pass
+        return True
+
     def _tmux_attach(self, tmux_name, session_id=None):
         try:
             with self.suspend():
@@ -3231,6 +3244,15 @@ class CCSApp(App):
                 subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
             self.mgr._delete_meta(session_id)
             self._set_status("No session created — tmux killed")
+        elif not tmux_alive and self._session_is_empty(session_id):
+            # Session exited with no messages — delete the empty session
+            for f in glob.glob(str(PROJECTS_DIR / "*" / f"{session_id}.jsonl")):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            self.mgr._delete_meta(session_id)
+            self._set_status("Empty session deleted")
         self._do_refresh(force=True)
 
     def _cleanup_session_metadata(self, sid):
