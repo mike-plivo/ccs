@@ -798,14 +798,14 @@ class CCSApp:
             return self.tmux_pane_cache[sid]
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", tmux_name, "-p",
-                 "-l", str(TMUX_CAPTURE_LINES)],
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 capture_output=True, text=True, timeout=2)
             if r.returncode != 0:
                 return self.tmux_pane_cache.get(sid, [])
             lines = [self._strip_ansi(ln) for ln in r.stdout.splitlines()]
             while lines and not lines[-1].strip():
                 lines.pop()
+            lines = lines[-TMUX_CAPTURE_LINES:]
             self.tmux_pane_cache[sid] = lines
             self.tmux_pane_ts[sid] = now
             self._detect_claude_state(sid, lines)
