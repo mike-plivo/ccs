@@ -544,8 +544,11 @@ class CCSApp:
         self.cur = 0
         self.scroll = 0
         self.query = ""
+        self.query_cursor = 0
         self.mode = "normal"  # normal | search | tag | delete | delete_empty | new | profiles | profile_edit | help | quit
         self.ibuf = ""
+        self.ibuf_cursor = 0
+        self._kill_ring = ""  # shared kill ring for Ctrl+K/U/W/Y
         self.delete_label = ""  # label shown in delete confirmation popup
         self.empty_count = 0    # count for delete_empty confirmation
         self.sort_mode = "date"  # "date" | "name" | "project"
@@ -1082,7 +1085,7 @@ class CCSApp:
             "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
             "profile_edit": "↑↓ Navigate  Type to edit  Space Toggle  Tab Expert/Structured  ⏎ Save  Esc Back",
             "help":    "Press any key to close",
-            "input":   "Type message  ·  Ctrl+⏎ Send  ·  ⏎ New line  ·  Esc Cancel",
+            "input":   "Type message  ·  Ctrl+D Send  ·  ⏎ New line  ·  Esc Cancel",
             "launch":  "←/→ Select  ·  ⏎ Launch  ·  Esc Cancel",
         }
         hint_key = self.mode
@@ -1105,16 +1108,24 @@ class CCSApp:
         y = 3
         if self.mode == "search":
             self._safe(y, 1, " /", curses.color_pair(CP_INPUT) | curses.A_BOLD)
-            self._safe(y, 4, self.query + "▏", curses.color_pair(CP_NORMAL))
+            base_x = 4
+            self._safe(y, base_x, self.query, curses.color_pair(CP_NORMAL))
+            self._safe(y, base_x + self.query_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
         elif self.mode == "tag":
             self._safe(y, 1, " Tag:", curses.color_pair(CP_TAG) | curses.A_BOLD)
-            self._safe(y, 7, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
+            base_x = 7
+            self._safe(y, base_x, self.ibuf, curses.color_pair(CP_NORMAL))
+            self._safe(y, base_x + self.ibuf_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
         elif self.mode == "new":
             self._safe(y, 1, " Name:", curses.color_pair(CP_HEADER) | curses.A_BOLD)
-            self._safe(y, 8, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
+            base_x = 8
+            self._safe(y, base_x, self.ibuf, curses.color_pair(CP_NORMAL))
+            self._safe(y, base_x + self.ibuf_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
         elif self.mode == "chdir":
             self._safe(y, 1, " CWD:", curses.color_pair(CP_WARN) | curses.A_BOLD)
-            self._safe(y, 7, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
+            base_x = 7
+            self._safe(y, base_x, self.ibuf, curses.color_pair(CP_NORMAL))
+            self._safe(y, base_x + self.ibuf_cursor, "▏", curses.color_pair(CP_INPUT) | curses.A_BOLD)
         elif self.mode == "input":
             pass  # handled by overlay popup
         elif self.mode in ("quit", "delete", "delete_empty", "profiles", "profile_edit"):
@@ -1526,7 +1537,7 @@ class CCSApp:
             ("", 0),
             ("  Tmux (requires tmux)", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
-            ("    i              Send text to tmux (Session View, Ctrl+⏎ send)", 0),
+            ("    i              Send text to tmux (Session View, Ctrl+D to send)", 0),
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
@@ -1658,10 +1669,12 @@ class CCSApp:
         target = self.input_target_tmux or "tmux"
         title = f" Send to {target} "
 
-        # Box dimensions: wide enough for text, tall enough for lines + chrome
-        box_w = min(max(len(title) + 4, 60), w - 4)
+        # Box dimensions: use most of the screen
+        box_w = min(max(len(title) + 4, 80), w * 4 // 5, w - 4)
         text_w = box_w - 6  # usable width inside padding
-        max_text_lines = min(len(self.input_lines) + 1, 10)  # show up to 10 lines
+        # Text area: minimum 8 lines, grow with content, cap at available space
+        min_text_lines = 8
+        max_text_lines = max(min_text_lines, min(len(self.input_lines) + 2, h - 8))
         # Layout: 1 blank + text lines + 1 blank + 1 hints = max_text_lines + 3
         inner_h = max_text_lines + 3
         box_h = inner_h + 2  # + top/bottom border
@@ -1680,25 +1693,28 @@ class CCSApp:
             y = sy + 1 + i
             self._safe(y, sx, "│" + " " * (box_w - 2) + "│", bdr)
 
-        # Text area: show input lines with cursor
+        # Text area: show input lines with cursor at correct column
         text_sy = sy + 2  # after top border + 1 blank row
-        for li in range(max_text_lines):
-            y = text_sy + li
+        # Scroll the view if cursor is beyond visible area
+        scroll = max(0, self.input_cursor_line - max_text_lines + 1)
+        for vi in range(max_text_lines):
+            li = scroll + vi
+            y = text_sy + vi
             if li < len(self.input_lines):
                 line = self.input_lines[li]
                 display = line[:text_w]
                 if li == self.input_cursor_line:
-                    # Show line with cursor
+                    # Show line with cursor at correct column
                     self._safe(y, sx + 3, display, inp)
-                    # Cursor block
-                    cx = sx + 3 + len(display)
+                    col = min(self.input_cursor_col, text_w)
+                    cx = sx + 3 + col
                     if cx < sx + box_w - 2:
                         self._safe(y, cx, "▏", inp | curses.A_BOLD)
                 else:
                     self._safe(y, sx + 3, display, normal)
 
         # Hints row at bottom of interior
-        hints = "Ctrl+⏎ Send  ·  ⏎ New line  ·  ↑↓ Lines  ·  Esc Cancel"
+        hints = "Ctrl+D Send  ·  ⏎ New line  ·  ←→↑↓ Navigate  ·  Esc Cancel"
         hints_y = sy + box_h - 2  # last interior row
         self._safe(hints_y, sx + 2, hints[:box_w - 4], dim)
 
@@ -2253,6 +2269,7 @@ class CCSApp:
         elif k == 27:  # Esc
             if self.query:
                 self.query = ""
+                self.query_cursor = 0
                 self._apply_filter()
             else:
                 self.confirm_sel = 0
@@ -2408,6 +2425,7 @@ class CCSApp:
                 s = self.filtered[self.cur]
                 self.mode = "tag"
                 self.ibuf = s.tag if s.tag else ""
+                self.ibuf_cursor = len(self.ibuf)
         elif k == ord("T"):
             if self.filtered:
                 s = self.filtered[self.cur]
@@ -2423,6 +2441,7 @@ class CCSApp:
                 self.chdir_pending = ("set_cwd", s.id, s.cwd, None)
                 self.mode = "chdir"
                 self.ibuf = s.cwd or str(Path.home())
+                self.ibuf_cursor = len(self.ibuf)
         elif k == ord("d"):
             if self.marked:
                 self.delete_label = f"{len(self.marked)} marked sessions"
@@ -2444,6 +2463,7 @@ class CCSApp:
         elif k == ord("n"):
             self.mode = "new"
             self.ibuf = ""
+            self.ibuf_cursor = 0
         elif k == ord("e"):
             use_tmux = self._get_use_tmux()
             if use_tmux:
@@ -2489,12 +2509,14 @@ class CCSApp:
                     self.mode = "input"
                     self.input_lines = [""]  # multiline buffer
                     self.input_cursor_line = 0
+                    self.input_cursor_col = 0
                 else:
                     self._set_status("No active tmux session")
             elif not HAS_TMUX:
                 self._set_status("tmux is not installed")
         elif k == ord("/"):
             self.mode = "search"
+            self.query_cursor = len(self.query)
         elif k == ord("R"):
             # Quick resume most recent session
             if self.sessions:
@@ -2515,6 +2537,7 @@ class CCSApp:
                         self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
                         self.mode = "chdir"
                         self.ibuf = str(Path.home())
+                        self.ibuf_cursor = len(self.ibuf)
                         self._set_status(f"Directory missing: {most_recent.cwd}")
                     else:
                         self._tmux_launch(most_recent, extra)
@@ -2524,6 +2547,7 @@ class CCSApp:
                         self.chdir_pending = ("resume", most_recent.id, most_recent.cwd, extra)
                         self.mode = "chdir"
                         self.ibuf = str(Path.home())
+                        self.ibuf_cursor = len(self.ibuf)
                         self._set_status(f"Directory missing: {most_recent.cwd}")
                     else:
                         self.exit_action = ("resume", most_recent.id, most_recent.cwd, extra)
@@ -2554,12 +2578,12 @@ class CCSApp:
         elif k in (curses.KEY_DOWN,):
             if self.filtered:
                 self.cur = min(len(self.filtered) - 1, self.cur + 1)
-        elif k in (curses.KEY_BACKSPACE, 127, 8):
-            self.query = self.query[:-1]
-            self._apply_filter()
-        elif 32 <= k <= 126:
-            self.query += chr(k)
-            self._apply_filter()
+        else:
+            old = self.query
+            self.query, self.query_cursor, _ = self._readline_edit(
+                self.query, self.query_cursor, k)
+            if self.query != old:
+                self._apply_filter()
         return None
 
     def _input_tag(self, k: int) -> Optional[str]:
@@ -2573,10 +2597,9 @@ class CCSApp:
                 self._set_status(f"Tagged: [{new_tag}]")
                 self._refresh()
             self.mode = "normal"
-        elif k in (curses.KEY_BACKSPACE, 127, 8):
-            self.ibuf = self.ibuf[:-1]
-        elif 32 <= k <= 126:
-            self.ibuf += chr(k)
+        else:
+            self.ibuf, self.ibuf_cursor, _ = self._readline_edit(
+                self.ibuf, self.ibuf_cursor, k)
         return None
 
     def _input_delete(self, k: int) -> Optional[str]:
@@ -2643,10 +2666,9 @@ class CCSApp:
                     self.exit_action = ("new", name)
                     return "action"
             self.mode = "normal"
-        elif k in (curses.KEY_BACKSPACE, 127, 8):
-            self.ibuf = self.ibuf[:-1]
-        elif 32 <= k <= 126:
-            self.ibuf += chr(k)
+        else:
+            self.ibuf, self.ibuf_cursor, _ = self._readline_edit(
+                self.ibuf, self.ibuf_cursor, k)
         return None
 
     def _input_chdir(self, k: int) -> Optional[str]:
@@ -2687,11 +2709,59 @@ class CCSApp:
                 self.chdir_pending = None
                 self._refresh()
                 self.mode = "normal"
-        elif k in (curses.KEY_BACKSPACE, 127, 8):
-            self.ibuf = self.ibuf[:-1]
-        elif 32 <= k <= 126:
-            self.ibuf += chr(k)
+        else:
+            self.ibuf, self.ibuf_cursor, _ = self._readline_edit(
+                self.ibuf, self.ibuf_cursor, k)
         return None
+
+    # ── Shared readline-style editing ─────────────────────────────
+
+    def _readline_edit(self, text: str, pos: int, k: int):
+        """Apply a readline-style keypress to (text, pos). Returns (new_text, new_pos, handled)."""
+        if k in (curses.KEY_BACKSPACE, 127, 8):
+            if pos > 0:
+                text = text[:pos - 1] + text[pos:]
+                pos -= 1
+            return text, pos, True
+        elif k == curses.KEY_DC:  # Delete
+            if pos < len(text):
+                text = text[:pos] + text[pos + 1:]
+            return text, pos, True
+        elif k == curses.KEY_LEFT:
+            return text, max(0, pos - 1), True
+        elif k == curses.KEY_RIGHT:
+            return text, min(len(text), pos + 1), True
+        elif k in (curses.KEY_HOME, 1):  # Home / Ctrl+A
+            return text, 0, True
+        elif k in (curses.KEY_END, 5):  # End / Ctrl+E
+            return text, len(text), True
+        elif k == 11:  # Ctrl+K — kill to end of line
+            self._kill_ring = text[pos:]
+            return text[:pos], pos, True
+        elif k == 21:  # Ctrl+U — kill to start of line
+            self._kill_ring = text[:pos]
+            return text[pos:], 0, True
+        elif k == 23:  # Ctrl+W — delete word backward
+            if pos > 0:
+                i = pos - 1
+                while i > 0 and text[i - 1] == " ":
+                    i -= 1
+                while i > 0 and text[i - 1] != " ":
+                    i -= 1
+                self._kill_ring = text[i:pos]
+                text = text[:i] + text[pos:]
+                pos = i
+            return text, pos, True
+        elif k == 25:  # Ctrl+Y — yank (paste from kill ring)
+            if self._kill_ring:
+                text = text[:pos] + self._kill_ring + text[pos:]
+                pos += len(self._kill_ring)
+            return text, pos, True
+        elif 32 <= k <= 126:
+            text = text[:pos] + chr(k) + text[pos:]
+            pos += 1
+            return text, pos, True
+        return text, pos, False
 
     def _launch_start_editing(self, field: str):
         """Enter text editing mode for a field, cursor at end."""
@@ -2724,41 +2794,7 @@ class CCSApp:
     def _launch_edit_key(self, k: int):
         """Handle a keypress in a text editing field with cursor support."""
         text = self._launch_get_field()
-        pos = self.launch_edit_pos
-
-        if k in (curses.KEY_BACKSPACE, 127, 8):
-            if pos > 0:
-                text = text[:pos - 1] + text[pos:]
-                pos -= 1
-        elif k == curses.KEY_DC:  # Delete key
-            if pos < len(text):
-                text = text[:pos] + text[pos + 1:]
-        elif k == curses.KEY_LEFT:
-            pos = max(0, pos - 1)
-        elif k == curses.KEY_RIGHT:
-            pos = min(len(text), pos + 1)
-        elif k == curses.KEY_HOME or k == 1:  # Home or Ctrl+A
-            pos = 0
-        elif k == curses.KEY_END or k == 5:  # End or Ctrl+E
-            pos = len(text)
-        elif k == 11:  # Ctrl+K — kill to end of line
-            text = text[:pos]
-        elif k == 21:  # Ctrl+U — kill to start of line
-            text = text[pos:]
-            pos = 0
-        elif k == 23:  # Ctrl+W — delete word backward
-            if pos > 0:
-                i = pos - 1
-                while i > 0 and text[i - 1] == " ":
-                    i -= 1
-                while i > 0 and text[i - 1] != " ":
-                    i -= 1
-                text = text[:i] + text[pos:]
-                pos = i
-        elif 32 <= k <= 126:
-            text = text[:pos] + chr(k) + text[pos:]
-            pos += 1
-
+        text, pos, _ = self._readline_edit(text, self.launch_edit_pos, k)
         self._launch_set_field(text)
         self.launch_edit_pos = pos
 
@@ -3000,6 +3036,7 @@ class CCSApp:
                     self.chdir_pending = ("resume", s.id, s.cwd, extra)
                     self.mode = "chdir"
                     self.ibuf = str(Path.home())
+                    self.ibuf_cursor = len(self.ibuf)
                     self._set_status(f"Directory missing: {s.cwd}")
                 else:
                     self._tmux_launch(s, extra)
@@ -3010,6 +3047,7 @@ class CCSApp:
                     self.chdir_pending = ("resume", s.id, s.cwd, extra)
                     self.mode = "chdir"
                     self.ibuf = str(Path.home())
+                    self.ibuf_cursor = len(self.ibuf)
                     self._set_status(f"Directory missing: {s.cwd}")
                 else:
                     self.exit_action = ("resume", s.id, s.cwd, extra)
@@ -3021,12 +3059,9 @@ class CCSApp:
             self.mode = "normal"
             self.input_target_sid = None
             self.input_target_tmux = None
-        elif k in (curses.KEY_ENTER, 13):
-            # Enter — new line
-            self.input_lines.insert(self.input_cursor_line + 1, "")
-            self.input_cursor_line += 1
-        elif k == 10:
-            # Ctrl+Enter / Ctrl+J — send the text
+            return None
+        if k == 4:
+            # Ctrl+D — send the text
             text = "\n".join(self.input_lines)
             if text.strip() and self.input_target_tmux:
                 self._tmux_send_text(self.input_target_tmux, text)
@@ -3036,22 +3071,56 @@ class CCSApp:
             self.mode = "normal"
             self.input_target_sid = None
             self.input_target_tmux = None
-        elif k in (curses.KEY_BACKSPACE, 127, 8):
+            return None
+        if k in (curses.KEY_ENTER, 10, 13):
+            # Enter — new line, split at cursor position
             line = self.input_lines[self.input_cursor_line]
-            if line:
-                self.input_lines[self.input_cursor_line] = line[:-1]
-            elif self.input_cursor_line > 0:
-                # Merge with previous line
-                self.input_lines.pop(self.input_cursor_line)
+            before = line[:self.input_cursor_col]
+            after = line[self.input_cursor_col:]
+            self.input_lines[self.input_cursor_line] = before
+            self.input_lines.insert(self.input_cursor_line + 1, after)
+            self.input_cursor_line += 1
+            self.input_cursor_col = 0
+            return None
+        # Multiline-specific: backspace at line start merges lines
+        if k in (curses.KEY_BACKSPACE, 127, 8) and self.input_cursor_col == 0:
+            if self.input_cursor_line > 0:
+                prev = self.input_lines[self.input_cursor_line - 1]
+                cur = self.input_lines.pop(self.input_cursor_line)
                 self.input_cursor_line -= 1
-        elif k == curses.KEY_UP:
+                self.input_cursor_col = len(prev)
+                self.input_lines[self.input_cursor_line] = prev + cur
+            return None
+        # Multiline-specific: left arrow at line start wraps to previous line
+        if k == curses.KEY_LEFT and self.input_cursor_col == 0:
             if self.input_cursor_line > 0:
                 self.input_cursor_line -= 1
-        elif k == curses.KEY_DOWN:
+                self.input_cursor_col = len(self.input_lines[self.input_cursor_line])
+            return None
+        # Multiline-specific: right arrow at line end wraps to next line
+        if k == curses.KEY_RIGHT and self.input_cursor_col >= len(self.input_lines[self.input_cursor_line]):
             if self.input_cursor_line < len(self.input_lines) - 1:
                 self.input_cursor_line += 1
-        elif 32 <= k <= 126:
-            self.input_lines[self.input_cursor_line] += chr(k)
+                self.input_cursor_col = 0
+            return None
+        # Up/down: move between lines, preserve column
+        if k == curses.KEY_UP:
+            if self.input_cursor_line > 0:
+                self.input_cursor_line -= 1
+                self.input_cursor_col = min(self.input_cursor_col,
+                                            len(self.input_lines[self.input_cursor_line]))
+            return None
+        if k == curses.KEY_DOWN:
+            if self.input_cursor_line < len(self.input_lines) - 1:
+                self.input_cursor_line += 1
+                self.input_cursor_col = min(self.input_cursor_col,
+                                            len(self.input_lines[self.input_cursor_line]))
+            return None
+        # Delegate to shared readline editor for current line
+        line = self.input_lines[self.input_cursor_line]
+        line, col, _ = self._readline_edit(line, self.input_cursor_col, k)
+        self.input_lines[self.input_cursor_line] = line
+        self.input_cursor_col = col
         return None
 
     def _input_help(self, k: int) -> Optional[str]:
