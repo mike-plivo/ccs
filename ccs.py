@@ -57,6 +57,8 @@ from textual import work, on
 from rich.text import Text
 from rich.style import Style
 
+VERSION = "1.0.0"
+
 # ── Paths ─────────────────────────────────────────────────────────────
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -1015,7 +1017,7 @@ class HeaderBox(Static):
         text = Text()
 
         # Line 1 -- title
-        title = " \u25c6 CCS \u2014 Claude Code Session Manager "
+        title = f" \u25c6 CCS v{VERSION} \u2014 Claude Code Session Manager "
         text.append(title, style=Style(color=tc("header-color", "#00ffff"), bold=True))
         text.append("\n")
 
