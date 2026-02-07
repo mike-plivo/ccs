@@ -3917,19 +3917,31 @@ class CCSApp(App):
         """Kill tmux session for a given session ID if it exists."""
         if not HAS_TMUX:
             return
+        killed = False
+        # Method 1: Check our in-memory mapping
         tmux_name = self.tmux_sids.get(sid)
-        if not tmux_name:
-            # Check registered sessions in case poller hasn't run yet
-            tmux_name = TMUX_PREFIX + sid[:8]
+        if tmux_name:
+            subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+            self.mgr.tmux_unregister(tmux_name)
+            self.tmux_sids.pop(sid, None)
+            killed = True
+        # Method 2: Check registered sessions file
+        if not killed:
             alive = self.mgr.tmux_sessions()
-            if tmux_name not in alive:
-                return
-        subprocess.run(
-            ["tmux", "kill-session", "-t", tmux_name],
-            capture_output=True,
-        )
-        self.mgr.tmux_unregister(tmux_name)
-        self.tmux_sids.pop(sid, None)
+            for name, info in alive.items():
+                if info.get("session_id") == sid:
+                    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+                    self.mgr.tmux_unregister(name)
+                    killed = True
+                    break
+        # Method 3: Try the expected name pattern directly
+        if not killed:
+            expected = TMUX_PREFIX + sid[:8]
+            r = subprocess.run(["tmux", "has-session", "-t", expected], capture_output=True)
+            if r.returncode == 0:
+                subprocess.run(["tmux", "kill-session", "-t", expected], capture_output=True)
+                self.mgr.tmux_unregister(expected)
+                killed = True
 
     def action_delete_session(self):
         if self.view == "sessions" and self.marked:
