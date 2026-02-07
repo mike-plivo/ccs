@@ -1002,7 +1002,7 @@ class CCSApp:
             self._draw_list(hdr_h, list_h, w)
             self._draw_separator(hdr_h + list_h, w)
             self._draw_preview(hdr_h + list_h + sep_h, preview_h, w)
-        else:  # detail view — two panes: Info (top) + Tmux (bottom)
+        else:  # detail view — two panes: Session Info (top) + Tmux View (bottom)
             content_h = h - hdr_h - ftr_h
             info_h = min(content_h // 2, 14)
             sep2_h = 1
@@ -1397,12 +1397,12 @@ class CCSApp:
             self._safe(sy + i, 0, text[:w - 1], attr)
 
     def _draw_detail_separator(self, y: int, w: int):
-        """Draw separator between Info and Tmux panes in Session View."""
+        """Draw separator between Session Info and Tmux View panes."""
         bdr = curses.color_pair(CP_BORDER)
         self._safe(y, 0, "├", bdr)
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
-        label = " Tmux "
+        label = " Tmux View "
         focus_attr = curses.color_pair(CP_BORDER) | curses.A_BOLD
         self._safe(y, 2, label, focus_attr)
         # Show which pane is focused
@@ -1593,9 +1593,9 @@ class CCSApp:
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
-            ("    → / l          Session View (Info + Tmux panes)", 0),
+            ("    → / l          Session View (Session Info + Tmux View)", 0),
             ("    ← / h          Sessions", 0),
-            ("    Tab            Switch focus between Info and Tmux panes", 0),
+            ("    Tab            Switch focus between Session Info and Tmux View", 0),
             ("    ↑/↓            Scroll focused pane", 0),
             ("    Shift+↑/↓      Fast scroll focused pane", 0),
             ("", 0),
@@ -2357,7 +2357,7 @@ class CCSApp:
 
         _nav_handled = False
         if self.view == "detail":
-            # Tab switches focus between Info and Tmux panes
+            # Tab switches focus between Session Info and Tmux View
             if k == 9:  # Tab
                 self.detail_focus = "tmux" if self.detail_focus == "info" else "info"
                 _nav_handled = True
