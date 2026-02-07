@@ -2722,6 +2722,7 @@ class CCSApp(App):
         self._last_click_time = 0.0
         self._last_click_idx = -1
         self._last_header_click_time = 0.0
+        self._ctrl_c_time = 0.0
 
     def compose(self) -> ComposeResult:
         yield HeaderBox(id="header")
@@ -3432,7 +3433,12 @@ class CCSApp(App):
         sl = self.query_one("#session-list", SessionListWidget)
 
         # ── Global keys ──────────────────────────────────────────
+        if key == "c" and (time.monotonic() - self._ctrl_c_time) < 1.0:
+            self._ctrl_c_time = 0.0
+            self.exit()
+            return
         if key == "ctrl+c":
+            self._ctrl_c_time = time.monotonic()
             self.action_quit_confirm()
             return
         if key in ("question_mark", "?"):
