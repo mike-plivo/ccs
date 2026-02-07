@@ -372,8 +372,8 @@ class SessionManager:
                 }
                 cache_dirty = True
 
-            # Auto-delete empty sessions (no messages)
-            if msg_count == 0 and not summary:
+            # Auto-delete sessions with no user/assistant messages
+            if msg_count == 0:
                 try:
                     os.remove(jp)
                 except OSError:
