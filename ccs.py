@@ -2060,6 +2060,147 @@ class SimpleInputModal(ModalScreen[str]):
         self.dismiss(None)
 
 
+class PathInputModal(ModalScreen[str]):
+    """Path input modal with Tab autocompletion for directories."""
+
+    DEFAULT_CSS = """
+    PathInputModal {
+        align: center middle;
+        background: $background 25%;
+    }
+    #path-input-container {
+        width: 80;
+        height: auto;
+        max-height: 24;
+        border: heavy $accent;
+        background: $surface;
+        padding: 2 3;
+    }
+    #path-input-title { text-align: center; }
+    #path-input-field { margin-top: 1; }
+    #path-completions {
+        height: auto;
+        max-height: 10;
+        margin-top: 1;
+        overflow-y: auto;
+    }
+    #path-input-hints { margin-top: 1; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, title: str, initial: str = "", placeholder: str = ""):
+        super().__init__()
+        self.title_text = title
+        self.initial = initial
+        self.placeholder = placeholder
+        self._completions: List[str] = []
+        self._comp_idx = -1
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="path-input-container"):
+            yield Static(id="path-input-title")
+            yield Input(value=self.initial, placeholder=self.placeholder, id="path-input-field")
+            yield Static(id="path-completions")
+            yield Static(id="path-input-hints")
+
+    def on_mount(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        title = Text(self.title_text, style=Style(color=tc("header-color", "#00ffff"), bold=True))
+        self.query_one("#path-input-title", Static).update(title)
+        hints = Text("Tab Complete  \u00b7  \u23ce Confirm  \u00b7  Esc Cancel",
+                      style=Style(color=tc("dim-color", "#888888")))
+        self.query_one("#path-input-hints", Static).update(hints)
+        inp = self.query_one("#path-input-field", Input)
+        inp.focus()
+        inp.cursor_position = len(self.initial)
+
+    def _get_completions(self, text: str) -> List[str]:
+        """Get directory completions for the current input."""
+        expanded = os.path.expanduser(text)
+        if os.path.isdir(expanded):
+            parent = expanded
+            prefix = ""
+        else:
+            parent = os.path.dirname(expanded)
+            prefix = os.path.basename(expanded).lower()
+        if not os.path.isdir(parent):
+            return []
+        try:
+            entries = []
+            for name in sorted(os.listdir(parent)):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(parent, name)
+                if os.path.isdir(full) and name.lower().startswith(prefix):
+                    # Show with ~ prefix if under home
+                    home = str(Path.home())
+                    if full.startswith(home):
+                        entries.append("~" + full[len(home):])
+                    else:
+                        entries.append(full)
+            return entries
+        except OSError:
+            return []
+
+    def _show_completions(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        comp_widget = self.query_one("#path-completions", Static)
+        if not self._completions:
+            comp_widget.update("")
+            return
+        text = Text()
+        for i, c in enumerate(self._completions[:8]):
+            if i == self._comp_idx:
+                text.append(f"  \u25b6 {c}\n", style=Style(color=tc("accent-color", "#00cccc"), bold=True))
+            else:
+                text.append(f"    {c}\n", style=Style(color=tc("dim-color", "#888888")))
+        if len(self._completions) > 8:
+            text.append(f"    ... +{len(self._completions) - 8} more",
+                        style=Style(color=tc("dim-color", "#888888")))
+        comp_widget.update(text)
+
+    def on_key(self, event) -> None:
+        if event.key == "tab":
+            event.prevent_default()
+            event.stop()
+            inp = self.query_one("#path-input-field", Input)
+            current = inp.value
+            if self._comp_idx == -1:
+                # First tab: get completions
+                self._completions = self._get_completions(current)
+                if len(self._completions) == 1:
+                    inp.value = self._completions[0] + "/"
+                    inp.cursor_position = len(inp.value)
+                    self._completions = []
+                    self._comp_idx = -1
+                    self._show_completions()
+                    return
+                if self._completions:
+                    self._comp_idx = 0
+            elif self._completions:
+                self._comp_idx = (self._comp_idx + 1) % len(self._completions)
+            if self._completions and 0 <= self._comp_idx < len(self._completions):
+                inp.value = self._completions[self._comp_idx] + "/"
+                inp.cursor_position = len(inp.value)
+            self._show_completions()
+            return
+
+        # Any other key resets completion state
+        if event.key not in ("shift+tab",):
+            self._completions = []
+            self._comp_idx = -1
+            self._show_completions()
+
+    def on_input_submitted(self, event: Input.Submitted):
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class ThemeModal(ModalScreen[str]):
     """Theme picker with live preview on navigation."""
 
@@ -3322,13 +3463,15 @@ class CCSApp(App):
         """Remove all metadata for a session ID."""
         self.mgr._delete_meta(sid)
 
-    def _tmux_launch_new(self, name, extra):
+    def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
         if name:
             self.mgr._set_meta(uid, tag=name)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        if cwd:
+            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
@@ -3348,12 +3491,14 @@ class CCSApp(App):
         )
         self._tmux_attach(tmux_name, uid)
 
-    def _tmux_launch_ephemeral(self, extra):
+    def _tmux_launch_ephemeral(self, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
         self.mgr._set_meta(uid, ephemeral=True)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        if cwd:
+            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
@@ -4008,18 +4153,33 @@ class CCSApp(App):
         if self.view != "sessions":
             return
 
-        def on_name(name):
-            if name is None:
+        def on_path(path, name):
+            path = path.strip() if path else ""
+            if path and not os.path.isdir(os.path.expanduser(path)):
+                self._set_status(f"Directory not found: {path}")
                 return
-            name = name.strip()
             use_tmux = self._get_use_tmux()
             if use_tmux:
                 if not HAS_TMUX:
                     self._set_status("tmux is not installed")
                     return
                 extra = self._active_profile_args()
-                self._tmux_launch_new(name, extra)
+                cwd = os.path.expanduser(path) if path else None
+                self._tmux_launch_new(name, extra, cwd=cwd)
                 self._do_refresh()
+            else:
+                self.exit_action = ("new", name)
+                self.exit()
+
+        def on_name(name):
+            if name is None:
+                return
+            name = name.strip()
+            if self._get_use_tmux():
+                self.push_screen(
+                    PathInputModal("Project Path", os.getcwd(), "Path (Tab to autocomplete)"),
+                    lambda path: on_path(path, name),
+                )
             else:
                 self.exit_action = ("new", name)
                 self.exit()
@@ -4033,16 +4193,28 @@ class CCSApp(App):
         if self.view != "sessions":
             return
         use_tmux = self._get_use_tmux()
-        if use_tmux:
-            if not HAS_TMUX:
-                self._set_status("tmux is not installed")
-                return
-            extra = self._active_profile_args()
-            self._tmux_launch_ephemeral(extra)
-            self._do_refresh()
-        else:
+        if not use_tmux:
             self.exit_action = ("tmp",)
             self.exit()
+            return
+        if not HAS_TMUX:
+            self._set_status("tmux is not installed")
+            return
+
+        def on_path(path):
+            path = path.strip() if path else ""
+            if path and not os.path.isdir(os.path.expanduser(path)):
+                self._set_status(f"Directory not found: {path}")
+                return
+            extra = self._active_profile_args()
+            cwd = os.path.expanduser(path) if path else None
+            self._tmux_launch_ephemeral(extra, cwd=cwd)
+            self._do_refresh()
+
+        self.push_screen(
+            PathInputModal("Project Path", os.getcwd(), "Path (Tab to autocomplete)"),
+            on_path,
+        )
 
     def action_search(self):
         if self.view != "sessions":
