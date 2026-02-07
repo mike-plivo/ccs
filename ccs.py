@@ -34,6 +34,7 @@ import os
 import glob
 import datetime
 import getpass
+import re
 import subprocess
 import sys
 import shlex
@@ -63,6 +64,9 @@ HAS_GIT = shutil.which("git") is not None
 TMUX_PREFIX = "ccs-"
 TMUX_IDLE_SECS = 30   # seconds of no output before marking session idle
 TMUX_POLL_INTERVAL = 5  # seconds between activity polls
+TMUX_CAPTURE_INTERVAL = 2.5  # seconds between pane capture polls
+TMUX_CAPTURE_LINES = 20      # number of lines to capture from tmux pane
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Z]')
 
 # ── Color pair IDs ────────────────────────────────────────────────────
 
@@ -580,6 +584,11 @@ class CCSApp:
         self.tmux_idle_prev: set = set()  # previous idle set, for detecting transitions
         self.tmux_last_poll: float = 0.0  # monotonic time of last tmux activity poll
         self._git_cache: dict = {}  # cwd string → (repo_name, [(hash, subject)]) or None
+        self.tmux_pane_cache: dict = {}    # sid → list[str] (captured lines)
+        self.tmux_pane_ts: dict = {}       # sid → float (monotonic capture time)
+        self.tmux_claude_state: dict = {}  # sid → "thinking"|"input"|"approval"|"done"|"unknown"
+        self.input_target_sid: Optional[str] = None
+        self.input_target_tmux: Optional[str] = None
 
         self.status = ""
         self.status_ttl = 0
@@ -624,6 +633,18 @@ class CCSApp:
         elif delta.days < 7:
             return curses.color_pair(CP_AGE_WEEK)
         return curses.color_pair(CP_AGE_OLD) | curses.A_DIM
+
+    def _tmux_state_attr(self, sid: str, is_idle: bool) -> int:
+        if is_idle:
+            return curses.color_pair(CP_DIM)
+        state = self.tmux_claude_state.get(sid, "unknown")
+        if state == "approval":
+            return curses.color_pair(CP_WARN) | curses.A_BOLD
+        elif state == "input":
+            return curses.color_pair(CP_INPUT) | curses.A_BOLD
+        elif state == "done":
+            return curses.color_pair(CP_DIM)
+        return curses.color_pair(CP_STATUS) | curses.A_BOLD
 
     def _get_page_size(self) -> int:
         h, _ = self.scr.getmaxyx()
@@ -707,6 +728,12 @@ class CCSApp:
             ))
         self._apply_filter()
         self._git_cache.clear()
+        # Prune stale pane cache entries
+        stale = set(self.tmux_pane_cache) - set(self.tmux_sids)
+        for sid in stale:
+            self.tmux_pane_cache.pop(sid, None)
+            self.tmux_pane_ts.pop(sid, None)
+            self.tmux_claude_state.pop(sid, None)
         self.tmux_last_poll = 0  # force immediate poll
         self._poll_tmux_activity()
 
@@ -752,6 +779,74 @@ class CCSApp:
                 names.append(s.tag or s.id[:12] if s else sid[:12])
             self._set_status(f"Idle: {', '.join(names)}")
         self.tmux_idle = new_idle
+        # Bulk capture pane output for progress indicators
+        for sid, tmux_name in self.tmux_sids.items():
+            self._capture_tmux_pane(sid, tmux_name)
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return _ANSI_RE.sub('', text)
+
+    def _capture_tmux_pane(self, sid: str, tmux_name: str) -> list:
+        """Capture last N lines from tmux pane, cached with TTL."""
+        now = time.monotonic()
+        last = self.tmux_pane_ts.get(sid, 0.0)
+        if now - last < TMUX_CAPTURE_INTERVAL and sid in self.tmux_pane_cache:
+            return self.tmux_pane_cache[sid]
+        try:
+            r = subprocess.run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p",
+                 "-l", str(TMUX_CAPTURE_LINES)],
+                capture_output=True, text=True, timeout=2)
+            if r.returncode != 0:
+                return self.tmux_pane_cache.get(sid, [])
+            lines = [self._strip_ansi(ln) for ln in r.stdout.splitlines()]
+            while lines and not lines[-1].strip():
+                lines.pop()
+            self.tmux_pane_cache[sid] = lines
+            self.tmux_pane_ts[sid] = now
+            self._detect_claude_state(sid, lines)
+        except Exception:
+            pass
+        return self.tmux_pane_cache.get(sid, [])
+
+    def _detect_claude_state(self, sid: str, lines: list):
+        """Detect Claude's state from captured pane output."""
+        if not lines:
+            self.tmux_claude_state[sid] = "unknown"
+            return
+        last_nonempty = ""
+        for line in reversed(lines):
+            stripped = line.strip()
+            if stripped:
+                last_nonempty = stripped
+                break
+        if "Session ended" in last_nonempty or "Returning to ccs" in last_nonempty:
+            self.tmux_claude_state[sid] = "done"
+            return
+        for line in reversed(lines[-5:]):
+            low = line.strip().lower()
+            if ("allow" in low and ("y/n" in low or "(y)" in low)) or \
+               "do you want to proceed" in low or \
+               ("permit" in low and "y/n" in low):
+                self.tmux_claude_state[sid] = "approval"
+                return
+        if last_nonempty in (">", "$") or last_nonempty.endswith("> "):
+            self.tmux_claude_state[sid] = "input"
+            return
+        self.tmux_claude_state[sid] = "thinking"
+
+    def _tmux_send_text(self, tmux_name: str, text: str):
+        """Send text to a tmux session followed by Enter."""
+        try:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_name, "-l", text],
+                capture_output=True, timeout=2)
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_name, "Enter"],
+                capture_output=True, timeout=2)
+        except Exception:
+            self._set_status("Failed to send input to tmux")
 
     def _get_git_info(self, cwd: str):
         """Return (repo_name, branch, [(hash, subject), ...]) or None if not a git repo."""
@@ -956,9 +1051,20 @@ class CCSApp:
             "profiles": "⏎ Set active  n New  e Edit  d Delete  Esc Back",
             "profile_edit": "↑↓ Navigate  Type to edit  Space Toggle  Tab Expert/Structured  ⏎ Save  Esc Back",
             "help":    "Press any key to close",
+            "input":   "Type message  ·  ⏎ Send  ·  Esc Cancel",
         }
         hint_key = self.mode
         hints = hints_map.get(hint_key, "")
+        if hint_key == "normal" and self.filtered:
+            s = self.filtered[self.cur]
+            if s.id in self.tmux_sids:
+                state = self.tmux_claude_state.get(s.id, "unknown")
+                if state == "approval":
+                    hints = "Y Approve  N Deny  i Input  K Kill  ⏎ Attach  / Search  ? Help"
+                elif state == "input":
+                    hints = "i Send input  Y/N Quick  K Kill  ⏎ Attach  / Search  ? Help"
+                else:
+                    hints = "i Input  Y/N  K Kill  ⏎ Attach  s Sort  / Search  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -983,6 +1089,9 @@ class CCSApp:
         elif self.mode == "chdir":
             self._safe(y, 1, " CWD:", curses.color_pair(CP_WARN) | curses.A_BOLD)
             self._safe(y, 7, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
+        elif self.mode == "input":
+            self._safe(y, 1, " >", curses.color_pair(CP_STATUS) | curses.A_BOLD)
+            self._safe(y, 4, self.ibuf + "▏", curses.color_pair(CP_NORMAL))
         elif self.mode in ("quit", "delete", "delete_empty", "profiles", "profile_edit"):
             pass  # handled by overlay popups
         elif self.query:
@@ -1121,7 +1230,7 @@ class CCSApp:
                 self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
             if has_tmux:
                 tx = 4 if s.pinned else 3  # after ★ (1 col) or at start
-                tmux_attr = curses.color_pair(CP_DIM) if is_idle else curses.color_pair(CP_STATUS) | curses.A_BOLD
+                tmux_attr = self._tmux_state_attr(s.id, is_idle)
                 self._safe(y, tx, tmux_ch, tmux_attr)
             x += pin_w
             if s.tag and tag_w > 0:
@@ -1148,7 +1257,7 @@ class CCSApp:
             if s.pinned:
                 self._safe(y, x, "★", curses.color_pair(CP_PIN) | curses.A_BOLD)
             if has_tmux:
-                tmux_attr = curses.color_pair(CP_DIM) if is_idle else curses.color_pair(CP_STATUS)
+                tmux_attr = self._tmux_state_attr(s.id, is_idle)
                 self._safe(y, x + (1 if s.pinned else 0), tmux_ch, tmux_attr)
             x += pin_w
 
@@ -1183,6 +1292,10 @@ class CCSApp:
         self._hline(y, 1, "─", w - 2, bdr)
         self._safe(y, w - 1, "┤", bdr)
         label = " Preview "
+        if self.filtered:
+            s = self.filtered[self.cur]
+            if s.id in self.tmux_sids:
+                label = " Live Preview "
         self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
 
     def _draw_preview(self, sy: int, h: int, w: int):
@@ -1230,24 +1343,48 @@ class CCSApp:
                 lines.append((cl, curses.color_pair(CP_DIM)))
         lines.append(("", 0))
 
-        # First message
-        if s.first_msg_long:
-            lines.append(("  First Message:",
-                           curses.color_pair(CP_HEADER) | curses.A_BOLD))
-            for wl in self._word_wrap(s.first_msg_long, w - 8):
-                lines.append((f"    {wl}", curses.color_pair(CP_NORMAL)))
-            lines.append(("", 0))
-
-        # Summaries / topics
-        if s.summaries:
-            lines.append(("  Topics:",
-                           curses.color_pair(CP_HEADER) | curses.A_BOLD))
-            for sm in s.summaries[-6:]:
-                tl = sm[:w - 10]
-                lines.append((f"    • {tl}", curses.color_pair(CP_NORMAL)))
-        elif not s.first_msg_long:
-            lines.append(("  (empty session — no messages yet)",
-                           curses.color_pair(CP_DIM) | curses.A_DIM))
+        has_tmux = s.id in self.tmux_sids
+        if has_tmux:
+            # Live output from tmux pane
+            tmux_name = self.tmux_sids[s.id]
+            captured = self._capture_tmux_pane(s.id, tmux_name)
+            if captured:
+                state = self.tmux_claude_state.get(s.id, "unknown")
+                state_labels = {
+                    "thinking": "thinking...",
+                    "input": "waiting for input",
+                    "approval": "waiting for approval (Y/N)",
+                    "done": "session ended",
+                    "unknown": "active",
+                }
+                lines.append((f"  Output ({state_labels.get(state, 'active')}):",
+                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                remaining = h - len(lines)
+                show = captured[-remaining:] if len(captured) > remaining else captured
+                for cl in show:
+                    if len(cl) > w - 6:
+                        cl = cl[:w - 9] + "..."
+                    lines.append((f"    {cl}", curses.color_pair(CP_NORMAL)))
+            else:
+                lines.append(("  (tmux session active, no output yet)",
+                               curses.color_pair(CP_DIM) | curses.A_DIM))
+        else:
+            # Static preview: first message and topics
+            if s.first_msg_long:
+                lines.append(("  First Message:",
+                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                for wl in self._word_wrap(s.first_msg_long, w - 8):
+                    lines.append((f"    {wl}", curses.color_pair(CP_NORMAL)))
+                lines.append(("", 0))
+            if s.summaries:
+                lines.append(("  Topics:",
+                               curses.color_pair(CP_HEADER) | curses.A_BOLD))
+                for sm in s.summaries[-6:]:
+                    tl = sm[:w - 10]
+                    lines.append((f"    • {tl}", curses.color_pair(CP_NORMAL)))
+            elif not s.first_msg_long:
+                lines.append(("  (empty session — no messages yet)",
+                               curses.color_pair(CP_DIM) | curses.A_DIM))
 
         # Render
         for i, (text, attr) in enumerate(lines[:h]):
@@ -1290,6 +1427,8 @@ class CCSApp:
             ("", 0),
             ("  Tmux", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
+            ("    i              Send input to tmux session", 0),
+            ("    Y / N          Quick approve/deny in tmux", 0),
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
@@ -1878,6 +2017,7 @@ class CCSApp:
             "profile_edit": self._input_profile_edit,
             "help": self._input_help,
             "quit": self._input_quit,
+            "input": self._input_send,
         }
         handler = dispatch.get(self.mode, self._input_normal)
         return handler(k)
@@ -2067,6 +2207,37 @@ class CCSApp:
                     self._set_status("No active tmux session for this session")
             elif not HAS_TMUX:
                 self._set_status("tmux is not installed")
+        elif k == ord("i"):
+            # Send input to tmux session
+            if self.filtered and HAS_TMUX:
+                s = self.filtered[self.cur]
+                if s.id in self.tmux_sids:
+                    self.input_target_sid = s.id
+                    self.input_target_tmux = self.tmux_sids[s.id]
+                    self.mode = "input"
+                    self.ibuf = ""
+                else:
+                    self._set_status("No active tmux session")
+            elif not HAS_TMUX:
+                self._set_status("tmux is not installed")
+        elif k == ord("Y"):
+            if self.filtered and HAS_TMUX:
+                s = self.filtered[self.cur]
+                if s.id in self.tmux_sids:
+                    self._tmux_send_text(self.tmux_sids[s.id], "y")
+                    self.tmux_pane_ts.pop(s.id, None)
+                    self._set_status("Sent: y (approve)")
+                else:
+                    self._set_status("No active tmux session")
+        elif k == ord("N"):
+            if self.filtered and HAS_TMUX:
+                s = self.filtered[self.cur]
+                if s.id in self.tmux_sids:
+                    self._tmux_send_text(self.tmux_sids[s.id], "n")
+                    self.tmux_pane_ts.pop(s.id, None)
+                    self._set_status("Sent: n (deny)")
+                else:
+                    self._set_status("No active tmux session")
         elif k == ord("/"):
             self.mode = "search"
         elif k == ord("R"):
@@ -2551,6 +2722,26 @@ class CCSApp:
             self.confirm_sel = 1 - self.confirm_sel
         elif k == ord("n") or k == 27 or (k in (ord("\n"), curses.KEY_ENTER, 10, 13) and self.confirm_sel == 0):
             self.mode = "normal"
+        return None
+
+    def _input_send(self, k: int) -> Optional[str]:
+        if k == 27:  # Esc
+            self.mode = "normal"
+            self.input_target_sid = None
+            self.input_target_tmux = None
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.ibuf.strip() and self.input_target_tmux:
+                self._tmux_send_text(self.input_target_tmux, self.ibuf)
+                self._set_status(f"Sent to {self.input_target_tmux}")
+                self.tmux_pane_ts.pop(self.input_target_sid, None)
+            self.ibuf = ""
+            self.mode = "normal"
+            self.input_target_sid = None
+            self.input_target_tmux = None
+        elif k in (curses.KEY_BACKSPACE, 127, 8):
+            self.ibuf = self.ibuf[:-1]
+        elif 32 <= k <= 126:
+            self.ibuf += chr(k)
         return None
 
     def _input_help(self, k: int) -> Optional[str]:
