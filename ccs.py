@@ -961,6 +961,8 @@ PreviewPane {
 #info-scroll {
     height: 1fr;
     border: heavy $accent;
+    border-title-color: $accent-lighten-2;
+    border-title-style: bold;
 }
 
 #info-scroll.focused {
@@ -974,6 +976,8 @@ InfoPane {
 TmuxPane {
     height: 1fr;
     border: heavy $accent;
+    border-title-color: $accent-lighten-2;
+    border-title-style: bold;
     scrollbar-size: 1 1;
 }
 
@@ -2396,9 +2400,13 @@ class CCSApp(App):
             yield SessionListWidget(id="session-list")
             yield PreviewPane(id="preview")
         with Container(id="detail-view"):
-            with ScrollableContainer(id="info-scroll"):
+            info_scroll = ScrollableContainer(id="info-scroll")
+            info_scroll.border_title = "Session Info"
+            with info_scroll:
                 yield InfoPane(id="info-pane")
-            yield TmuxPane(id="tmux-pane")
+            tmux_pane = TmuxPane(id="tmux-pane")
+            tmux_pane.border_title = "Tmux View"
+            yield tmux_pane
         yield FooterBar(id="footer")
 
     def on_mount(self):
