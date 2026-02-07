@@ -3510,7 +3510,7 @@ class CCSApp(App):
             self.action_cycle_sort()
         elif key == "i":
             self.action_send_input()
-        elif key == "forward_slash":
+        elif key == "slash":
             self.action_search()
 
     # -- Actions -----------------------------------------------------------
