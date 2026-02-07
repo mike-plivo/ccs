@@ -980,6 +980,37 @@ TmuxPane.focused {
     border-title-style: bold;
 }
 
+#passthrough-banner {
+    height: 1;
+    dock: top;
+    display: none;
+    background: $warning;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#passthrough-banner.active {
+    display: block;
+}
+
+.passthrough-active #header {
+    display: none;
+}
+
+.passthrough-active #footer {
+    display: none;
+}
+
+.passthrough-active #info-scroll {
+    display: none;
+}
+
+.passthrough-active TmuxPane {
+    height: 1fr;
+    border: none;
+}
+
 #footer {
     height: 1;
     dock: bottom;
@@ -1465,12 +1496,28 @@ class TmuxPane(RichLog):
     # Disable built-in RichLog bindings — all key routing done in CCSApp.on_key
     BINDINGS = []
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_raw_lines: Optional[list] = None
+        self._last_state: str = ""
+
     def update_content(self, raw_lines: Optional[list], state: str = "unknown"):
         """Update with raw ANSI lines from ``tmux capture-pane -e``.
 
         *raw_lines* is ``None`` when there is no tmux session at all,
         or an empty list when the session exists but has no output yet.
+        Preserves scroll position when content changes.
         """
+        # Skip if content unchanged
+        if raw_lines == self._last_raw_lines and state == self._last_state:
+            return
+        self._last_raw_lines = raw_lines
+        self._last_state = state
+
+        # Remember scroll position — check if user was at the bottom
+        was_at_bottom = self.scroll_y >= self.max_scroll_y - 1
+        old_scroll_y = self.scroll_y
+
         self.clear()
         if raw_lines is None:
             if not HAS_TMUX:
@@ -1490,6 +1537,7 @@ class TmuxPane(RichLog):
             "unknown": "active",
         }
         tc = lambda role, fb="": _tc(self.app, role, fb)
+        self.auto_scroll = was_at_bottom
         self.write(
             Text(
                 f"Output ({state_labels.get(state, 'active')}):",
@@ -1501,6 +1549,10 @@ class TmuxPane(RichLog):
         raw_text = "\n".join(raw_lines)
         ansi_text = Text.from_ansi(raw_text)
         self.write(ansi_text)
+
+        # Restore scroll position if user was scrolled up
+        if not was_at_bottom:
+            self.scroll_y = min(old_scroll_y, self.max_scroll_y)
 
 
 # ── FooterBar ─────────────────────────────────────────────────────────
@@ -2562,6 +2614,7 @@ class CCSApp(App):
         self._status_timer = None
 
     def compose(self) -> ComposeResult:
+        yield Static("", id="passthrough-banner")
         yield HeaderBox(id="header")
         with Container(id="sessions-view"):
             yield SessionListWidget(id="session-list")
@@ -3133,7 +3186,10 @@ class CCSApp(App):
 
     def _switch_to_sessions(self):
         self.view = "sessions"
-        self.passthrough_mode = False
+        if self.passthrough_mode:
+            self.passthrough_mode = False
+            self.query_one("#passthrough-banner", Static).remove_class("active")
+            self.remove_class("passthrough-active")
         self.query_one("#sessions-view").remove_class("hidden")
         self.query_one("#detail-view").remove_class("active")
         self._update_header()
@@ -3229,11 +3285,18 @@ class CCSApp(App):
         self.detail_focus = "tmux"
         self.query_one("#info-scroll").remove_class("focused")
         self.query_one("#tmux-pane").add_class("focused")
+        # Show banner and go fullscreen
+        banner = self.query_one("#passthrough-banner", Static)
+        project = s.project or s.cwd or s.id[:8]
+        banner.update(f" \u26a1 LIVE — {project} \u00b7 Ctrl-] exit")
+        banner.add_class("active")
+        self.add_class("passthrough-active")
         self._update_header()
-        self._set_status("LIVE mode — Ctrl-] to exit", ttl=3)
 
     def _exit_passthrough(self):
         self.passthrough_mode = False
+        self.query_one("#passthrough-banner", Static).remove_class("active")
+        self.remove_class("passthrough-active")
         self._update_header()
         self._set_status("Exited LIVE mode")
 
@@ -3344,9 +3407,9 @@ class CCSApp(App):
                 self.action_send_input()
             elif key == "I":
                 self._enter_passthrough()
-            elif key == "up":
+            elif key in ("up", "k"):
                 self.query_one("#info-scroll" if self.detail_focus == "info" else "#tmux-pane").scroll_up()
-            elif key == "down":
+            elif key in ("down", "j"):
                 self.query_one("#info-scroll" if self.detail_focus == "info" else "#tmux-pane").scroll_down()
             elif key == "pageup":
                 self.query_one("#info-scroll" if self.detail_focus == "info" else "#tmux-pane").scroll_page_up()
