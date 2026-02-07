@@ -1679,17 +1679,27 @@ class ConfirmModal(ModalScreen[bool]):
         background: $surface;
         padding: 2 3;
     }
-    #confirm-message { }
+    #confirm-message { text-align: center; }
     #confirm-buttons { text-align: center; height: auto; }
     #confirm-hints { text-align: center; margin-top: 1; }
     """
 
-    def __init__(self, title: str, message: str, detail: str = ""):
+    # color_style: "danger" (red), "warning" (orange), "normal" (theme accent)
+    def __init__(self, title: str, message: str, detail: str = "", color_style: str = "danger"):
         super().__init__()
         self.title_text = title
         self.message_text = message
         self.detail_text = detail
+        self.color_style = color_style
         self.sel = 1  # 0=Yes, 1=No (default No)
+
+    def _get_color(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        if self.color_style == "warning":
+            return "#ff8800"
+        elif self.color_style == "normal":
+            return tc("header-color", "#00ffff")
+        return tc("warn-color", "#ff4444")
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
@@ -1699,9 +1709,15 @@ class ConfirmModal(ModalScreen[bool]):
 
     def on_mount(self):
         tc = lambda role, fb="": _tc(self.app, role, fb)
+        color = self._get_color()
+        box = self.query_one("#confirm-box")
+        if self.color_style == "warning":
+            box.styles.border = ("heavy", "#ff8800")
+        elif self.color_style == "normal":
+            box.styles.border = ("heavy", tc("accent-color", "#00cccc"))
         text = Text()
-        text.append(f"{self.title_text}\n\n", style=Style(color=tc("warn-color", "#ff4444"), bold=True))
-        text.append(f"{self.message_text}", style=Style(color=tc("warn-color", "#ff4444")))
+        text.append(f"{self.title_text}\n\n", style=Style(color=color, bold=True))
+        text.append(f"{self.message_text}", style=Style(color=color))
         if self.detail_text:
             text.append(f"\n\n{self.detail_text}", style=Style(color=tc("dim-color", "#888888")))
         self.query_one("#confirm-message", Static).update(text)
@@ -1712,7 +1728,8 @@ class ConfirmModal(ModalScreen[bool]):
 
     def _render_buttons(self):
         tc = lambda role, fb="": _tc(self.app, role, fb)
-        sel_style = Style(color=tc("warn-color", "#ff4444"), bold=True, reverse=True)
+        color = self._get_color()
+        sel_style = Style(color=color, bold=True, reverse=True)
         dim_style = Style(color=tc("dim-color", "#888888"))
         text = Text(justify="center")
         yes_label = "  Yes (y)  "
@@ -1885,6 +1902,7 @@ class InputModal(ModalScreen[str]):
         background: $surface;
         padding: 2 3;
     }
+    #input-title { text-align: center; }
     #input-area {
         height: 1fr;
     }
@@ -1942,6 +1960,7 @@ class SimpleInputModal(ModalScreen[str]):
         background: $surface;
         padding: 2 3;
     }
+    #simple-input-title { text-align: center; }
     #simple-input-field {
         margin-top: 1;
     }
@@ -1997,6 +2016,7 @@ class ThemeModal(ModalScreen[str]):
         background: $surface;
         padding: 2 3;
     }
+    #theme-title { text-align: center; }
     #theme-list-text { height: auto; }
     #theme-hints { margin-top: 1; }
     """
@@ -2091,6 +2111,7 @@ class ProfilesModal(ModalScreen[str]):
         background: $surface;
         padding: 2 3;
     }
+    #profiles-title { text-align: center; }
     #profiles-list-text { height: auto; }
     #profiles-hints { margin-top: 1; }
     """
@@ -2231,6 +2252,7 @@ class ProfileEditModal(ModalScreen[dict]):
         background: $surface;
         padding: 2 3;
     }
+    #profedit-title { text-align: center; }
     #profedit-rows-text { height: auto; }
     #profedit-hints { margin-top: 1; }
     """
@@ -3248,7 +3270,7 @@ class CCSApp(App):
             if confirmed:
                 self.exit()
 
-        self.push_screen(ConfirmModal("Quit", "Exit CCS?"), on_result)
+        self.push_screen(ConfirmModal("Quit", "Exit CCS?", color_style="normal"), on_result)
 
     def action_help(self):
         self.push_screen(HelpModal(self.view))
@@ -3624,6 +3646,7 @@ class CCSApp(App):
                 "Kill Tmux",
                 f"Kill tmux session for '{label}'?",
                 "The Claude session data is preserved and can be resumed later.",
+                color_style="warning",
             ),
             on_result,
         )
