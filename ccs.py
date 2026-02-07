@@ -763,10 +763,10 @@ class CCSApp:
                     self.tmux_scroll = min(mx_s, self.tmux_scroll + 3)
 
             # Click on scrollbar track (column 0) → jump scroll position
-            if clicked and mx == 0 and iy <= my < iy + ih and self._info_lines_count > ih:
+            if clicked and mx <= 1 and iy <= my < iy + ih and self._info_lines_count > ih:
                 ratio = (my - iy) / max(1, ih - 1)
                 self.detail_scroll = int(ratio * max(0, self._info_lines_count - ih))
-            elif clicked and mx == 0 and ty <= my < ty + th and self._tmux_lines_count > th:
+            elif clicked and mx <= 1 and ty <= my < ty + th and self._tmux_lines_count > th:
                 ratio = (my - ty) / max(1, th - 1)
                 self.tmux_scroll = int(ratio * max(0, self._tmux_lines_count - th))
 
@@ -1511,10 +1511,9 @@ class CCSApp:
             self._safe(y, 2, label, curses.color_pair(CP_BORDER) | curses.A_BOLD)
 
     def _draw_scrollbar(self, sy: int, h: int, scroll: int, total: int):
-        """Draw a scrollbar on the left edge (column 0) of a pane."""
+        """Draw a scrollbar on the left edge (columns 0-1) of a pane."""
         if total <= h or h < 2:
             return
-        col = 0
         track_attr = curses.color_pair(CP_BORDER)
         thumb_attr = curses.color_pair(CP_ACCENT) | curses.A_BOLD
         # Thumb size and position
@@ -1526,9 +1525,9 @@ class CCSApp:
             thumb_y = 0
         for i in range(h):
             if thumb_y <= i < thumb_y + thumb_h:
-                self._safe(sy + i, col, "┃", thumb_attr)
+                self._safe(sy + i, 0, "██", thumb_attr)
             else:
-                self._safe(sy + i, col, "│", track_attr)
+                self._safe(sy + i, 0, "░░", track_attr)
 
     def _draw_info_pane(self, sy: int, h: int, w: int):
         """Top pane: session metadata, git info, first message, topics."""
@@ -1840,14 +1839,16 @@ class CCSApp:
                 else:
                     self._safe(y, sx + 1, text[:box_w - 3], attr)
 
-        # Draw buttons on their row
+        # Draw buttons on their row (highlight selected)
         self._geo_overlay_btns = []
         if btn_row >= 0:
             gap = 4
             total_w = len(yes_label) + len(no_label) + gap
             bx = sx + max(2, (box_w - total_w) // 2)
-            self._safe(btn_row, bx, yes_label, warn)
-            self._safe(btn_row, bx + len(yes_label) + gap, no_label, dim)
+            yes_a = sel_attr if self.confirm_sel == 1 else dim
+            no_a = sel_attr if self.confirm_sel == 0 else dim
+            self._safe(btn_row, bx, yes_label, yes_a)
+            self._safe(btn_row, bx + len(yes_label) + gap, no_label, no_a)
             self._geo_overlay_btns = [
                 (bx, btn_row, len(yes_label), 1, "yes"),
                 (bx + len(yes_label) + gap, btn_row, len(no_label), 1, "no"),
@@ -2665,6 +2666,7 @@ class CCSApp:
                     if tmux_name in alive:
                         self.kill_tmux_target = tmux_name
                         self.kill_tmux_label = s.tag or s.id[:12]
+                        self.confirm_sel = 0
                         self.mode = "kill_tmux"
                     else:
                         self._set_status("No active tmux session for this session")
@@ -2801,6 +2803,7 @@ class CCSApp:
                     if tmux_name in alive:
                         self.kill_tmux_target = tmux_name
                         self.kill_tmux_label = s.tag or s.id[:12]
+                        self.confirm_sel = 0
                         self.mode = "kill_tmux"
                     else:
                         self._set_status("No active tmux session for this session")
@@ -2858,6 +2861,13 @@ class CCSApp:
         return None
 
     def _input_delete(self, k: int) -> Optional[str]:
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            self.confirm_sel = 1 - self.confirm_sel
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.confirm_sel == 1:
+                k = ord("y")
+            else:
+                k = ord("n")
         if k in (ord("y"), ord("Y")):
             if self.marked:
                 count = 0
@@ -2881,6 +2891,13 @@ class CCSApp:
         return None
 
     def _input_delete_empty(self, k: int) -> Optional[str]:
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            self.confirm_sel = 1 - self.confirm_sel
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.confirm_sel == 1:
+                k = ord("y")
+            else:
+                k = ord("n")
         if k in (ord("y"), ord("Y")):
             empty = [s for s in self.sessions if not s.first_msg and not s.summary]
             count = 0
@@ -2895,6 +2912,13 @@ class CCSApp:
         return None
 
     def _input_kill_tmux(self, k: int) -> Optional[str]:
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            self.confirm_sel = 1 - self.confirm_sel
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.confirm_sel == 1:
+                k = ord("y")
+            else:
+                k = ord("n")
         if k in (ord("y"), ord("Y")):
             tmux_name = self.kill_tmux_target
             subprocess.run(["tmux", "kill-session", "-t", tmux_name],
@@ -3274,6 +3298,13 @@ class CCSApp:
                 break
 
     def _input_quit(self, k: int) -> Optional[str]:
+        if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            self.confirm_sel = 1 - self.confirm_sel
+        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+            if self.confirm_sel == 1:
+                return self._input_quit(ord("y"))
+            else:
+                return self._input_quit(ord("n"))
         if k in (ord("y"), ord("Y")):
             return "quit"
         elif k in (ord("n"), ord("N"), 27):
