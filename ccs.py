@@ -690,13 +690,14 @@ class CCSApp:
         except curses.error:
             return None
 
+        pressed = bool(bstate & curses.BUTTON1_PRESSED)
         clicked = bool(bstate & curses.BUTTON1_CLICKED)
         dbl_clicked = bool(bstate & curses.BUTTON1_DOUBLE_CLICKED)
         scroll_up = bool(bstate & getattr(curses, "BUTTON4_PRESSED", 0))
         scroll_down = bool(bstate & getattr(curses, "BUTTON5_PRESSED", 0))
 
         # ── Overlay button clicks ──
-        if self.mode in ("quit", "delete", "delete_empty", "kill_tmux", "launch") and (clicked or dbl_clicked):
+        if self.mode in ("quit", "delete", "delete_empty", "kill_tmux", "launch") and (pressed or clicked or dbl_clicked):
             for bx, by, bw, bh, val in self._geo_overlay_btns:
                 if bx <= mx < bx + bw and by <= my < by + bh:
                     if val == "yes":
@@ -713,7 +714,7 @@ class CCSApp:
             return None
 
         # ── Header clicks: profile badge and view label ──
-        if clicked or dbl_clicked:
+        if pressed or clicked or dbl_clicked:
             px, py, pw = self._geo_profile_badge
             if my == py and px <= mx < px + pw:
                 self.mode = "profiles"
@@ -735,16 +736,16 @@ class CCSApp:
             ty, th, _, tw = self._geo_tmux_pane
 
             # Click on info pane → focus info
-            if (clicked or dbl_clicked) and iy <= my < iy + ih:
+            if (pressed or clicked or dbl_clicked) and iy <= my < iy + ih:
                 self.detail_focus = "info"
             # Click on tmux pane → focus tmux
-            elif (clicked or dbl_clicked) and ty <= my < ty + th:
+            elif (pressed or clicked or dbl_clicked) and ty <= my < ty + th:
                 self.detail_focus = "tmux"
             # Click on info separator → focus info
-            elif (clicked or dbl_clicked) and iy > 0 and my == iy - 1:
+            elif (pressed or clicked or dbl_clicked) and iy > 0 and my == iy - 1:
                 self.detail_focus = "info"
             # Click on tmux separator → focus tmux
-            elif (clicked or dbl_clicked) and ty > 0 and my == ty - 1:
+            elif (pressed or clicked or dbl_clicked) and ty > 0 and my == ty - 1:
                 self.detail_focus = "tmux"
 
             # Scroll wheel in info pane
@@ -762,11 +763,11 @@ class CCSApp:
                     mx_s = max(0, self._tmux_lines_count - th)
                     self.tmux_scroll = min(mx_s, self.tmux_scroll + 3)
 
-            # Click on scrollbar track (column 0) → jump scroll position
-            if clicked and mx <= 1 and iy <= my < iy + ih and self._info_lines_count > ih:
+            # Click on scrollbar track (columns 0-1) → jump scroll position
+            if (pressed or clicked) and mx <= 1 and iy <= my < iy + ih and self._info_lines_count > ih:
                 ratio = (my - iy) / max(1, ih - 1)
                 self.detail_scroll = int(ratio * max(0, self._info_lines_count - ih))
-            elif clicked and mx <= 1 and ty <= my < ty + th and self._tmux_lines_count > th:
+            elif (pressed or clicked) and mx <= 1 and ty <= my < ty + th and self._tmux_lines_count > th:
                 ratio = (my - ty) / max(1, th - 1)
                 self.tmux_scroll = int(ratio * max(0, self._tmux_lines_count - th))
 
@@ -791,7 +792,7 @@ class CCSApp:
                     self.confirm_sel = 0 if HAS_TMUX else 1
                     self.mode = "launch"
                     return None
-                elif clicked:
+                elif pressed or clicked:
                     self.cur = row_idx
 
         if scroll_up:
@@ -1302,13 +1303,14 @@ class CCSApp:
         has_tmux = s.id in self.tmux_sids
         is_idle = s.id in self.tmux_idle
 
-        # Column widths
+        # Column widths (account for scrollbar left margin)
+        aw = w - lm  # available width after scrollbar margin
         ind_w = 3     # " ▸ " or " ● " or "   "
         pin_w = 3     # "★⚡" or "★  " or "⚡ " or "   " (⚡ is 2 cols wide)
         ts_w = 18     # "2025-01-15 14:30  "
         msg_w = 6     # " 12m  " or "      "
         tag_w = tag_col_w  # fixed across all visible rows
-        proj_w = min(28, max(12, (w - ind_w - pin_w - tag_w - ts_w - msg_w - 4) // 3))
+        proj_w = min(28, max(12, (aw - ind_w - pin_w - tag_w - ts_w - msg_w - 4) // 3))
 
         if s.tag:
             raw_tag = f"[{s.tag}] "
@@ -1318,7 +1320,7 @@ class CCSApp:
         else:
             tag_str = " " * tag_w
 
-        desc_w = max(8, w - ind_w - pin_w - tag_w - ts_w - msg_w - proj_w - 2)
+        desc_w = max(8, aw - ind_w - pin_w - tag_w - ts_w - msg_w - proj_w - 2)
 
         proj = s.project_display
         if len(proj) > proj_w:
@@ -1357,22 +1359,25 @@ class CCSApp:
         else:
             mark_ch = " "
 
+        # Left margin for scrollbar + gap
+        lm = 3
+
         if sel:
             # Highlight entire row
             base = curses.color_pair(CP_SELECTED) | curses.A_BOLD
 
             line = f" {mark_ch} {pin_str}{tag_str}{s.ts}  {msg_str}{proj} {desc}"
-            if len(line) < w - 1:
-                line += " " * (w - 1 - len(line))
-            line = line[:w - 1]
-            self._safe(y, 0, line, base)
+            if len(line) < w - lm - 1:
+                line += " " * (w - lm - 1 - len(line))
+            line = line[:w - lm - 1]
+            self._safe(y, lm, line, base)
 
             # Overlay colored segments on selection background
-            x = 3
+            x = lm + 3
             if s.pinned:
                 self._safe(y, x, "★", curses.color_pair(CP_SEL_PIN) | curses.A_BOLD)
             if has_tmux:
-                tx = 4 if s.pinned else 3  # after ★ (1 col) or at start
+                tx = x + 1 if s.pinned else x  # after ★ (1 col) or at start
                 tmux_attr = self._tmux_state_attr(s.id, is_idle)
                 self._safe(y, tx, tmux_ch, tmux_attr)
             x += pin_w
@@ -1386,9 +1391,9 @@ class CCSApp:
             self._safe(y, x, proj.rstrip(),
                        curses.color_pair(CP_SEL_PROJ) | curses.A_BOLD)
             if marked:
-                self._safe(y, 1, "●", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+                self._safe(y, lm + 1, "●", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
         else:
-            x = 0
+            x = lm
             # Indicator
             if marked:
                 self._safe(y, x, f" ● ", curses.color_pair(CP_ACCENT) | curses.A_BOLD)
@@ -1495,9 +1500,9 @@ class CCSApp:
             lines.append(("  (empty session — no messages yet)",
                            curses.color_pair(CP_DIM) | curses.A_DIM))
 
-        # Render
+        # Render (offset by 3 for scrollbar + gap)
         for i, (text, attr) in enumerate(lines[:h]):
-            self._safe(sy + i, 0, text[:w - 1], attr)
+            self._safe(sy + i, 3, text[:w - 4], attr)
 
     def _draw_pane_separator(self, y: int, w: int, label: str, focused: bool):
         """Draw a labeled separator line for a pane."""
@@ -1601,10 +1606,10 @@ class CCSApp:
 
         self._info_lines_count = len(lines)
 
-        # Apply scroll and render
+        # Apply scroll and render (offset by 3 for scrollbar + gap)
         scrolled = lines[self.detail_scroll:]
         for i, (text, attr) in enumerate(scrolled[:h]):
-            self._safe(sy + i, 0, text[:w - 2], attr)
+            self._safe(sy + i, 3, text[:w - 4], attr)
 
         self._draw_scrollbar(sy, h, self.detail_scroll, len(lines))
 
@@ -1647,10 +1652,10 @@ class CCSApp:
 
         self._tmux_lines_count = len(lines)
 
-        # Apply scroll and render
+        # Apply scroll and render (offset by 3 for scrollbar + gap)
         scrolled = lines[self.tmux_scroll:]
         for i, (text, attr) in enumerate(scrolled[:h]):
-            self._safe(sy + i, 0, text[:w - 2], attr)
+            self._safe(sy + i, 3, text[:w - 4], attr)
 
         self._draw_scrollbar(sy, h, self.tmux_scroll, len(lines))
 
