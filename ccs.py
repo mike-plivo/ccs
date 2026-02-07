@@ -980,37 +980,6 @@ TmuxPane.focused {
     border-title-style: bold;
 }
 
-#passthrough-banner {
-    height: 1;
-    dock: top;
-    display: none;
-    background: $warning;
-    color: $text;
-    text-style: bold;
-    padding: 0 1;
-}
-
-#passthrough-banner.active {
-    display: block;
-}
-
-.passthrough-active #header {
-    display: none;
-}
-
-.passthrough-active #footer {
-    display: none;
-}
-
-.passthrough-active #info-scroll {
-    display: none;
-}
-
-.passthrough-active TmuxPane {
-    height: 1fr;
-    border: none;
-}
-
 #footer {
     height: 1;
     dock: bottom;
@@ -1636,7 +1605,6 @@ class HelpModal(ModalScreen):
             text.append("  \u23ce              Resume / attach session\n")
             text.append("  K              Kill tmux session\n")
             text.append("  i              Send text to tmux (Ctrl+D to send)\n")
-            text.append("  I              Live passthrough mode (Ctrl-] to exit)\n")
             text.append("  p              Toggle pin\n")
             text.append("  t / T          Set / remove tag\n")
             text.append("  c              Change session CWD\n")
@@ -2609,12 +2577,10 @@ class CCSApp(App):
         self._git_cache = {}
 
         self.detail_focus = "info"
-        self.passthrough_mode = False
         self.exit_action = None
         self._status_timer = None
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="passthrough-banner")
         yield HeaderBox(id="header")
         with Container(id="sessions-view"):
             yield SessionListWidget(id="session-list")
@@ -2625,7 +2591,7 @@ class CCSApp(App):
             with info_scroll:
                 yield InfoPane(id="info-pane")
             tmux_pane = TmuxPane(id="tmux-pane")
-            tmux_pane.border_title = "Tmux View"
+            tmux_pane.border_title = "Tmux Preview"
             yield tmux_pane
         yield FooterBar(id="footer")
 
@@ -2785,13 +2751,9 @@ class CCSApp(App):
         header.total_count = len(self.sessions)
         header.sort_mode = self.sort_mode
         header.filter_text = self.query
-        if self.passthrough_mode:
+        if self.view == "detail":
             header.hints = (
-                "\u26a1 LIVE \u2014 Keys forwarded to tmux \u00b7 Ctrl-] exit"
-            )
-        elif self.view == "detail":
-            header.hints = (
-                "Tab panes \u00b7 \u23ce resume \u00b7 I live \u00b7 p pin \u00b7 t tag"
+                "Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
                 " \u00b7 d del \u00b7 K kill \u00b7 Esc back"
             )
         else:
@@ -3186,10 +3148,6 @@ class CCSApp(App):
 
     def _switch_to_sessions(self):
         self.view = "sessions"
-        if self.passthrough_mode:
-            self.passthrough_mode = False
-            self.query_one("#passthrough-banner", Static).remove_class("active")
-            self.remove_class("passthrough-active")
         self.query_one("#sessions-view").remove_class("hidden")
         self.query_one("#detail-view").remove_class("active")
         self._update_header()
@@ -3207,144 +3165,10 @@ class CCSApp(App):
             if self.view == "detail":
                 self._update_detail()
 
-    def _tmux_send_key(self, tmux_name, key_str):
-        """Send a single key to tmux (fire-and-forget)."""
-        try:
-            subprocess.Popen(
-                ["tmux", "send-keys", "-t", tmux_name, key_str],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-
-    def _tmux_send_literal(self, tmux_name, text):
-        """Send literal text to tmux (fire-and-forget)."""
-        try:
-            subprocess.Popen(
-                ["tmux", "send-keys", "-t", tmux_name, "-l", text],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-
-    def _passthrough_refresh(self, sid, tmux_name):
-        """Immediate capture + display for passthrough responsiveness."""
-        self._capture_one_pane(sid, tmux_name)
-        if self.view == "detail":
-            self._update_detail()
-
-    def _tmux_launch_detached(self, s):
-        """Launch a detached tmux session for passthrough mode."""
-        if not HAS_TMUX:
-            self._set_status("tmux is not installed")
-            return False
-        tmux_name = TMUX_PREFIX + s.id[:8]
-        existing = self.mgr.tmux_sessions()
-        if tmux_name in existing:
-            return True  # already running
-        extra = self._active_profile_args()
-        cmd_parts = ["claude", "--resume", s.id] + extra
-        cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
-        if s.cwd and os.path.isdir(s.cwd):
-            cmd_str = f"cd {shlex.quote(s.cwd)} && {cmd_str}"
-        full_cmd = self._tmux_wrap_cmd(cmd_str)
-        try:
-            subprocess.run(
-                [
-                    "tmux", "new-session", "-d", "-s", tmux_name,
-                    "-x", "200", "-y", "50",
-                    "bash", "-c", full_cmd,
-                ],
-                capture_output=True,
-                timeout=5,
-            )
-        except Exception:
-            self._set_status("Failed to launch tmux session")
-            return False
-        self.mgr.tmux_register(tmux_name, s.id, self.active_profile_name)
-        # Refresh tmux_sids so the new session is tracked
-        alive = self.mgr.tmux_sessions()
-        self.tmux_sids = {
-            info.get("session_id"): name for name, info in alive.items()
-        }
-        self._rebuild_list()
-        self._update_footer()
-        return True
-
-    def _enter_passthrough(self):
-        s = self._current_session()
-        if not s:
-            return
-        if s.id not in self.tmux_sids:
-            if not self._tmux_launch_detached(s):
-                return
-            self._set_status("Launched tmux session — entering LIVE mode", ttl=3)
-        self.passthrough_mode = True
-        self.detail_focus = "tmux"
-        self.query_one("#info-scroll").remove_class("focused")
-        self.query_one("#tmux-pane").add_class("focused")
-        # Show banner and go fullscreen
-        banner = self.query_one("#passthrough-banner", Static)
-        project = s.project_display or s.cwd or s.id[:8]
-        banner.update(f" \u26a1 LIVE — {project} \u00b7 Ctrl-] exit")
-        banner.add_class("active")
-        self.add_class("passthrough-active")
-        self._update_header()
-
-    def _exit_passthrough(self):
-        self.passthrough_mode = False
-        self.query_one("#passthrough-banner", Static).remove_class("active")
-        self.remove_class("passthrough-active")
-        self._update_header()
-        self._set_status("Exited LIVE mode")
-
-    # Key name → tmux key mapping for passthrough
-    _TMUX_KEY_MAP = {
-        "enter": "Enter", "return": "Enter", "tab": "Tab",
-        "escape": "Escape", "backspace": "BSpace", "delete": "DC",
-        "up": "Up", "down": "Down", "left": "Left", "right": "Right",
-        "pageup": "PageUp", "pagedown": "PageDown",
-        "home": "Home", "end": "End",
-        "f1": "F1", "f2": "F2", "f3": "F3", "f4": "F4",
-        "f5": "F5", "f6": "F6", "f7": "F7", "f8": "F8",
-        "f9": "F9", "f10": "F10", "f11": "F11", "f12": "F12",
-        "space": "Space",
-    }
-
     def on_key(self, event) -> None:
         """Central key handler — mirrors the curses _handle_input dispatch."""
         # Don't handle keys when a modal screen is active
         if isinstance(self.screen, ModalScreen):
-            return
-
-        # ── Passthrough mode: forward keys to tmux ──────────────
-        if self.passthrough_mode:
-            key = event.key
-            event.stop()
-            event.prevent_default()
-            # Ctrl-] exits passthrough
-            if key == "ctrl+right_square_bracket":
-                self._exit_passthrough()
-                return
-            s = self._current_session()
-            if not s or s.id not in self.tmux_sids:
-                self._exit_passthrough()
-                return
-            tmux_name = self.tmux_sids[s.id]
-            sid = s.id
-            # Map special keys
-            tmux_key = self._TMUX_KEY_MAP.get(key)
-            if tmux_key:
-                self._tmux_send_key(tmux_name, tmux_key)
-            elif key.startswith("ctrl+") and len(key) > 5:
-                ch = key[5:]
-                self._tmux_send_key(tmux_name, f"C-{ch}")
-            elif len(key) == 1:
-                self._tmux_send_literal(tmux_name, key)
-            # Immediate refresh after a short delay for tmux to process
-            self.set_timer(0.05, lambda: self._passthrough_refresh(sid, tmux_name))
             return
 
         key = event.key
@@ -3405,8 +3229,6 @@ class CCSApp(App):
                 self.action_kill_tmux()
             elif key == "i":
                 self.action_send_input()
-            elif key == "I":
-                self._enter_passthrough()
             elif key in ("up", "k"):
                 self.query_one("#info-scroll" if self.detail_focus == "info" else "#tmux-pane").scroll_up()
             elif key in ("down", "j"):
@@ -3472,6 +3294,10 @@ class CCSApp(App):
     # -- Search ------------------------------------------------------------
 
     def _show_search(self):
+        # Switch to sessions view so filtered list is visible
+        if self.view == "detail":
+            self._switch_to_sessions()
+
         def on_live_change(value):
             self.query = value
             self._apply_filter()
