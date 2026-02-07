@@ -3423,20 +3423,23 @@ class CCSApp(App):
 
     def on_key(self, event) -> None:
         """Central key handler — mirrors the curses _handle_input dispatch."""
+        key = event.key
+
+        # Ctrl-C + c = immediate quit (even over modal)
+        if key == "c" and (time.monotonic() - self._ctrl_c_time) < 1.0:
+            self._ctrl_c_time = 0.0
+            self.exit()
+            return
+
         # Don't handle keys when a modal screen is active
         if isinstance(self.screen, ModalScreen):
             return
 
-        key = event.key
         event.stop()
         event.prevent_default()
         sl = self.query_one("#session-list", SessionListWidget)
 
         # ── Global keys ──────────────────────────────────────────
-        if key == "c" and (time.monotonic() - self._ctrl_c_time) < 1.0:
-            self._ctrl_c_time = 0.0
-            self.exit()
-            return
         if key == "ctrl+c":
             self._ctrl_c_time = time.monotonic()
             self.action_quit_confirm()
