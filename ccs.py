@@ -2766,8 +2766,8 @@ class CCSApp(App):
         header.filter_text = self.query
         if self.view == "detail":
             header.hints = (
-                "Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
-                " \u00b7 d del \u00b7 K kill \u00b7 Esc back"
+                "\u2190/Esc back \u00b7 Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
+                " \u00b7 d del \u00b7 K kill"
             )
         else:
             header.hints = (
