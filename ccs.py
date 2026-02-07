@@ -3224,10 +3224,13 @@ class CCSApp(App):
             self._set_status("Failed to send input to tmux")
 
     @staticmethod
-    def _tmux_wrap_cmd(cmd_str):
+    @staticmethod
+    def _tmux_wrap_cmd(cmd_str, tmux_name):
+        tn = shlex.quote(tmux_name)
         return (
             f'{cmd_str}; echo ""; echo "Session ended.'
-            f' Returning to ccs..."; sleep 1'
+            f' Returning to ccs..."; sleep 1;'
+            f' tmux kill-session -t {tn} 2>/dev/null || true'
         )
 
     def _tmux_launch(self, s, extra):
@@ -3240,7 +3243,7 @@ class CCSApp(App):
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if s.cwd and os.path.isdir(s.cwd):
             cmd_str = f"cd {shlex.quote(s.cwd)} && {cmd_str}"
-        full_cmd = self._tmux_wrap_cmd(cmd_str)
+        full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
                 "tmux",
@@ -3312,7 +3315,7 @@ class CCSApp(App):
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if cwd and os.path.isdir(cwd):
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
-        full_cmd = self._tmux_wrap_cmd(cmd_str)
+        full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
                 "tmux",
@@ -3339,7 +3342,7 @@ class CCSApp(App):
             f.write(uid + "\n")
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
-        full_cmd = self._tmux_wrap_cmd(cmd_str)
+        full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
                 "tmux",
