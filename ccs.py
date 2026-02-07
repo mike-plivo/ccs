@@ -667,8 +667,7 @@ class CCSApp:
         h, _ = self.scr.getmaxyx()
         hdr_h, ftr_h, sep_h = 4, 1, 1
         if self.view == "detail":
-            list_h = min(5, max(3, len(self.filtered)))
-            return max(1, list_h)
+            return 1
         preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
         return max(1, h - hdr_h - ftr_h - sep_h - preview_h)
 
@@ -1001,12 +1000,9 @@ class CCSApp:
             self._draw_separator(hdr_h + list_h, w)
             self._draw_preview(hdr_h + list_h + sep_h, preview_h, w)
         else:  # detail view
-            list_h = min(5, max(3, len(self.filtered)))
-            detail_h = h - hdr_h - ftr_h - sep_h - list_h
+            detail_h = h - hdr_h - ftr_h
             self._draw_header(w)
-            self._draw_list(hdr_h, list_h, w)
-            self._draw_separator(hdr_h + list_h, w)
-            self._draw_detail(hdr_h + list_h + sep_h, detail_h, w)
+            self._draw_detail(hdr_h, detail_h, w)
 
         self._draw_footer(h - ftr_h, w)
 
@@ -2324,19 +2320,6 @@ class CCSApp:
             elif k == curses.KEY_NPAGE:
                 max_scroll = max(0, self._detail_lines_count - 3)
                 self.detail_scroll = min(max_scroll, self.detail_scroll + 20)
-                _nav_handled = True
-            elif k == ord("k"):
-                old = self.cur
-                self.cur = max(0, self.cur - 1)
-                if self.cur != old:
-                    self.detail_scroll = 0
-                _nav_handled = True
-            elif k == ord("j"):
-                old = self.cur
-                if self.filtered:
-                    self.cur = min(len(self.filtered) - 1, self.cur + 1)
-                if self.cur != old:
-                    self.detail_scroll = 0
                 _nav_handled = True
             elif k in (curses.KEY_HOME, ord("g")):
                 self.detail_scroll = 0
