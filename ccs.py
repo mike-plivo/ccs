@@ -483,6 +483,10 @@ class SessionManager:
             lines = text.split("\n")
         except Exception:
             return
+        tags = self._load(TAGS_FILE, {})
+        cwds = self._load(CWDS_FILE, {})
+        pins = self._load(PINS_FILE, [])
+        changed = False
         for uid in lines:
             uid = uid.strip()
             if not uid:
@@ -492,6 +496,19 @@ class SessionManager:
                     os.remove(f)
                 except Exception:
                     pass
+            if uid in tags:
+                tags.pop(uid)
+                changed = True
+            if uid in cwds:
+                cwds.pop(uid)
+                changed = True
+            if uid in pins:
+                pins = [p for p in pins if p != uid]
+                changed = True
+        if changed:
+            self._save(TAGS_FILE, tags)
+            self._save(CWDS_FILE, cwds)
+            self._save(PINS_FILE, pins)
         EPHEMERAL_FILE.write_text("")
 
 
@@ -3281,10 +3298,10 @@ class CCSApp(App):
         elif not tmux_alive:
             # Regular session, tmux ended naturally — just unregister
             self.mgr.tmux_unregister(tmux_name)
-        self._do_refresh()
+        self._do_refresh(force=is_ephemeral or not has_session)
 
     def _cleanup_session_metadata(self, sid):
-        """Remove tags/cwds for a session ID that has no .jsonl file."""
+        """Remove tags/cwds/pins for a session ID."""
         tags = self.mgr._load(TAGS_FILE, {})
         if sid in tags:
             tags.pop(sid)
@@ -3293,6 +3310,10 @@ class CCSApp(App):
         if sid in cwds:
             cwds.pop(sid)
             self.mgr._save(CWDS_FILE, cwds)
+        pins = self.mgr._load(PINS_FILE, [])
+        if sid in pins:
+            pins = [p for p in pins if p != sid]
+            self.mgr._save(PINS_FILE, pins)
 
     def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
