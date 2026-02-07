@@ -902,6 +902,10 @@ Screen {
     background: $surface;
 }
 
+ModalScreen {
+    background: $background 25%;
+}
+
 #header {
     height: 5;
     dock: top;
@@ -1539,7 +1543,7 @@ class HelpModal(ModalScreen):
     DEFAULT_CSS = """
     HelpModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #help-box {
         width: 70;
@@ -1634,7 +1638,7 @@ class ConfirmModal(ModalScreen[bool]):
     DEFAULT_CSS = """
     ConfirmModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #confirm-box {
         width: 56;
@@ -1711,7 +1715,7 @@ class LaunchModal(ModalScreen[str]):
     DEFAULT_CSS = """
     LaunchModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #launch-box {
         width: 56;
@@ -1829,7 +1833,7 @@ class InputModal(ModalScreen[str]):
     DEFAULT_CSS = """
     InputModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #input-container {
         width: 80%;
@@ -1886,7 +1890,7 @@ class SimpleInputModal(ModalScreen[str]):
     DEFAULT_CSS = """
     SimpleInputModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #simple-input-container {
         width: 60;
@@ -1941,7 +1945,7 @@ class SearchModal(ModalScreen[str]):
     DEFAULT_CSS = """
     SearchModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #search-box {
         width: 56;
@@ -2000,7 +2004,7 @@ class ThemeModal(ModalScreen[str]):
     DEFAULT_CSS = """
     ThemeModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #theme-box {
         width: 44;
@@ -2093,7 +2097,7 @@ class ProfilesModal(ModalScreen[str]):
     DEFAULT_CSS = """
     ProfilesModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #profiles-box {
         width: 64;
@@ -2233,7 +2237,7 @@ class ProfileEditModal(ModalScreen[dict]):
     DEFAULT_CSS = """
     ProfileEditModal {
         align: center middle;
-        background: $background 60%;
+        background: $background 25%;
     }
     #profedit-box {
         width: 76;
