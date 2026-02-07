@@ -773,8 +773,10 @@ class CCSApp:
                 elif val == "no":
                     curses.ungetch(27)
                 else:
-                    # Launch overlay: numeric selection
+                    # Launch overlay: numeric selection (3 = cancel)
                     self.confirm_sel = val
+                    if val == 3:
+                        curses.ungetch(27)
                 return None
         return None
 
@@ -2004,7 +2006,7 @@ class CCSApp:
             # Cancel button on next row
             cancel_row = btn_row + 1
             self._draw_button_row(cancel_row, sx, box_w,
-                                  [(cancel_label, "no")])
+                                  [(cancel_label, 3)])
 
     def _launch_apply_profile(self, profile: dict):
         """Load a saved profile's settings into the launch state."""
