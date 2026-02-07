@@ -1051,12 +1051,18 @@ class CCSApp:
         # │  [active profile]  hints  │
         self._safe(1, 0, "│", bdr)
         self._safe(1, w - 1, "│", bdr)
+        x = 2
+        self._safe(1, x, "Profile:", curses.color_pair(CP_DIM) | curses.A_DIM)
+        x += 9
         prof_badge = f" {self.active_profile_name} "
-        self._safe(1, 2, prof_badge,
+        self._safe(1, x, prof_badge,
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
-        view_label = "Session View" if self.view == "detail" else "Sessions"
-        vx = 2 + len(prof_badge) + 1
-        self._safe(1, vx, view_label, curses.color_pair(CP_ACCENT))
+        x += len(prof_badge) + 1
+        self._safe(1, x, "View:", curses.color_pair(CP_DIM) | curses.A_DIM)
+        x += 6
+        view_label = " Session View " if self.view == "detail" else " Sessions "
+        self._safe(1, x, view_label,
+                   curses.color_pair(CP_TAG) | curses.A_BOLD)
 
         if self.view == "detail":
             normal_hints = "← Back  ↑↓ Scroll  j/k Session  ⏎ Resume  K Kill  / Search  ? Help"
