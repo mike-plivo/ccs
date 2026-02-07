@@ -3960,6 +3960,7 @@ class CCSApp(App):
         def on_result(confirmed):
             if confirmed:
                 for s in empty:
+                    self._kill_tmux_for_session(s.id)
                     self.mgr.delete(s)
                 self._set_status(f"Deleted {count} empty session(s)")
                 self._do_refresh()
@@ -4360,6 +4361,13 @@ def cmd_chdir(mgr: SessionManager, query: str, path: str):
     print(f"CWD set to [{expanded}]: {s.tag or s.id[:12]}")
 
 
+def _cli_kill_tmux(sid):
+    """Kill tmux session for a session ID (CLI helper)."""
+    if HAS_TMUX:
+        tmux_name = TMUX_PREFIX + sid
+        subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+
+
 def cmd_delete_session(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
     label = s.tag or s.label[:40] or s.id[:12]
@@ -4369,6 +4377,7 @@ def cmd_delete_session(mgr: SessionManager, query: str):
     except (EOFError, KeyboardInterrupt):
         answer = ""
     if answer == "y":
+        _cli_kill_tmux(s.id)
         mgr.delete(s)
         print(f"Deleted: {label}")
     else:
@@ -4389,6 +4398,7 @@ def cmd_delete_empty(mgr: SessionManager):
         answer = ""
     if answer == "y":
         for s in empty:
+            _cli_kill_tmux(s.id)
             mgr.delete(s)
         print(f"Deleted {len(empty)} empty session{'s' if len(empty) != 1 else ''}.")
     else:
