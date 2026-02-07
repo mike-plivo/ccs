@@ -2902,7 +2902,7 @@ class CCSApp(App):
         else:
             header.hints = (
                 "\u2191/\u2193 nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
-                " \u00b7 t tag \u00b7 d del \u00b7 k/K kill tmux \u00b7 / search \u00b7 s sort \u00b7 ? help"
+                " \u00b7 t tag \u00b7 d del \u00b7 k kill \u00b7 K kill all \u00b7 / search \u00b7 s sort \u00b7 ? help"
             )
 
     def _update_footer(self):
