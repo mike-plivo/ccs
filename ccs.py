@@ -1338,7 +1338,7 @@ def _append_session_meta(
         else:
             icon = "\u26a1"
             label = state_labels.get(state, "active")
-        kill_hint = "  (K to kill)" if detail else ""
+        kill_hint = "  (k to kill)" if detail else ""
         text.append(f"  Tmux:    {icon} {tmux_name} — ", style=Style(color=tc("dim-color", "#888888")))
         text.append(f"{label}", style=state_sty)
         text.append(f"{kill_hint}\n", style=Style(color=tc("dim-color", "#888888")))
@@ -1612,7 +1612,7 @@ class HelpModal(ModalScreen):
             text.append("  g / G          Scroll to top / bottom\n\n")
             text.append("Actions\n", style=hdr)
             text.append("  \u23ce              Resume / attach session\n")
-            text.append("  K              Kill tmux session\n")
+            text.append("  k              Kill tmux session\n")
             text.append("  i              Send text to tmux (Ctrl+D to send)\n")
             text.append("  p              Toggle pin\n")
             text.append("  t / T          Set / remove tag\n")
@@ -1627,8 +1627,8 @@ class HelpModal(ModalScreen):
         else:
             text.append("Sessions List\n\n", style=Style(bold=True))
             text.append("Navigation\n", style=hdr)
-            text.append("  \u2191 / k          Move up\n")
-            text.append("  \u2193 / j          Move down\n")
+            text.append("  \u2191              Move up\n")
+            text.append("  \u2193              Move down\n")
             text.append("  g / G          Jump to first / last\n")
             text.append("  PgUp / PgDn    Page up / down\n")
             text.append("  \u2192 / l          Open Session View\n\n")
@@ -1640,7 +1640,7 @@ class HelpModal(ModalScreen):
             text.append("  c              Change session CWD\n")
             text.append("  d              Delete session (bulk if marked)\n")
             text.append("  D              Delete all empty sessions\n")
-            text.append("  K              Kill tmux session\n\n")
+            text.append("  k              Kill tmux session\n\n")
             text.append("Bulk & Sort\n", style=hdr)
             text.append("  Space          Mark / unmark session\n")
             text.append("  u              Unmark all\n")
@@ -1749,7 +1749,7 @@ class ConfirmModal(ModalScreen[bool]):
             self.dismiss(False)
         elif key in ("enter", "return"):
             self.dismiss(self.sel == 0)
-        elif key in ("left", "h", "right", "l", "up", "k", "down", "j"):
+        elif key in ("left", "right", "up", "down"):
             self.sel = 1 - self.sel
             self._render_buttons()
 
@@ -1865,20 +1865,20 @@ class LaunchModal(ModalScreen[str]):
 
         cancel_idx = len(self._actions) - 1
         action_count = cancel_idx
-        if key in ("left", "h"):
+        if key == "left":
             self.sel = (self.sel - 1) % (cancel_idx + 1)
             if self.sel == 0 and not HAS_TMUX:
                 self.sel = cancel_idx
-        elif key in ("right", "l"):
+        elif key == "right":
             self.sel = (self.sel + 1) % (cancel_idx + 1)
             if self.sel == 0 and not HAS_TMUX:
                 self.sel = 1
-        elif key in ("up", "k"):
+        elif key == "up":
             if self.sel == cancel_idx:
                 self.sel = 1
             else:
                 self.sel = cancel_idx
-        elif key in ("down", "j"):
+        elif key == "down":
             if self.sel < cancel_idx:
                 self.sel = cancel_idx
             else:
@@ -2037,7 +2037,7 @@ class ThemeModal(ModalScreen[str]):
         tc = lambda role, fb="": _tc(self.app, role, fb)
         title = Text("Select Theme", style=Style(color=tc("header-color", "#00ffff"), bold=True))
         self.query_one("#theme-title", Static).update(title)
-        hints = Text("j/k navigate  \u00b7  \u23ce select  \u00b7  Esc cancel",
+        hints = Text("\u2191/\u2193 navigate  \u00b7  \u23ce select  \u00b7  Esc cancel",
                      style=Style(color=tc("dim-color", "#888888")), justify="center")
         self.query_one("#theme-hints", Static).update(hints)
         self._refresh_display()
@@ -2076,12 +2076,12 @@ class ThemeModal(ModalScreen[str]):
         event.prevent_default()
         n = len(THEME_NAMES)
 
-        if key in ("j", "down"):
+        if key == "down":
             if self.cur < n - 1:
                 self.cur += 1
                 self._refresh_display()
                 self._preview_current()
-        elif key in ("k", "up"):
+        elif key == "up":
             if self.cur > 0:
                 self.cur -= 1
                 self._refresh_display()
@@ -2211,11 +2211,11 @@ class ProfilesModal(ModalScreen[str]):
 
         if key in ("escape",):
             self.dismiss(None)
-        elif key in ("j", "down"):
+        elif key == "down":
             if self.cur < n - 1:
                 self.cur += 1
                 self._refresh_display()
-        elif key in ("k", "up"):
+        elif key == "up":
             if self.cur > 0:
                 self.cur -= 1
                 self._refresh_display()
@@ -2503,16 +2503,88 @@ class ProfileEditModal(ModalScreen[dict]):
             self.expert_mode = not self.expert_mode
             self._update_title()
             self._refresh_display()
-        elif key in ("j", "down"):
+        elif key == "down":
             if self.cur < n - 1:
                 self.cur += 1
                 self._refresh_display()
-        elif key in ("k", "up"):
+        elif key == "up":
             if self.cur > 0:
                 self.cur -= 1
                 self._refresh_display()
         elif key in ("enter", "return", "space"):
             self._activate_current()
+
+
+class ContextMenuModal(ModalScreen[str]):
+    """Right-click context menu with a list of actions."""
+
+    DEFAULT_CSS = """
+    ContextMenuModal {
+        align: center middle;
+        background: $background 15%;
+    }
+    #ctx-menu-box {
+        width: 36;
+        max-height: 20;
+        background: $surface;
+        border: solid $primary;
+        padding: 0 1;
+    }
+    #ctx-menu-title {
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        padding: 0 0 1 0;
+    }
+    """
+
+    def __init__(self, title, items):
+        """items: list of (label, action_key) tuples. action_key is returned on select."""
+        super().__init__()
+        self.title_text = title
+        self.items = items
+        self.cur = 0
+
+    def compose(self):
+        box = Vertical(id="ctx-menu-box")
+        with box:
+            yield Static(self.title_text, id="ctx-menu-title")
+            yield Static("", id="ctx-menu-items")
+        yield box
+
+    def on_mount(self):
+        self._refresh_display()
+
+    def _refresh_display(self):
+        text = Text()
+        for i, (label, _key) in enumerate(self.items):
+            if i == self.cur:
+                text.append(f"  > {label}", style="bold reverse")
+            else:
+                text.append(f"    {label}")
+            if i < len(self.items) - 1:
+                text.append("\n")
+        self.query_one("#ctx-menu-items", Static).update(text)
+
+    def on_key(self, event):
+        key = event.key
+        event.stop()
+        event.prevent_default()
+        n = len(self.items)
+        if key == "escape":
+            self.dismiss(None)
+        elif key == "up":
+            if self.cur > 0:
+                self.cur -= 1
+                self._refresh_display()
+        elif key == "down":
+            if self.cur < n - 1:
+                self.cur += 1
+                self._refresh_display()
+        elif key in ("enter", "return"):
+            self.dismiss(self.items[self.cur][1])
+
+
 class CCSApp(App):
     """Textual TUI for Claude Code Session Manager."""
 
@@ -2559,6 +2631,8 @@ class CCSApp(App):
         self.detail_focus = "info"
         self.exit_action = None
         self._status_timer = None
+        self._last_click_time = 0.0
+        self._last_click_idx = -1
 
     def compose(self) -> ComposeResult:
         yield HeaderBox(id="header")
@@ -2719,12 +2793,12 @@ class CCSApp(App):
         if self.view == "detail":
             header.hints = (
                 "\u2190/Esc back \u00b7 Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
-                " \u00b7 d del \u00b7 K kill tmux"
+                " \u00b7 d del \u00b7 k kill tmux"
             )
         else:
             header.hints = (
-                "\u2191/\u2193 j/k nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
-                " \u00b7 t tag \u00b7 d del \u00b7 K kill tmux \u00b7 s sort \u00b7 ? help"
+                "\u2191/\u2193 nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
+                " \u00b7 t tag \u00b7 d del \u00b7 k kill tmux \u00b7 s sort \u00b7 ? help"
             )
 
     def _update_footer(self):
@@ -3136,6 +3210,92 @@ class CCSApp(App):
             if self.view == "detail":
                 self._update_detail()
 
+    def on_option_list_option_selected(
+        self, event: OptionList.OptionSelected
+    ):
+        if event.option_list.id == "session-list":
+            now = time.monotonic()
+            idx = event.option_index
+            if idx == self._last_click_idx and (now - self._last_click_time) < 0.4:
+                self._last_click_time = 0.0
+                self._last_click_idx = -1
+                self.action_launch()
+            else:
+                self._last_click_time = now
+                self._last_click_idx = idx
+
+    def on_click(self, event) -> None:
+        """Handle right-click context menus."""
+        if event.button != 3:
+            return
+        if isinstance(self.screen, ModalScreen):
+            return
+        event.stop()
+        event.prevent_default()
+
+        # Check if click is on header area
+        try:
+            header = self.query_one("#header", HeaderBox)
+            header_region = header.region
+            if header_region.contains(event.screen_x, event.screen_y):
+                self._show_header_context_menu()
+                return
+        except Exception:
+            pass
+
+        # Check if click is on session list
+        if self.view == "sessions":
+            self._show_session_context_menu()
+
+    def _show_session_context_menu(self):
+        s = self._current_session()
+        if not s:
+            return
+        label = s.tag or s.label[:30] or s.id[:12]
+        items = [
+            ("Resume Session", "launch"),
+            ("Toggle Pin", "pin"),
+            ("Set Tag", "tag"),
+            ("Change CWD", "cwd"),
+        ]
+        sid = s.id
+        if sid in self.tmux_sids:
+            items.append(("Kill Tmux", "kill_tmux"))
+        items.append(("Delete Session", "delete"))
+
+        def on_result(action):
+            if action == "launch":
+                self.action_launch()
+            elif action == "pin":
+                self.action_toggle_pin()
+            elif action == "tag":
+                self.action_set_tag()
+            elif action == "cwd":
+                self.action_change_cwd()
+            elif action == "kill_tmux":
+                self.action_kill_tmux()
+            elif action == "delete":
+                self.action_delete_session()
+
+        self.push_screen(ContextMenuModal(label, items), on_result)
+
+    def _show_header_context_menu(self):
+        items = [
+            ("New Session", "new"),
+            ("New Ephemeral Session", "ephemeral"),
+            ("Delete All Empty", "delete_empty"),
+        ]
+
+        def on_result(action):
+            if action == "new":
+                self.action_new_session()
+            elif action == "ephemeral":
+                self.action_ephemeral_session()
+            elif action == "delete_empty":
+                self.action_delete_empty()
+
+        self.push_screen(ContextMenuModal("Actions", items), on_result)
+
     def on_key(self, event) -> None:
         """Central key handler — mirrors the curses _handle_input dispatch."""
         # Don't handle keys when a modal screen is active
@@ -3193,13 +3353,13 @@ class CCSApp(App):
                 self.action_change_cwd()
             elif key == "d":
                 self.action_delete_session()
-            elif key == "K":
+            elif key == "k":
                 self.action_kill_tmux()
             elif key == "i":
                 self.action_send_input()
-            elif key in ("up", "k"):
+            elif key == "up":
                 self.query_one("#info-scroll" if self.detail_focus == "info" else "#tmux-pane").scroll_up()
-            elif key in ("down", "j"):
+            elif key == "down":
                 self.query_one("#info-scroll" if self.detail_focus == "info" else "#tmux-pane").scroll_down()
             elif key == "pageup":
                 self.query_one("#info-scroll" if self.detail_focus == "info" else "#tmux-pane").scroll_page_up()
@@ -3212,10 +3372,10 @@ class CCSApp(App):
             return
 
         # ── Sessions view keys ───────────────────────────────────
-        if key in ("up", "k"):
+        if key == "up":
             if sl.highlighted is not None and sl.highlighted > 0:
                 sl.highlighted -= 1
-        elif key in ("down", "j"):
+        elif key == "down":
             if sl.highlighted is not None and sl.highlighted < sl.option_count - 1:
                 sl.highlighted += 1
         elif key == "g":
@@ -3248,7 +3408,7 @@ class CCSApp(App):
             self.action_delete_session()
         elif key == "D":
             self.action_delete_empty()
-        elif key == "K":
+        elif key == "k":
             self.action_kill_tmux()
         elif key == "n":
             self.action_new_session()
