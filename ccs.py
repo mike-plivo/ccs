@@ -363,6 +363,17 @@ class SessionManager:
                     "project_display": pdisp,
                 }
 
+            # Auto-delete empty sessions (no messages)
+            if msg_count == 0 and not summary:
+                try:
+                    os.remove(jp)
+                except OSError:
+                    pass
+                self._delete_meta(sid)
+                seen_sids.discard(sid)
+                cache.pop(sid, None)
+                continue
+
             out.append(Session(
                 id=sid, project_raw=praw, project_display=pdisp,
                 summary=summary, first_msg=fm,
