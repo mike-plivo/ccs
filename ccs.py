@@ -373,7 +373,9 @@ class SessionManager:
                 cache_dirty = True
 
             # Auto-delete sessions with no user/assistant messages
-            if msg_count == 0:
+            # or whose project directory no longer exists (unresumable)
+            proj_path = os.path.expanduser(pdisp) if pdisp else ""
+            if msg_count == 0 or (proj_path and not os.path.isdir(proj_path)):
                 try:
                     os.remove(jp)
                 except OSError:
