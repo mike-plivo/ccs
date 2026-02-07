@@ -186,6 +186,7 @@ class Session:
 class SessionManager:
     def __init__(self):
         self.user = getpass.getuser()
+        self._scan_cache = None
         self._ensure()
 
     def _ensure(self):
@@ -301,9 +302,16 @@ class SessionManager:
 
     def scan(self, sort_mode: str = "date", force: bool = False) -> List[Session]:
         meta = self._load_meta()
-        cache = {} if force else self._load(CACHE_FILE, {})
+        if force:
+            cache = {}
+        elif self._scan_cache is not None:
+            cache = self._scan_cache
+        else:
+            cache = self._load(CACHE_FILE, {})
         out: List[Session] = []
         seen_sids: set = set()
+        cache_dirty = False
+        empty_sids: List[str] = []
         pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
 
         for jp in glob.glob(pattern):
@@ -362,6 +370,7 @@ class SessionManager:
                     "project_raw": praw,
                     "project_display": pdisp,
                 }
+                cache_dirty = True
 
             # Auto-delete empty sessions (no messages)
             if msg_count == 0 and not summary:
@@ -369,9 +378,10 @@ class SessionManager:
                     os.remove(jp)
                 except OSError:
                     pass
-                self._delete_meta(sid)
+                empty_sids.append(sid)
                 seen_sids.discard(sid)
                 cache.pop(sid, None)
+                cache_dirty = True
                 continue
 
             out.append(Session(
@@ -382,12 +392,23 @@ class SessionManager:
                 msg_count=msg_count,
             ))
 
+        # Batch-delete metadata for empty sessions
+        if empty_sids:
+            for sid in empty_sids:
+                meta.pop(sid, None)
+            self._save_meta(meta)
+
         # Prune cache entries for sessions no longer on disk
-        pruned = {k: v for k, v in cache.items() if k in seen_sids}
-        try:
-            self._save(CACHE_FILE, pruned)
-        except Exception:
-            pass
+        prev_len = len(cache)
+        cache = {k: v for k, v in cache.items() if k in seen_sids}
+        if len(cache) != prev_len:
+            cache_dirty = True
+        self._scan_cache = cache
+        if cache_dirty:
+            try:
+                self._save(CACHE_FILE, cache)
+            except Exception:
+                pass
 
         out.sort(key=lambda s: s.get_sort_key(sort_mode))
         return out
@@ -2774,7 +2795,6 @@ class CCSApp(App):
                 )
             )
         self._apply_filter()
-        self._git_cache.clear()
         # Prune stale pane cache
         stale = set(self.tmux_pane_cache) - set(self.tmux_sids)
         for sid in stale:
