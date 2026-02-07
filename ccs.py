@@ -3234,7 +3234,7 @@ class CCSApp(App):
         )
 
     def _tmux_launch(self, s, extra):
-        tmux_name = TMUX_PREFIX + s.id[:8]
+        tmux_name = TMUX_PREFIX + s.id
         existing = self.mgr.tmux_sessions()
         if tmux_name in existing:
             self._tmux_attach(tmux_name, s.id)
@@ -3302,7 +3302,7 @@ class CCSApp(App):
 
     def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
-        tmux_name = TMUX_PREFIX + uid[:8]
+        tmux_name = TMUX_PREFIX + uid
         if name:
             tags = self.mgr._load(TAGS_FILE, {})
             tags[uid] = name
@@ -3337,7 +3337,7 @@ class CCSApp(App):
 
     def _tmux_launch_ephemeral(self, extra):
         uid = str(uuid_mod.uuid4())
-        tmux_name = TMUX_PREFIX + uid[:8]
+        tmux_name = TMUX_PREFIX + uid
         with open(EPHEMERAL_FILE, "a") as f:
             f.write(uid + "\n")
         cmd_parts = ["claude", "--session-id", uid] + extra
@@ -3920,31 +3920,10 @@ class CCSApp(App):
         """Kill tmux session for a given session ID if it exists."""
         if not HAS_TMUX:
             return
-        killed = False
-        # Method 1: Check our in-memory mapping
-        tmux_name = self.tmux_sids.get(sid)
-        if tmux_name:
-            subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-            self.mgr.tmux_unregister(tmux_name)
-            self.tmux_sids.pop(sid, None)
-            killed = True
-        # Method 2: Check registered sessions file
-        if not killed:
-            alive = self.mgr.tmux_sessions()
-            for name, info in alive.items():
-                if info.get("session_id") == sid:
-                    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
-                    self.mgr.tmux_unregister(name)
-                    killed = True
-                    break
-        # Method 3: Try the expected name pattern directly
-        if not killed:
-            expected = TMUX_PREFIX + sid[:8]
-            r = subprocess.run(["tmux", "has-session", "-t", expected], capture_output=True)
-            if r.returncode == 0:
-                subprocess.run(["tmux", "kill-session", "-t", expected], capture_output=True)
-                self.mgr.tmux_unregister(expected)
-                killed = True
+        tmux_name = TMUX_PREFIX + sid
+        subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+        self.mgr.tmux_unregister(tmux_name)
+        self.tmux_sids.pop(sid, None)
 
     def action_delete_session(self):
         if self.view == "sessions" and self.marked:
@@ -4029,7 +4008,7 @@ class CCSApp(App):
         if not HAS_TMUX:
             self._set_status("tmux is not installed")
             return
-        tmux_name = TMUX_PREFIX + s.id[:8]
+        tmux_name = TMUX_PREFIX + s.id
         alive = self.mgr.tmux_sessions()
         if tmux_name not in alive:
             self._set_status("No active tmux session for this session")
@@ -4614,10 +4593,10 @@ def cmd_tmux_list(mgr: SessionManager):
         print("No active ccs tmux sessions.")
         return
     for name, info in sorted(sessions.items(), key=lambda x: x[1].get("launched", "")):
-        sid = info.get("session_id", "")[:12]
+        sid = info.get("session_id", "")
         profile = info.get("profile", "")
         launched = info.get("launched", "")[:16]
-        print(f"  {name:<20s}  {sid:<14s}  {profile:<16s}  {launched}")
+        print(f"  {name}  profile={profile}  launched={launched}")
 
 
 def cmd_tmux_attach(mgr: SessionManager, name: str):
