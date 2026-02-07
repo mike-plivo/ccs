@@ -396,6 +396,12 @@ class SessionManager:
         if empty_sids:
             for sid in empty_sids:
                 meta.pop(sid, None)
+
+        # Prune metadata entries for sessions no longer on disk
+        orphaned = [sid for sid in meta if sid not in seen_sids]
+        for sid in orphaned:
+            meta.pop(sid)
+        if empty_sids or orphaned:
             self._save_meta(meta)
 
         # Prune cache entries for sessions no longer on disk
