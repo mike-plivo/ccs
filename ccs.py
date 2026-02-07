@@ -1381,19 +1381,12 @@ class CCSApp:
             else:
                 lines.append((f"  Tmux:    ⚡ {tmux_name} ({state_labels.get(state, 'active')})",
                                curses.color_pair(CP_STATUS) | curses.A_BOLD))
-        # Tmux output in remaining space
-        if has_tmux:
-            tmux_name = self.tmux_sids[s.id]
-            captured = self._capture_tmux_pane(s.id, tmux_name)
-            if captured:
-                remaining = h - len(lines)
-                if remaining > 0:
-                    show = captured[-remaining:]
-                    for cl in show:
-                        if len(cl) > w - 6:
-                            cl = cl[:w - 9] + "..."
-                        lines.append((f"    {cl}", curses.color_pair(CP_NORMAL)))
-        elif not s.first_msg and not s.summary:
+        git_info = self._get_git_info(s.cwd) if s.cwd else None
+        if git_info:
+            repo_name, branch, commits = git_info
+            branch_str = f" ({branch})" if branch else ""
+            lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
+        if not has_tmux and not s.first_msg and not s.summary:
             lines.append(("  (empty session — no messages yet)",
                            curses.color_pair(CP_DIM) | curses.A_DIM))
 
