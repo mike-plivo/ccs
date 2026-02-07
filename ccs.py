@@ -1081,19 +1081,9 @@ class CCSApp:
             if s.id in self.tmux_sids:
                 state = self.tmux_claude_state.get(s.id, "unknown")
                 if self.view == "detail":
-                    if state == "approval":
-                        hints = "Y Approve  N Deny  i Input  ← Back  ↑↓ Scroll  K Kill  ? Help"
-                    elif state == "input":
-                        hints = "i Send input  Y/N Quick  ← Back  ↑↓ Scroll  K Kill  ? Help"
-                    else:
-                        hints = "i Input  Y/N  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
+                    hints = "i Input  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
                 else:
-                    if state == "approval":
-                        hints = "Y Approve  N Deny  i Input  → Detail  K Kill  ⏎ Attach  ? Help"
-                    elif state == "input":
-                        hints = "i Send input  Y/N Quick  → Detail  K Kill  ⏎ Attach  ? Help"
-                    else:
-                        hints = "i Input  Y/N  → Detail  K Kill  ⏎ Attach  s Sort  ? Help"
+                    hints = "i Input  → Detail  K Kill  ⏎ Attach  s Sort  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1371,7 +1361,7 @@ class CCSApp:
             state_labels = {
                 "thinking": "thinking...",
                 "input": "waiting for input",
-                "approval": "waiting for approval (Y/N)",
+                "approval": "waiting for approval",
                 "done": "session ended",
                 "unknown": "active",
             }
@@ -1453,7 +1443,7 @@ class CCSApp:
                 state_labels = {
                     "thinking": "thinking...",
                     "input": "waiting for input",
-                    "approval": "waiting for approval (Y/N)",
+                    "approval": "waiting for approval",
                     "done": "session ended",
                     "unknown": "active",
                 }
@@ -1539,7 +1529,6 @@ class CCSApp:
             ("  Tmux (requires tmux)", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    K              Kill session's tmux", 0),
             ("    i              Send input to tmux session", 0),
-            ("    Y / N          Quick approve/deny in tmux", 0),
             ("    ⚡ indicator    Session has active tmux", 0),
             ("", 0),
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
@@ -2443,26 +2432,6 @@ class CCSApp:
                     self._set_status("No active tmux session")
             elif not HAS_TMUX:
                 self._set_status("tmux is not installed")
-        elif k == ord("Y"):
-            if self.filtered and HAS_TMUX:
-                s = self.filtered[self.cur]
-                if s.id in self.tmux_sids:
-                    self._tmux_send_text(self.tmux_sids[s.id], "y")
-                    self.tmux_pane_ts.pop(s.id, None)
-                    self.tmux_pane_cache.pop(s.id, None)
-                    self._set_status("Sent: y (approve)")
-                else:
-                    self._set_status("No active tmux session")
-        elif k == ord("N"):
-            if self.filtered and HAS_TMUX:
-                s = self.filtered[self.cur]
-                if s.id in self.tmux_sids:
-                    self._tmux_send_text(self.tmux_sids[s.id], "n")
-                    self.tmux_pane_ts.pop(s.id, None)
-                    self.tmux_pane_cache.pop(s.id, None)
-                    self._set_status("Sent: n (deny)")
-                else:
-                    self._set_status("No active tmux session")
         elif k == ord("/"):
             self.mode = "search"
         elif k == ord("R"):
