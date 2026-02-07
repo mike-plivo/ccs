@@ -2771,6 +2771,24 @@ class CCSApp(App):
             self.tmux_sids = {
                 info.get("session_id"): name for name, info in alive.items()
             }
+            # Inject virtual sessions for tmux-only (no Claude session file yet)
+            scanned_ids = {s.id for s in self.sessions}
+            tags = self.mgr._load(TAGS_FILE, {})
+            for sid, tmux_name in self.tmux_sids.items():
+                if sid and sid not in scanned_ids:
+                    info = alive.get(tmux_name, {})
+                    launched = info.get("launched", "")
+                    try:
+                        mt = datetime.datetime.fromisoformat(launched).timestamp()
+                    except Exception:
+                        mt = time.time()
+                    self.sessions.append(Session(
+                        id=sid, project_raw="", project_display="(tmux)",
+                        cwd="", summary="(waiting for input)",
+                        first_msg="", first_msg_long="",
+                        tag=tags.get(sid, ""), pinned=False,
+                        mtime=mt, path="",
+                    ))
         else:
             self.tmux_sids = {}
         # Re-sort for tmux mode
@@ -2996,17 +3014,43 @@ class CCSApp(App):
         except Exception:
             return set()
 
-    def _cleanup_gone_sessions(self, gone_sids):
-        """Auto-delete ephemeral sessions whose tmux has exited."""
+    def _remove_ephemeral_id(self, sid):
+        """Remove a session ID from the ephemeral list if present."""
         ephemeral_ids = self._load_ephemeral_ids()
+        if sid in ephemeral_ids:
+            ephemeral_ids.discard(sid)
+            try:
+                EPHEMERAL_FILE.write_text(
+                    "\n".join(ephemeral_ids) + "\n" if ephemeral_ids else ""
+                )
+            except Exception:
+                pass
+
+    def _cleanup_gone_sessions(self, gone_sids):
+        """Auto-delete ephemeral sessions and clean up virtual sessions whose tmux has exited."""
+        ephemeral_ids = self._load_ephemeral_ids()
+        scanned_ids = {s.id for s in self.sessions}
         for sid in gone_sids:
             if sid in ephemeral_ids:
                 s = next((s for s in self.sessions if s.id == sid), None)
                 if s:
                     self.mgr.delete(s)
-                    self._set_status(f"Ephemeral session cleaned up")
-                # Remove from ephemeral list
+                elif sid not in scanned_ids:
+                    # Virtual session (no Claude file) — clean up tags/cwds
+                    self.mgr.delete(Session(
+                        id=sid, project_raw="", project_display="",
+                        cwd="", summary="", first_msg="", first_msg_long="",
+                        tag="", pinned=False, mtime=0, path="",
+                    ))
+                self._set_status("Ephemeral session cleaned up")
                 ephemeral_ids.discard(sid)
+            elif sid not in scanned_ids:
+                # Non-ephemeral virtual session gone — clean up tags/cwds
+                self.mgr.delete(Session(
+                    id=sid, project_raw="", project_display="",
+                    cwd="", summary="", first_msg="", first_msg_long="",
+                    tag="", pinned=False, mtime=0, path="",
+                ))
         try:
             EPHEMERAL_FILE.write_text("\n".join(ephemeral_ids) + "\n" if ephemeral_ids else "")
         except Exception:
@@ -3226,19 +3270,31 @@ class CCSApp(App):
         alive = self.mgr.tmux_sessions()
         if tmux_name not in alive:
             self.mgr.tmux_unregister(tmux_name)
-            # Auto-delete ephemeral sessions when tmux exits
             if session_id:
                 ephemeral_ids = self._load_ephemeral_ids()
-                if session_id in ephemeral_ids:
-                    s = next((s for s in self.sessions if s.id == session_id), None)
+                is_ephemeral = session_id in ephemeral_ids
+                # Clean up session data (works for both real and virtual sessions)
+                s = next((s for s in self.sessions if s.id == session_id), None)
+                if is_ephemeral:
                     if s:
                         self.mgr.delete(s)
-                    ephemeral_ids.discard(session_id)
-                    try:
-                        EPHEMERAL_FILE.write_text("\n".join(ephemeral_ids) + "\n" if ephemeral_ids else "")
-                    except Exception:
-                        pass
+                    else:
+                        # Virtual session — clean up tags/cwds
+                        self.mgr.delete(Session(
+                            id=session_id, project_raw="", project_display="",
+                            cwd="", summary="", first_msg="", first_msg_long="",
+                            tag="", pinned=False, mtime=0, path="",
+                        ))
+                    self._remove_ephemeral_id(session_id)
                     self._set_status("Ephemeral session cleaned up")
+                elif not s:
+                    # Non-ephemeral virtual session ended — clean up tags/cwds
+                    self.mgr.delete(Session(
+                        id=session_id, project_raw="", project_display="",
+                        cwd="", summary="", first_msg="", first_msg_long="",
+                        tag="", pinned=False, mtime=0, path="",
+                    ))
+                    self._set_status("Session cleaned up")
         self._do_refresh()
 
     def _tmux_launch_new(self, name, extra, cwd=None):
@@ -3886,6 +3942,7 @@ class CCSApp(App):
                         if s.id in self.marked:
                             self._kill_tmux_for_session(s.id)
                             self.mgr.delete(s)
+                            self._remove_ephemeral_id(s.id)
                             deleted += 1
                     self.marked.clear()
                     self._set_status(f"Deleted {deleted} session(s)")
@@ -3909,6 +3966,7 @@ class CCSApp(App):
             if confirmed:
                 self._kill_tmux_for_session(s.id)
                 self.mgr.delete(s)
+                self._remove_ephemeral_id(s.id)
                 self._set_status(f"Deleted: {label}")
                 if self.view == "detail":
                     self._switch_to_sessions()
