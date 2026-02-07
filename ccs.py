@@ -1350,8 +1350,22 @@ class CCSApp:
         has_tmux = s.id in self.tmux_sids
         lines: List[Tuple[str, int]] = []
 
+        # Same metadata for all sessions
+        if s.pinned:
+            lines.append(("  ★ PINNED", curses.color_pair(CP_PIN) | curses.A_BOLD))
+        if s.tag:
+            lines.append((f"  Tag:     {s.tag}", curses.color_pair(CP_TAG) | curses.A_BOLD))
+        lines.append((f"  Session: {s.id[:36]}{'...' if len(s.id) > 36 else ''}",
+                       curses.color_pair(CP_DIM) | curses.A_DIM))
+        lines.append((f"  Project: {s.project_display}",
+                       curses.color_pair(CP_PROJECT)))
+        if s.cwd:
+            cwd_suffix = " (override)" if self.mgr._load(CWDS_FILE, {}).get(s.id) else ""
+            lines.append((f"  CWD:     {s.cwd}{cwd_suffix}", curses.color_pair(CP_DIM) | curses.A_DIM))
+        lines.append((f"  Modified: {s.ts}  ({s.age})", self._age_color(s.mtime)))
+        lines.append((f"  Messages: {s.msg_count}",
+                       curses.color_pair(CP_ACCENT)))
         if has_tmux:
-            # Condensed metadata to leave room for tmux output
             tmux_name = self.tmux_sids[s.id]
             state = self.tmux_claude_state.get(s.id, "unknown")
             state_labels = {
@@ -1361,24 +1375,15 @@ class CCSApp:
                 "done": "session ended",
                 "unknown": "active",
             }
-            is_idle = s.id in self.tmux_idle
-            if is_idle:
-                tmux_line = f"  💤 {tmux_name} idle"
-                tmux_attr = curses.color_pair(CP_DIM)
+            if s.id in self.tmux_idle:
+                lines.append((f"  Tmux:    💤 {tmux_name} idle",
+                               curses.color_pair(CP_DIM)))
             else:
-                tmux_line = f"  ⚡ {tmux_name} ({state_labels.get(state, 'active')})"
-                tmux_attr = curses.color_pair(CP_STATUS) | curses.A_BOLD
-            # One-line summary: tmux status + session info
-            meta_parts = []
-            if s.tag:
-                meta_parts.append(f"[{s.tag}]")
-            meta_parts.append(f"{s.msg_count}m")
-            meta_parts.append(s.project_display)
-            meta_right = "  " + "  ".join(meta_parts)
-            lines.append((tmux_line, tmux_attr))
-            lines.append((meta_right, curses.color_pair(CP_DIM) | curses.A_DIM))
-
-            # Fill remaining space with tmux output
+                lines.append((f"  Tmux:    ⚡ {tmux_name} ({state_labels.get(state, 'active')})",
+                               curses.color_pair(CP_STATUS) | curses.A_BOLD))
+        # Tmux output in remaining space
+        if has_tmux:
+            tmux_name = self.tmux_sids[s.id]
             captured = self._capture_tmux_pane(s.id, tmux_name)
             if captured:
                 remaining = h - len(lines)
@@ -1388,33 +1393,9 @@ class CCSApp:
                         if len(cl) > w - 6:
                             cl = cl[:w - 9] + "..."
                         lines.append((f"    {cl}", curses.color_pair(CP_NORMAL)))
-            else:
-                lines.append(("  (no output yet)",
-                               curses.color_pair(CP_DIM) | curses.A_DIM))
-        else:
-            # Full metadata for non-tmux sessions
-            if s.pinned:
-                lines.append(("  ★ PINNED", curses.color_pair(CP_PIN) | curses.A_BOLD))
-            if s.tag:
-                lines.append((f"  Tag:     {s.tag}", curses.color_pair(CP_TAG) | curses.A_BOLD))
-            lines.append((f"  Session: {s.id[:36]}{'...' if len(s.id) > 36 else ''}",
+        elif not s.first_msg and not s.summary:
+            lines.append(("  (empty session — no messages yet)",
                            curses.color_pair(CP_DIM) | curses.A_DIM))
-            lines.append((f"  Project: {s.project_display}",
-                           curses.color_pair(CP_PROJECT)))
-            if s.cwd:
-                cwd_suffix = " (override)" if self.mgr._load(CWDS_FILE, {}).get(s.id) else ""
-                lines.append((f"  CWD:     {s.cwd}{cwd_suffix}", curses.color_pair(CP_DIM) | curses.A_DIM))
-            lines.append((f"  Modified: {s.ts}  ({s.age})", self._age_color(s.mtime)))
-            lines.append((f"  Messages: {s.msg_count}",
-                           curses.color_pair(CP_ACCENT)))
-            git_info = self._get_git_info(s.cwd) if s.cwd else None
-            if git_info:
-                repo_name, branch, commits = git_info
-                branch_str = f" ({branch})" if branch else ""
-                lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
-            if not s.first_msg and not s.summary:
-                lines.append(("  (empty session — no messages yet)",
-                               curses.color_pair(CP_DIM) | curses.A_DIM))
 
         # Render
         for i, (text, attr) in enumerate(lines[:h]):
