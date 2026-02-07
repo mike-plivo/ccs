@@ -1141,7 +1141,7 @@ class CCSApp:
             self._safe(y, 1, f" Filter: {self.query}", dim)
             cx = 10 + len(self.query) + 2
             self._safe(y, cx, "(Esc to clear)", curses.color_pair(CP_DIM) | curses.A_DIM)
-        else:
+        elif self.view == "sessions":
             n = len(self.filtered)
             total = len(self.sessions)
             labels = {"date": "Date", "name": "Name", "project": "Project",
