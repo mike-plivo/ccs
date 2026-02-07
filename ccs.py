@@ -1181,7 +1181,7 @@ class CCSApp:
         if self.view == "detail":
             normal_hints = "Esc/← Go back  Tab Switch pane  ↑↓ Scroll  ⏎ Resume session  p Toggle pin  t Set tag  c Change CWD  d Delete session  K Kill tmux  ? Help"
         else:
-            normal_hints = "⏎ Resume session  → Session detail  K Kill tmux  s Cycle sort  Space Toggle mark  P Profiles  d Delete session  n New session  / Search  ? Help"
+            normal_hints = "⏎ Resume session  →/l Session view  K Kill tmux  s Sort  Space Mark  d Delete  n New  / Search  P Profiles  ? Help"
         hints_map = {
             "normal":  normal_hints,
             "search":  "Type to filter  ·  ↑/↓ Navigate results  ·  ⏎ Done  ·  Esc Cancel",
