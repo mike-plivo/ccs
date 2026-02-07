@@ -1698,13 +1698,13 @@ class ConfirmModal(ModalScreen[bool]):
     """
 
     # color_style: "danger" (red), "warning" (orange), "normal" (theme accent)
-    def __init__(self, title: str, message: str, detail: str = "", color_style: str = "danger"):
+    def __init__(self, title: str, message: str, detail: str = "", color_style: str = "danger", default_yes: bool = False):
         super().__init__()
         self.title_text = title
         self.message_text = message
         self.detail_text = detail
         self.color_style = color_style
-        self.sel = 1  # 0=Yes, 1=No (default No)
+        self.sel = 0 if default_yes else 1  # 0=Yes, 1=No
 
     def _get_color(self):
         tc = lambda role, fb="": _tc(self.app, role, fb)
@@ -3559,7 +3559,7 @@ class CCSApp(App):
             if confirmed:
                 self.exit()
 
-        self.push_screen(ConfirmModal("Quit", "Exit CCS?", color_style="normal"), on_result)
+        self.push_screen(ConfirmModal("Quit", "Exit CCS?", color_style="normal", default_yes=True), on_result)
 
     def action_help(self):
         self.push_screen(HelpModal(self.view))
