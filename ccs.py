@@ -275,9 +275,33 @@ class SessionManager:
             meta.pop(sid)
             self._save_meta(meta)
 
-    def _decode_proj(self, raw: str) -> str:
+    def _load_project_paths(self) -> dict:
+        """Load projectPath from all sessions-index.json files.
+
+        Returns dict mapping session ID to projectPath.
+        """
+        home = str(Path.home())
+        result = {}
+        for idx_path in glob.glob(str(PROJECTS_DIR / "*" / "sessions-index.json")):
+            try:
+                with open(idx_path) as f:
+                    data = json.load(f)
+                for entry in data.get("entries", []):
+                    sid = entry.get("sessionId", "")
+                    pp = entry.get("projectPath", "")
+                    if sid and pp:
+                        if pp.startswith(home):
+                            pp = "~" + pp[len(home):]
+                        result[sid] = pp
+            except Exception:
+                pass
+        return result
+
+    @staticmethod
+    def _decode_proj_fallback(raw: str, user: str) -> str:
+        """Fallback project display when sessions-index.json is unavailable."""
         p = raw
-        pfx = "-Users-" + self.user
+        pfx = "-Users-" + user
         if p.startswith(pfx):
             p = p.replace(pfx, "~", 1)
         if p in ("~", "-workdir"):
@@ -312,13 +336,14 @@ class SessionManager:
         seen_sids: set = set()
         cache_dirty = False
         empty_sids: List[str] = []
+        proj_paths = self._load_project_paths()
         pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
 
         for jp in glob.glob(pattern):
             sid = os.path.basename(jp).replace(".jsonl", "")
             seen_sids.add(sid)
             praw = os.path.basename(os.path.dirname(jp))
-            pdisp = self._decode_proj(praw)
+            pdisp = proj_paths.get(sid) or self._decode_proj_fallback(praw, self.user)
             sm = meta.get(sid, {})
             tag = sm.get("tag", "")
             pinned = sm.get("pinned", False)
@@ -372,8 +397,7 @@ class SessionManager:
                 }
                 cache_dirty = True
 
-            # Auto-delete sessions with no user/assistant messages
-            # or whose project directory no longer exists (unresumable)
+            # Auto-delete sessions with no messages or missing project dir
             proj_path = os.path.expanduser(pdisp) if pdisp else ""
             if msg_count == 0 or (proj_path and not os.path.isdir(proj_path)):
                 try:
