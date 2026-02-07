@@ -14,7 +14,6 @@ Usage:
     ccs tag <id|tag> <tag>                 Set tag on session
     ccs tag rename <oldtag> <newtag>       Rename a tag
     ccs untag <id|tag>                     Remove tag
-    ccs chdir <id|tag> <path>              Set session working directory
     ccs delete <id|tag>                    Delete a session
     ccs delete --empty                     Delete all empty sessions
     ccs search <query>                     Search sessions
@@ -373,10 +372,6 @@ class SessionManager:
                     "project_display": pdisp,
                 }
 
-            cwd_override = sm.get("cwd", "")
-            if cwd_override:
-                cwd = cwd_override
-
             out.append(Session(
                 id=sid, project_raw=praw, project_display=pdisp,
                 cwd=cwd, summary=summary, first_msg=fm,
@@ -405,12 +400,6 @@ class SessionManager:
 
     def remove_tag(self, sid: str):
         self.set_tag(sid, "")
-
-    def set_cwd(self, sid: str, path: str):
-        self._set_meta(sid, cwd=path if path else "")
-
-    def remove_cwd(self, sid: str):
-        self.set_cwd(sid, "")
 
     def delete(self, s: Session):
         if os.path.exists(s.path):
@@ -1317,11 +1306,10 @@ def _append_session_meta(
         style=Style(color=tc("project-color", "#cc00cc")),
     )
 
-    # CWD (with override indicator)
+    # CWD
     if s.cwd:
-        cwd_suffix = " (override)" if mgr._get_meta(s.id).get("cwd") else ""
         text.append(
-            f"  CWD:     {s.cwd}{cwd_suffix}\n",
+            f"  CWD:     {s.cwd}\n",
             style=Style(color=tc("dim-color", "#888888")),
         )
 
@@ -1641,7 +1629,6 @@ class HelpModal(ModalScreen):
             text.append("  i              Send text to tmux (Ctrl+D to send)\n")
             text.append("  p              Toggle pin\n")
             text.append("  t / T          Set / remove tag\n")
-            text.append("  c              Change session CWD\n")
             text.append("  d              Delete Claude session\n\n")
             text.append("Other\n", style=hdr)
             text.append("  P              Profile picker / manager\n")
@@ -1662,7 +1649,6 @@ class HelpModal(ModalScreen):
             text.append("  P              Profile picker / manager\n")
             text.append("  p              Toggle pin (bulk if marked)\n")
             text.append("  t / T          Set / remove tag\n")
-            text.append("  c              Change session CWD\n")
             text.append("  d              Delete session (bulk if marked)\n")
             text.append("  D              Delete all empty sessions\n")
             text.append("  k              Kill tmux session\n")
@@ -3276,13 +3262,8 @@ class CCSApp(App):
     def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
-        kwargs = {}
         if name:
-            kwargs["tag"] = name
-        if cwd:
-            kwargs["cwd"] = cwd
-        if kwargs:
-            self.mgr._set_meta(uid, **kwargs)
+            self.mgr._set_meta(uid, tag=name)
         cmd_parts = ["claude", "--session-id", uid] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if cwd and os.path.isdir(cwd):
@@ -3404,7 +3385,6 @@ class CCSApp(App):
             ("Launch Session", "launch"),
             ("Toggle Pin", "pin"),
             ("Set Tag", "tag"),
-            ("Change CWD", "cwd"),
         ]
         sid = s.id
         if sid in self.tmux_sids:
@@ -3418,8 +3398,6 @@ class CCSApp(App):
                 self.action_toggle_pin()
             elif action == "tag":
                 self.action_set_tag()
-            elif action == "cwd":
-                self.action_change_cwd()
             elif action == "kill_tmux":
                 self.action_kill_tmux()
             elif action == "delete":
@@ -3517,8 +3495,6 @@ class CCSApp(App):
                 self.action_set_tag()
             elif key == "T":
                 self.action_remove_tag()
-            elif key == "c":
-                self.action_change_cwd()
             elif key == "d":
                 self.action_delete_session()
             elif key == "k":
@@ -3570,8 +3546,6 @@ class CCSApp(App):
             self.action_set_tag()
         elif key == "T":
             self.action_remove_tag()
-        elif key == "c":
-            self.action_change_cwd()
         elif key == "d":
             self.action_delete_session()
         elif key == "D":
@@ -3747,53 +3721,13 @@ class CCSApp(App):
             if choice == "view":
                 self._switch_to_detail()
             elif choice == "tmux":
-                if s.cwd and not os.path.isdir(s.cwd):
-                    self._handle_missing_cwd(s, extra, "tmux")
-                else:
-                    self._tmux_launch(s, extra)
-                    self._do_refresh()
-            elif choice == "terminal":
-                if s.cwd and not os.path.isdir(s.cwd):
-                    self._handle_missing_cwd(s, extra, "terminal")
-                else:
-                    self.exit_action = ("resume", s.id, s.cwd, extra)
-                    self.exit()
-
-        self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
-
-    def _handle_missing_cwd(self, s, extra, mode):
-        self._set_status(f"Directory missing: {s.cwd}")
-
-        def on_result(new_path):
-            if new_path is None:
-                return
-            expanded = os.path.expanduser(new_path)
-            if not os.path.isdir(expanded):
-                self._set_status(f"Not a valid directory: {new_path}")
-                return
-            if mode == "tmux":
-                tmp_s = Session(
-                    id=s.id,
-                    project_raw="",
-                    project_display="",
-                    cwd=expanded,
-                    summary="",
-                    first_msg="",
-                    first_msg_long="",
-                    tag="",
-                    pinned=False,
-                    mtime=0.0,
-                )
-                self._tmux_launch(tmp_s, extra)
+                self._tmux_launch(s, extra)
                 self._do_refresh()
-            else:
-                self.exit_action = ("resume", s.id, expanded, extra)
+            elif choice == "terminal":
+                self.exit_action = ("resume", s.id, s.cwd, extra)
                 self.exit()
 
-        self.push_screen(
-            SimpleInputModal("New working directory", str(Path.home())),
-            on_result,
-        )
+        self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
 
     def action_mark(self):
         if self.view != "sessions":
@@ -3859,31 +3793,6 @@ class CCSApp(App):
             self._do_refresh()
         else:
             self._set_status("No tag to remove")
-
-    def action_change_cwd(self):
-        s = self._current_session()
-        if not s:
-            return
-
-        def on_result(path):
-            if path is None:
-                return
-            expanded = os.path.expanduser(path)
-            if not os.path.isdir(expanded):
-                self._set_status(f"Not a valid directory: {path}")
-                return
-            self.mgr.set_cwd(s.id, expanded)
-            self._set_status(f"CWD set to: {expanded}")
-            self._do_refresh()
-
-        self.push_screen(
-            SimpleInputModal(
-                "Change CWD",
-                s.cwd or str(Path.home()),
-                "Enter directory path",
-            ),
-            on_result,
-        )
 
     def _kill_tmux_for_session(self, sid):
         """Kill tmux session for a given session ID if it exists."""
@@ -4211,7 +4120,6 @@ def cmd_help():
   ccs tag <id|tag> <tag>                 Set tag on session
   ccs tag rename <oldtag> <newtag>       Rename a tag
   ccs untag <id|tag>                     Remove tag from session
-  ccs chdir <id|tag> <path>              Set session working directory
   ccs delete <id|tag>                    Delete a session
   ccs delete --empty                     Delete all empty sessions
   ccs search <query>                     Search sessions by text
@@ -4279,12 +4187,9 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
 
 def cmd_new(mgr: SessionManager, name: str, extra: List[str], cwd: str = None):
     uid = str(uuid_mod.uuid4())
-    kwargs = {"tag": name}
-    if cwd:
-        kwargs["cwd"] = cwd
-        if os.path.isdir(cwd):
-            os.chdir(cwd)
-    mgr._set_meta(uid, **kwargs)
+    mgr._set_meta(uid, tag=name)
+    if cwd and os.path.isdir(cwd):
+        os.chdir(cwd)
     print(f"\033[1;36m◆\033[0m Starting named session: "
           f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
     cmd = ["claude", "--session-id", uid] + extra
@@ -4349,16 +4254,6 @@ def cmd_untag(mgr: SessionManager, query: str):
         print(f"Removed tag from: {s.id[:12]}")
     else:
         print(f"No tag on: {s.id[:12]}")
-
-
-def cmd_chdir(mgr: SessionManager, query: str, path: str):
-    s = _find_session(mgr, query)
-    expanded = os.path.expanduser(path)
-    if not os.path.isdir(expanded):
-        print(f"\033[31mDirectory does not exist: {expanded}\033[0m")
-        sys.exit(1)
-    mgr.set_cwd(s.id, expanded)
-    print(f"CWD set to [{expanded}]: {s.tag or s.id[:12]}")
 
 
 def _cli_kill_tmux(sid):
@@ -4727,12 +4622,6 @@ def main():
             print("\033[31mUsage: ccs untag <id|tag>\033[0m")
             sys.exit(1)
         cmd_untag(mgr, args[1])
-
-    elif verb == "chdir":
-        if len(args) < 3:
-            print("\033[31mUsage: ccs chdir <id|tag> <path>\033[0m")
-            sys.exit(1)
-        cmd_chdir(mgr, args[1], args[2])
 
     elif verb == "delete":
         if len(args) >= 2 and args[1] == "--empty":
