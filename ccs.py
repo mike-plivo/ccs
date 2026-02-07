@@ -2008,8 +2008,7 @@ class SimpleInputModal(ModalScreen[str]):
         inp.cursor_position = len(self.initial)
 
     def on_input_submitted(self, event: Input.Submitted):
-        val = event.value.strip()
-        self.dismiss(val if val else None)
+        self.dismiss(event.value.strip())
 
     def action_cancel(self):
         self.dismiss(None)
@@ -2989,6 +2988,30 @@ class CCSApp(App):
 
     # -- Tmux polling ------------------------------------------------------
 
+    def _load_ephemeral_ids(self):
+        """Load set of ephemeral session IDs."""
+        try:
+            text = EPHEMERAL_FILE.read_text().strip()
+            return {line.strip() for line in text.split("\n") if line.strip()}
+        except Exception:
+            return set()
+
+    def _cleanup_gone_sessions(self, gone_sids):
+        """Auto-delete ephemeral sessions whose tmux has exited."""
+        ephemeral_ids = self._load_ephemeral_ids()
+        for sid in gone_sids:
+            if sid in ephemeral_ids:
+                s = next((s for s in self.sessions if s.id == sid), None)
+                if s:
+                    self.mgr.delete(s)
+                    self._set_status(f"Ephemeral session cleaned up")
+                # Remove from ephemeral list
+                ephemeral_ids.discard(sid)
+        try:
+            EPHEMERAL_FILE.write_text("\n".join(ephemeral_ids) + "\n" if ephemeral_ids else "")
+        except Exception:
+            pass
+
     def _poll_tmux_activity(self):
         if not HAS_TMUX:
             self.tmux_idle = set()
@@ -3004,8 +3027,10 @@ class CCSApp(App):
             pass
         new_sids = set(self.tmux_sids)
         sids_changed = (old_sids != new_sids)
-        # Prune stale pane cache
+        # Prune stale pane cache and auto-delete ephemeral sessions
         gone = old_sids - new_sids
+        if gone:
+            self._cleanup_gone_sessions(gone)
         for sid in gone:
             self.tmux_pane_cache.pop(sid, None)
             self.tmux_pane_cache_stripped.pop(sid, None)
@@ -3206,9 +3231,10 @@ class CCSApp(App):
     def _tmux_launch_new(self, name, extra, cwd=None):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid[:8]
-        tags = self.mgr._load(TAGS_FILE, {})
-        tags[uid] = name
-        self.mgr._save(TAGS_FILE, tags)
+        if name:
+            tags = self.mgr._load(TAGS_FILE, {})
+            tags[uid] = name
+            self.mgr._save(TAGS_FILE, tags)
         if cwd:
             cwds = self.mgr._load(CWDS_FILE, {})
             cwds[uid] = cwd
@@ -3987,15 +4013,15 @@ class CCSApp(App):
                 self.exit()
 
         def on_name(name):
-            if not name:
+            if name is None:
                 return
             self.push_screen(
                 SimpleInputModal("Working Directory", os.getcwd(), "Path (leave default for current dir)"),
-                lambda cwd: on_path(cwd, name),
+                lambda cwd: on_path(cwd, name.strip()),
             )
 
         self.push_screen(
-            SimpleInputModal("New Session Name", "", "Enter session name"),
+            SimpleInputModal("New Session Name", "", "Enter session name (optional)"),
             on_name,
         )
 
