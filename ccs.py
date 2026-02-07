@@ -3287,7 +3287,7 @@ class CCSApp(App):
         self.query_one("#tmux-pane").add_class("focused")
         # Show banner and go fullscreen
         banner = self.query_one("#passthrough-banner", Static)
-        project = s.project or s.cwd or s.id[:8]
+        project = s.project_display or s.cwd or s.id[:8]
         banner.update(f" \u26a1 LIVE — {project} \u00b7 Ctrl-] exit")
         banner.add_class("active")
         self.add_class("passthrough-active")
