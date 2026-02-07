@@ -592,6 +592,8 @@ class CCSApp:
         self.launch_session: Optional[Session] = None
         self.launch_extra: List[str] = []
         self.view = "sessions"  # "sessions" | "detail"
+        self.detail_scroll = 0  # scroll offset for detail view content
+        self._detail_lines_count = 0  # total lines in last detail render
 
         self.status = ""
         self.status_ttl = 0
@@ -1053,9 +1055,12 @@ class CCSApp:
         self._safe(1, 2, prof_badge,
                    curses.color_pair(CP_PROFILE_BADGE) | curses.A_BOLD)
 
-        view_hint = "← Back" if self.view == "detail" else "→ Detail"
+        if self.view == "detail":
+            normal_hints = "← Back  ↑↓ Scroll  j/k Session  ⏎ Resume  K Kill  / Search  ? Help"
+        else:
+            normal_hints = "⏎ Resume  → Detail  R Last  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help"
         hints_map = {
-            "normal":  f"⏎ Resume  {view_hint}  R Last  K Kill  s Sort  Space Mark  P Profiles  d Del  n New  / Search  ? Help",
+            "normal":  normal_hints,
             "search":  "Type to filter  ·  ↑/↓ Navigate  ·  ⏎ Done  ·  Esc Cancel",
             "tag":     "Type tag name  ·  ⏎ Apply  ·  Esc Cancel",
             "quit":    "←/→ Select  ·  ⏎ Confirm  ·  y/n  ·  Esc Cancel",
@@ -1075,12 +1080,20 @@ class CCSApp:
             s = self.filtered[self.cur]
             if s.id in self.tmux_sids:
                 state = self.tmux_claude_state.get(s.id, "unknown")
-                if state == "approval":
-                    hints = f"Y Approve  N Deny  i Input  {view_hint}  K Kill  ⏎ Attach  ? Help"
-                elif state == "input":
-                    hints = f"i Send input  Y/N Quick  {view_hint}  K Kill  ⏎ Attach  ? Help"
+                if self.view == "detail":
+                    if state == "approval":
+                        hints = "Y Approve  N Deny  i Input  ← Back  ↑↓ Scroll  K Kill  ? Help"
+                    elif state == "input":
+                        hints = "i Send input  Y/N Quick  ← Back  ↑↓ Scroll  K Kill  ? Help"
+                    else:
+                        hints = "i Input  Y/N  ← Back  ↑↓ Scroll  K Kill  ⏎ Attach  ? Help"
                 else:
-                    hints = f"i Input  Y/N  {view_hint}  K Kill  ⏎ Attach  s Sort  ? Help"
+                    if state == "approval":
+                        hints = "Y Approve  N Deny  i Input  → Detail  K Kill  ⏎ Attach  ? Help"
+                    elif state == "input":
+                        hints = "i Send input  Y/N Quick  → Detail  K Kill  ⏎ Attach  ? Help"
+                    else:
+                        hints = "i Input  Y/N  → Detail  K Kill  ⏎ Attach  s Sort  ? Help"
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
@@ -1442,17 +1455,16 @@ class CCSApp:
                 }
                 lines.append((f"  Output ({state_labels.get(state, 'active')}):",
                                curses.color_pair(CP_HEADER) | curses.A_BOLD))
-                remaining = h - len(lines)
-                show = captured[-remaining:] if len(captured) > remaining else captured
-                for cl in show:
+                for cl in captured:
                     if len(cl) > w - 6:
                         cl = cl[:w - 9] + "..."
                     lines.append((f"    {cl}", curses.color_pair(CP_NORMAL)))
             else:
                 lines.append(("  (tmux session active, no output yet)",
                                curses.color_pair(CP_DIM) | curses.A_DIM))
-        else:
-            # Static preview: first message and topics
+
+        # Always show first message and topics (even with tmux, as fallback content)
+        if not has_tmux or not self.tmux_pane_cache.get(s.id):
             if s.first_msg_long:
                 lines.append(("  First Message:",
                                curses.color_pair(CP_HEADER) | curses.A_BOLD))
@@ -1469,9 +1481,21 @@ class CCSApp:
                 lines.append(("  (empty session — no messages yet)",
                                curses.color_pair(CP_DIM) | curses.A_DIM))
 
-        # Render
-        for i, (text, attr) in enumerate(lines[:h]):
+        # Track total lines for scroll bounds
+        self._detail_lines_count = len(lines)
+
+        # Apply scroll and render
+        scrolled = lines[self.detail_scroll:]
+        for i, (text, attr) in enumerate(scrolled[:h]):
             self._safe(sy + i, 0, text[:w - 1], attr)
+
+        # Scroll indicators
+        if self.detail_scroll > 0:
+            self._safe(sy, w - 3, " ▲ ",
+                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
+        if self.detail_scroll + h < len(lines):
+            self._safe(sy + h - 1, w - 3, " ▼ ",
+                       curses.color_pair(CP_ACCENT) | curses.A_BOLD)
 
     def _draw_help_overlay(self, h: int, w: int):
         """Draw a centered help box over the main UI."""
@@ -1517,6 +1541,9 @@ class CCSApp:
             ("  Views", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    → / l          Detail view", 0),
             ("    ← / h          Sessions view", 0),
+            ("    ↑/↓            Scroll detail (in detail view)", 0),
+            ("    Shift+↑/↓      Fast scroll detail", 0),
+            ("    j / k          Switch session (in detail view)", 0),
             ("", 0),
             ("  Other", curses.color_pair(CP_HEADER) | curses.A_BOLD),
             ("    H              Cycle theme", 0),
@@ -2199,34 +2226,93 @@ class CCSApp:
         if k in (curses.KEY_RIGHT, ord("l")):
             if self.view == "sessions":
                 self.view = "detail"
+                self.detail_scroll = 0
             return None
         elif k in (curses.KEY_LEFT, ord("h")):
             if self.view == "detail":
                 self.view = "sessions"
             return None
-        elif k in (curses.KEY_UP, ord("k")):
-            self.cur = max(0, self.cur - 1)
-        elif k in (curses.KEY_DOWN, ord("j")):
-            if self.filtered:
-                self.cur = min(len(self.filtered) - 1, self.cur + 1)
-        elif k == curses.KEY_SR:  # Shift+Up
-            self.cur = max(0, self.cur - 10)
-        elif k == curses.KEY_SF:  # Shift+Down
-            if self.filtered:
-                self.cur = min(len(self.filtered) - 1, self.cur + 10)
-        elif k == curses.KEY_PPAGE:
-            self.cur = max(0, self.cur - self._get_page_size())
-        elif k == curses.KEY_NPAGE:
-            if self.filtered:
-                self.cur = min(len(self.filtered) - 1, self.cur + self._get_page_size())
-        elif k in (curses.KEY_HOME, ord("g")):
-            self.cur = 0
-        elif k == ord("G"):
-            if self.filtered:
-                self.cur = len(self.filtered) - 1
+
+        _nav_handled = False
+        if self.view == "detail":
+            # In detail view: arrows scroll detail, j/k change session
+            if k == curses.KEY_UP:
+                self.detail_scroll = max(0, self.detail_scroll - 1)
+                _nav_handled = True
+            elif k == curses.KEY_DOWN:
+                max_scroll = max(0, self._detail_lines_count - 3)
+                self.detail_scroll = min(max_scroll, self.detail_scroll + 1)
+                _nav_handled = True
+            elif k == curses.KEY_SR:  # Shift+Up
+                self.detail_scroll = max(0, self.detail_scroll - 10)
+                _nav_handled = True
+            elif k == curses.KEY_SF:  # Shift+Down
+                max_scroll = max(0, self._detail_lines_count - 3)
+                self.detail_scroll = min(max_scroll, self.detail_scroll + 10)
+                _nav_handled = True
+            elif k == curses.KEY_PPAGE:
+                self.detail_scroll = max(0, self.detail_scroll - 20)
+                _nav_handled = True
+            elif k == curses.KEY_NPAGE:
+                max_scroll = max(0, self._detail_lines_count - 3)
+                self.detail_scroll = min(max_scroll, self.detail_scroll + 20)
+                _nav_handled = True
+            elif k == ord("k"):
+                old = self.cur
+                self.cur = max(0, self.cur - 1)
+                if self.cur != old:
+                    self.detail_scroll = 0
+                _nav_handled = True
+            elif k == ord("j"):
+                old = self.cur
+                if self.filtered:
+                    self.cur = min(len(self.filtered) - 1, self.cur + 1)
+                if self.cur != old:
+                    self.detail_scroll = 0
+                _nav_handled = True
+            elif k in (curses.KEY_HOME, ord("g")):
+                self.detail_scroll = 0
+                _nav_handled = True
+            elif k == ord("G"):
+                max_scroll = max(0, self._detail_lines_count - 3)
+                self.detail_scroll = max_scroll
+                _nav_handled = True
+        else:
+            # Sessions view: normal navigation
+            if k in (curses.KEY_UP, ord("k")):
+                self.cur = max(0, self.cur - 1)
+                _nav_handled = True
+            elif k in (curses.KEY_DOWN, ord("j")):
+                if self.filtered:
+                    self.cur = min(len(self.filtered) - 1, self.cur + 1)
+                _nav_handled = True
+            elif k == curses.KEY_SR:  # Shift+Up
+                self.cur = max(0, self.cur - 10)
+                _nav_handled = True
+            elif k == curses.KEY_SF:  # Shift+Down
+                if self.filtered:
+                    self.cur = min(len(self.filtered) - 1, self.cur + 10)
+                _nav_handled = True
+            elif k == curses.KEY_PPAGE:
+                self.cur = max(0, self.cur - self._get_page_size())
+                _nav_handled = True
+            elif k == curses.KEY_NPAGE:
+                if self.filtered:
+                    self.cur = min(len(self.filtered) - 1, self.cur + self._get_page_size())
+                _nav_handled = True
+            elif k in (curses.KEY_HOME, ord("g")):
+                self.cur = 0
+                _nav_handled = True
+            elif k == ord("G"):
+                if self.filtered:
+                    self.cur = len(self.filtered) - 1
+                _nav_handled = True
+
+        if _nav_handled:
+            return None
 
         # Actions
-        elif k in (ord("\n"), curses.KEY_ENTER, 10, 13):
+        if k in (ord("\n"), curses.KEY_ENTER, 10, 13):
             if self.filtered:
                 s = self.filtered[self.cur]
                 profiles = self.mgr.load_profiles()
