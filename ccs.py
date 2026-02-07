@@ -397,9 +397,8 @@ class SessionManager:
                 }
                 cache_dirty = True
 
-            # Auto-delete sessions with no messages or missing project dir
-            proj_path = os.path.expanduser(pdisp) if pdisp else ""
-            if msg_count == 0 or (proj_path and not os.path.isdir(proj_path)):
+            # Auto-delete sessions with no user/assistant messages
+            if msg_count == 0:
                 try:
                     os.remove(jp)
                 except OSError:
@@ -2061,7 +2060,7 @@ class SimpleInputModal(ModalScreen[str]):
 
 
 class PathInputModal(ModalScreen[str]):
-    """Path input modal with Tab autocompletion for directories."""
+    """Path input modal with live autocompletion and arrow key navigation."""
 
     DEFAULT_CSS = """
     PathInputModal {
@@ -2069,9 +2068,9 @@ class PathInputModal(ModalScreen[str]):
         background: $background 25%;
     }
     #path-input-container {
-        width: 80;
+        width: 96;
         height: auto;
-        max-height: 24;
+        max-height: 36;
         border: heavy $accent;
         background: $surface;
         padding: 2 3;
@@ -2080,9 +2079,8 @@ class PathInputModal(ModalScreen[str]):
     #path-input-field { margin-top: 1; }
     #path-completions {
         height: auto;
-        max-height: 10;
+        max-height: 20;
         margin-top: 1;
-        overflow-y: auto;
     }
     #path-input-hints { margin-top: 1; }
     """
@@ -2098,6 +2096,7 @@ class PathInputModal(ModalScreen[str]):
         self.placeholder = placeholder
         self._completions: List[str] = []
         self._comp_idx = -1
+        self._last_input = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="path-input-container"):
@@ -2110,16 +2109,18 @@ class PathInputModal(ModalScreen[str]):
         tc = lambda role, fb="": _tc(self.app, role, fb)
         title = Text(self.title_text, style=Style(color=tc("header-color", "#00ffff"), bold=True))
         self.query_one("#path-input-title", Static).update(title)
-        hints = Text("Tab Complete  \u00b7  \u23ce Confirm  \u00b7  Esc Cancel",
+        hints = Text("\u2191\u2193 Navigate  \u00b7  Tab Select  \u00b7  \u23ce Confirm  \u00b7  Esc Cancel",
                       style=Style(color=tc("dim-color", "#888888")))
         self.query_one("#path-input-hints", Static).update(hints)
         inp = self.query_one("#path-input-field", Input)
         inp.focus()
         inp.cursor_position = len(self.initial)
+        self._last_input = self.initial
+        self._refresh_completions(self.initial)
 
     def _get_completions(self, text: str) -> List[str]:
         """Get directory completions for the current input."""
-        expanded = os.path.expanduser(text)
+        expanded = os.path.expanduser(text.rstrip("/"))
         if os.path.isdir(expanded):
             parent = expanded
             prefix = ""
@@ -2130,13 +2131,12 @@ class PathInputModal(ModalScreen[str]):
             return []
         try:
             entries = []
+            home = str(Path.home())
             for name in sorted(os.listdir(parent)):
                 if name.startswith("."):
                     continue
                 full = os.path.join(parent, name)
                 if os.path.isdir(full) and name.lower().startswith(prefix):
-                    # Show with ~ prefix if under home
-                    home = str(Path.home())
                     if full.startswith(home):
                         entries.append("~" + full[len(home):])
                     else:
@@ -2145,6 +2145,11 @@ class PathInputModal(ModalScreen[str]):
         except OSError:
             return []
 
+    def _refresh_completions(self, text: str):
+        self._completions = self._get_completions(text)
+        self._comp_idx = -1
+        self._show_completions()
+
     def _show_completions(self):
         tc = lambda role, fb="": _tc(self.app, role, fb)
         comp_widget = self.query_one("#path-completions", Static)
@@ -2152,50 +2157,77 @@ class PathInputModal(ModalScreen[str]):
             comp_widget.update("")
             return
         text = Text()
-        for i, c in enumerate(self._completions[:8]):
+        # Show window of completions around the selected index
+        max_visible = 15
+        total = len(self._completions)
+        if total <= max_visible:
+            start, end = 0, total
+        else:
+            half = max_visible // 2
+            start = max(0, self._comp_idx - half)
+            end = start + max_visible
+            if end > total:
+                end = total
+                start = end - max_visible
+        for i in range(start, end):
+            c = self._completions[i]
             if i == self._comp_idx:
                 text.append(f"  \u25b6 {c}\n", style=Style(color=tc("accent-color", "#00cccc"), bold=True))
             else:
                 text.append(f"    {c}\n", style=Style(color=tc("dim-color", "#888888")))
-        if len(self._completions) > 8:
-            text.append(f"    ... +{len(self._completions) - 8} more",
-                        style=Style(color=tc("dim-color", "#888888")))
+        if total > max_visible:
+            text.append(f"    ({total} directories)",
+                        style=Style(color=tc("dim-color", "#666666")))
         comp_widget.update(text)
 
+    def on_input_changed(self, event: Input.Changed):
+        val = event.value
+        if val != self._last_input:
+            self._last_input = val
+            self._refresh_completions(val)
+
     def on_key(self, event) -> None:
-        if event.key == "tab":
+        if event.key in ("down", "up") and self._completions:
             event.prevent_default()
             event.stop()
-            inp = self.query_one("#path-input-field", Input)
-            current = inp.value
-            if self._comp_idx == -1:
-                # First tab: get completions
-                self._completions = self._get_completions(current)
-                if len(self._completions) == 1:
-                    inp.value = self._completions[0] + "/"
-                    inp.cursor_position = len(inp.value)
-                    self._completions = []
-                    self._comp_idx = -1
-                    self._show_completions()
-                    return
-                if self._completions:
-                    self._comp_idx = 0
-            elif self._completions:
+            if event.key == "down":
                 self._comp_idx = (self._comp_idx + 1) % len(self._completions)
-            if self._completions and 0 <= self._comp_idx < len(self._completions):
-                inp.value = self._completions[self._comp_idx] + "/"
-                inp.cursor_position = len(inp.value)
+            else:
+                self._comp_idx = (self._comp_idx - 1) % len(self._completions)
+            # Update input to show selected path
+            inp = self.query_one("#path-input-field", Input)
+            self._last_input = self._completions[self._comp_idx] + "/"
+            inp.value = self._last_input
+            inp.cursor_position = len(inp.value)
             self._show_completions()
             return
 
-        # Any other key resets completion state
-        if event.key not in ("shift+tab",):
-            self._completions = []
-            self._comp_idx = -1
-            self._show_completions()
+        if event.key == "tab" and self._completions:
+            event.prevent_default()
+            event.stop()
+            inp = self.query_one("#path-input-field", Input)
+            if self._comp_idx >= 0:
+                # Accept current selection and drill into it
+                selected = self._completions[self._comp_idx] + "/"
+            elif len(self._completions) == 1:
+                selected = self._completions[0] + "/"
+            else:
+                # Select first
+                self._comp_idx = 0
+                selected = self._completions[0] + "/"
+                inp.value = selected
+                inp.cursor_position = len(selected)
+                self._last_input = selected
+                self._show_completions()
+                return
+            inp.value = selected
+            inp.cursor_position = len(selected)
+            self._last_input = selected
+            self._refresh_completions(selected)
+            return
 
     def on_input_submitted(self, event: Input.Submitted):
-        self.dismiss(event.value.strip())
+        self.dismiss(event.value.strip().rstrip("/"))
 
     def action_cancel(self):
         self.dismiss(None)
