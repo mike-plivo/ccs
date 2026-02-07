@@ -1019,6 +1019,7 @@ class HeaderBox(Static):
     session_count = reactive(0)
     total_count = reactive(0)
     sort_mode = reactive("date")
+    search_query = reactive("")
     hints = reactive("")
 
     def render(self) -> Text:
@@ -1070,6 +1071,8 @@ class HeaderBox(Static):
         sort_label = labels.get(self.sort_mode, "Date")
         n = self.session_count
         info = f"{n} session{'s' if n != 1 else ''} \u00b7 Sort: {sort_label}"
+        if self.search_query:
+            info += f" \u00b7 Filter: {self.search_query}"
         text.append(
             info,
             style=Style(color=tc("accent-color", "#00cccc")),
@@ -1644,7 +1647,8 @@ class HelpModal(ModalScreen):
             text.append("Bulk & Sort\n", style=hdr)
             text.append("  Space          Mark / unmark session\n")
             text.append("  u              Unmark all\n")
-            text.append("  s              Cycle sort mode\n\n")
+            text.append("  s              Cycle sort mode\n")
+            text.append("  /              Search / filter sessions\n\n")
             text.append("Sessions\n", style=hdr)
             text.append("  n              Create a new named session\n")
             text.append("  e              Start an ephemeral session\n\n")
@@ -2684,6 +2688,7 @@ class CCSApp(App):
         self.mgr.purge_ephemeral()
         self.sessions = []
         self.filtered = []
+        self.search_query = ""
         self.sort_mode = "date"
         self.marked = set()
         self.view = "sessions"  # "sessions" | "detail"
@@ -2773,7 +2778,7 @@ class CCSApp(App):
                     -s.mtime,
                 )
             )
-        self.filtered = list(self.sessions)
+        self._apply_filter()
         self._git_cache.clear()
         # Prune stale pane cache
         stale = set(self.tmux_pane_cache) - set(self.tmux_sids)
@@ -2789,6 +2794,19 @@ class CCSApp(App):
 
         valid_ids = {s.id for s in self.filtered}
         self.marked &= valid_ids
+
+    def _apply_filter(self):
+        q = self.search_query.lower()
+        if not q:
+            self.filtered = list(self.sessions)
+        else:
+            self.filtered = [
+                s for s in self.sessions
+                if q in (s.tag or "").lower()
+                or q in (s.label or "").lower()
+                or q in s.project_display.lower()
+                or q in s.id.lower()
+            ]
 
     def _rebuild_list(self):
         sl = self.query_one("#session-list", SessionListWidget)
@@ -2869,6 +2887,7 @@ class CCSApp(App):
         header.session_count = len(self.filtered)
         header.total_count = len(self.sessions)
         header.sort_mode = self.sort_mode
+        header.search_query = self.search_query
         if self.view == "detail":
             header.hints = (
                 "\u2190/Esc back \u00b7 Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
@@ -2877,7 +2896,7 @@ class CCSApp(App):
         else:
             header.hints = (
                 "\u2191/\u2193 nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
-                " \u00b7 t tag \u00b7 d del \u00b7 k kill tmux \u00b7 s sort \u00b7 ? help"
+                " \u00b7 t tag \u00b7 d del \u00b7 k kill tmux \u00b7 / search \u00b7 s sort \u00b7 ? help"
             )
 
     def _update_footer(self):
@@ -3491,8 +3510,8 @@ class CCSApp(App):
             self.action_cycle_sort()
         elif key == "i":
             self.action_send_input()
-
-    # -- Search ------------------------------------------------------------
+        elif key == "forward_slash":
+            self.action_search()
 
     # -- Actions -----------------------------------------------------------
 
@@ -3932,6 +3951,28 @@ class CCSApp(App):
         else:
             self.exit_action = ("tmp",)
             self.exit()
+
+    def action_search(self):
+        if self.view != "sessions":
+            return
+
+        def on_result(query):
+            if query is None:
+                return
+            self.search_query = query.strip()
+            self._apply_filter()
+            self._rebuild_list()
+            self._update_preview()
+            self._update_header()
+            if self.search_query:
+                self._set_status(f"Filter: {self.search_query} ({len(self.filtered)} matches)")
+            else:
+                self._set_status("Filter cleared")
+
+        self.push_screen(
+            SimpleInputModal("Search", self.search_query, "Filter sessions..."),
+            on_result,
+        )
 
     def action_cycle_sort(self):
         if self.view != "sessions":
