@@ -668,7 +668,7 @@ class CCSApp:
 
     def _get_page_size(self) -> int:
         h, _ = self.scr.getmaxyx()
-        hdr_h, ftr_h, sep_h = 4, 1, 1
+        hdr_h, ftr_h, sep_h = 5, 1, 1
         if self.view == "detail":
             return 1
         preview_h = min(14, max(6, (h - hdr_h - ftr_h - sep_h) * 2 // 5))
@@ -682,7 +682,7 @@ class CCSApp:
         if self.mode != "normal":
             return None
         h, w = self.scr.getmaxyx()
-        hdr_h = 4
+        hdr_h = 5
         ftr_h = 1
         sep_h = 1
         if self.view == "detail":
@@ -991,7 +991,7 @@ class CCSApp:
             return
 
         # Layout allocation
-        hdr_h = 4       # header box + input line
+        hdr_h = 5       # header box (title + profile + hints + border) + input line
         ftr_h = 1       # footer / status bar
         sep_h = 1       # separator between list and preview
 
@@ -1062,7 +1062,7 @@ class CCSApp:
         tx = max(2, (w - len(title)) // 2)
         self._safe(0, tx, title, hdr)
 
-        # │  [active profile]  hints  │
+        # │  Profile: [name]  View: [label]  │
         self._safe(1, 0, "│", bdr)
         self._safe(1, w - 1, "│", bdr)
         x = 2
@@ -1077,6 +1077,10 @@ class CCSApp:
         view_label = " Session View " if self.view == "detail" else " Sessions "
         self._safe(1, x, view_label,
                    curses.color_pair(CP_TAG) | curses.A_BOLD)
+
+        # │  hints  │
+        self._safe(2, 0, "│", bdr)
+        self._safe(2, w - 1, "│", bdr)
 
         if self.view == "detail":
             normal_hints = "Esc/← Back  Tab Pane  ↑↓ Scroll  ⏎ Resume  p Pin  t Tag  c CWD  d Del session  K Kill tmux  ? Help"
@@ -1109,15 +1113,15 @@ class CCSApp:
         if len(hints) > w - 4:
             hints = hints[:w - 7] + "..."
         hx = max(2, (w - len(hints)) // 2)
-        self._safe(1, hx, hints, dim)
+        self._safe(2, hx, hints, dim)
 
         # └──────────────────────────────────────┘
-        self._safe(2, 0, "└", bdr)
-        self._hline(2, 1, "─", w - 2, bdr)
-        self._safe(2, w - 1, "┘", bdr)
+        self._safe(3, 0, "└", bdr)
+        self._hline(3, 1, "─", w - 2, bdr)
+        self._safe(3, w - 1, "┘", bdr)
 
-        # Row 3: input or info line
-        y = 3
+        # Row 4: input or info line
+        y = 4
         if self.mode == "search":
             self._safe(y, 1, " /", curses.color_pair(CP_INPUT) | curses.A_BOLD)
             base_x = 4
