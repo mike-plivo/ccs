@@ -2516,7 +2516,7 @@ class ProfileEditModal(ModalScreen[dict]):
 
 
 class ContextMenuModal(ModalScreen[str]):
-    """Right-click context menu with a list of actions."""
+    """Context menu with clickable items."""
 
     DEFAULT_CSS = """
     ContextMenuModal {
@@ -2533,8 +2533,11 @@ class ContextMenuModal(ModalScreen[str]):
     #ctx-menu-title {
         text-align: center;
         text-style: bold;
-        color: $text;
         padding: 0 0 1 0;
+    }
+    .ctx-item {
+        height: 1;
+        padding: 0 1;
     }
     """
 
@@ -2546,24 +2549,48 @@ class ContextMenuModal(ModalScreen[str]):
         self.cur = 0
 
     def compose(self):
-        box = Vertical(id="ctx-menu-box")
-        with box:
-            yield Static(self.title_text, id="ctx-menu-title")
-            yield Static("", id="ctx-menu-items")
+        with Vertical(id="ctx-menu-box"):
+            yield Static("", id="ctx-menu-title")
+            for i, (label, _key) in enumerate(self.items):
+                yield Static(label, id=f"ctx-item-{i}", classes="ctx-item")
 
     def on_mount(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        accent = tc("accent-color", "#00cccc")
+        box = self.query_one("#ctx-menu-box")
+        box.styles.border = ("heavy", accent)
+        title = Text(self.title_text, style=Style(color=tc("header-color", "#00ffff"), bold=True))
+        self.query_one("#ctx-menu-title", Static).update(title)
         self._refresh_display()
 
     def _refresh_display(self):
-        text = Text()
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        sel_color = tc("header-color", "#00ffff")
+        dim_color = tc("dim-color", "#888888")
         for i, (label, _key) in enumerate(self.items):
+            widget = self.query_one(f"#ctx-item-{i}", Static)
             if i == self.cur:
-                text.append(f"  > {label}", style="bold reverse")
+                widget.update(Text(f" > {label}", style=Style(color=sel_color, bold=True, reverse=True)))
             else:
-                text.append(f"    {label}")
-            if i < len(self.items) - 1:
-                text.append("\n")
-        self.query_one("#ctx-menu-items", Static).update(text)
+                widget.update(Text(f"   {label}", style=Style(color=dim_color)))
+
+    def on_click(self, event):
+        """Handle clicks on menu items."""
+        for i in range(len(self.items)):
+            try:
+                widget = self.query_one(f"#ctx-item-{i}", Static)
+                if widget.region.contains(event.screen_x, event.screen_y):
+                    self.dismiss(self.items[i][1])
+                    return
+            except Exception:
+                pass
+        # Click outside items dismisses
+        try:
+            box = self.query_one("#ctx-menu-box")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
+        except Exception:
+            self.dismiss(None)
 
     def on_key(self, event):
         key = event.key
@@ -2632,6 +2659,7 @@ class CCSApp(App):
         self._status_timer = None
         self._last_click_time = 0.0
         self._last_click_idx = -1
+        self._last_header_click_time = 0.0
 
     def compose(self) -> ComposeResult:
         yield HeaderBox(id="header")
@@ -3254,6 +3282,40 @@ class CCSApp(App):
                 self.action_delete_session()
 
         self.push_screen(ContextMenuModal(label, items), on_result)
+
+    def on_click(self, event) -> None:
+        """Handle double-click on header bar."""
+        if isinstance(self.screen, ModalScreen):
+            return
+        try:
+            header = self.query_one("#header", HeaderBox)
+            if not header.region.contains(event.screen_x, event.screen_y):
+                return
+        except Exception:
+            return
+        now = time.monotonic()
+        if (now - self._last_header_click_time) < 0.4:
+            self._last_header_click_time = 0.0
+            self._show_header_context_menu()
+        else:
+            self._last_header_click_time = now
+
+    def _show_header_context_menu(self):
+        items = [
+            ("New Session", "new"),
+            ("New Ephemeral Session", "ephemeral"),
+            ("Delete All Empty", "delete_empty"),
+        ]
+
+        def on_result(action):
+            if action == "new":
+                self.action_new_session()
+            elif action == "ephemeral":
+                self.action_ephemeral_session()
+            elif action == "delete_empty":
+                self.action_delete_empty()
+
+        self.push_screen(ContextMenuModal("Actions", items), on_result)
 
     def on_key(self, event) -> None:
         """Central key handler — mirrors the curses _handle_input dispatch."""
