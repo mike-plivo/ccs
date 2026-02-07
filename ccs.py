@@ -952,12 +952,14 @@ PreviewPane {
 #info-scroll {
     height: 1fr;
     border: heavy $accent;
-    border-title-color: $accent-lighten-2;
-    border-title-style: bold;
+    border-title-color: $accent-darken-2;
+    border-title-style: dim;
 }
 
 #info-scroll.focused {
     border: heavy $accent-lighten-2;
+    border-title-color: $accent-lighten-3;
+    border-title-style: bold;
 }
 
 InfoPane {
@@ -967,13 +969,15 @@ InfoPane {
 TmuxPane {
     height: 1fr;
     border: heavy $accent;
-    border-title-color: $accent-lighten-2;
-    border-title-style: bold;
+    border-title-color: $accent-darken-2;
+    border-title-style: dim;
     scrollbar-size: 1 1;
 }
 
 TmuxPane.focused {
     border: heavy $accent-lighten-2;
+    border-title-color: $accent-lighten-3;
+    border-title-style: bold;
 }
 
 #footer {
@@ -1546,11 +1550,11 @@ class HelpModal(ModalScreen):
         background: $background 25%;
     }
     #help-box {
-        width: 70;
+        width: 80;
         max-height: 90%;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
         overflow-y: auto;
     }
     """
@@ -1641,11 +1645,11 @@ class ConfirmModal(ModalScreen[bool]):
         background: $background 25%;
     }
     #confirm-box {
-        width: 56;
+        width: 68;
         height: auto;
         border: heavy $warning;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #confirm-message { }
     #confirm-buttons { text-align: center; height: auto; }
@@ -1718,11 +1722,11 @@ class LaunchModal(ModalScreen[str]):
         background: $background 25%;
     }
     #launch-box {
-        width: 56;
+        width: 68;
         height: auto;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #launch-title {
         text-align: center;
@@ -1840,7 +1844,7 @@ class InputModal(ModalScreen[str]):
         height: 70%;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #input-area {
         height: 1fr;
@@ -1893,11 +1897,11 @@ class SimpleInputModal(ModalScreen[str]):
         background: $background 25%;
     }
     #simple-input-container {
-        width: 60;
+        width: 72;
         height: auto;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #simple-input-field {
         margin-top: 1;
@@ -1948,11 +1952,11 @@ class SearchModal(ModalScreen[str]):
         background: $background 25%;
     }
     #search-box {
-        width: 56;
+        width: 68;
         height: auto;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #search-field {
         margin-top: 1;
@@ -2007,11 +2011,11 @@ class ThemeModal(ModalScreen[str]):
         background: $background 25%;
     }
     #theme-box {
-        width: 44;
+        width: 56;
         height: auto;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #theme-list-text { height: auto; }
     #theme-hints { margin-top: 1; }
@@ -2100,12 +2104,12 @@ class ProfilesModal(ModalScreen[str]):
         background: $background 25%;
     }
     #profiles-box {
-        width: 64;
+        width: 76;
         height: auto;
         max-height: 80%;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #profiles-list-text { height: auto; }
     #profiles-hints { margin-top: 1; }
@@ -2240,12 +2244,12 @@ class ProfileEditModal(ModalScreen[dict]):
         background: $background 25%;
     }
     #profedit-box {
-        width: 76;
+        width: 88;
         height: auto;
         max-height: 90%;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 2 3;
     }
     #profedit-rows-text { height: auto; }
     #profedit-hints { margin-top: 1; }
