@@ -3815,6 +3815,17 @@ class CCSApp(App):
             on_result,
         )
 
+    def _kill_tmux_for_session(self, sid):
+        """Kill tmux session for a given session ID if it exists."""
+        tmux_name = self.tmux_sids.get(sid)
+        if tmux_name and HAS_TMUX:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", tmux_name],
+                capture_output=True,
+            )
+            self.mgr.tmux_unregister(tmux_name)
+            self.tmux_sids.pop(sid, None)
+
     def action_delete_session(self):
         if self.view == "sessions" and self.marked:
             count = len(self.marked)
@@ -3824,6 +3835,7 @@ class CCSApp(App):
                     deleted = 0
                     for s in list(self.sessions):
                         if s.id in self.marked:
+                            self._kill_tmux_for_session(s.id)
                             self.mgr.delete(s)
                             deleted += 1
                     self.marked.clear()
@@ -3846,17 +3858,21 @@ class CCSApp(App):
 
         def on_result(confirmed):
             if confirmed:
+                self._kill_tmux_for_session(s.id)
                 self.mgr.delete(s)
                 self._set_status(f"Deleted: {label}")
                 if self.view == "detail":
                     self._switch_to_sessions()
                 self._do_refresh()
 
+        tmux_warning = ""
+        if s.id in self.tmux_sids:
+            tmux_warning = "\nThe active tmux session will also be killed."
         self.push_screen(
             ConfirmModal(
                 "Delete",
                 f"Delete '{label}'?",
-                "WARNING: This will permanently delete the Claude session data and cannot be recovered.",
+                "WARNING: This will permanently delete the Claude session data and cannot be recovered." + tmux_warning,
             ),
             on_result,
         )
