@@ -1013,7 +1013,8 @@ class CCSApp:
             self._draw_header(w)
             self._draw_pane_separator(y0, w, " Session Info ", self.detail_focus == "info")
             self._draw_info_pane(y0 + sep_info_h, info_h, w)
-            self._draw_pane_separator(y0 + sep_info_h + info_h, w, " Tmux View ", self.detail_focus == "tmux")
+            tmux_label = " Tmux View " if HAS_TMUX else " Tmux View (not found) "
+            self._draw_pane_separator(y0 + sep_info_h + info_h, w, tmux_label, self.detail_focus == "tmux")
             self._draw_tmux_pane(y0 + sep_info_h + info_h + sep_tmux_h, tmux_h, w)
 
         self._draw_footer(h - ftr_h, w)
@@ -1389,11 +1390,14 @@ class CCSApp:
             else:
                 lines.append((f"  Tmux:    ⚡ {tmux_name} ({state_labels.get(state, 'active')})",
                                curses.color_pair(CP_STATUS) | curses.A_BOLD))
-        git_info = self._get_git_info(s.cwd) if s.cwd else None
-        if git_info:
-            repo_name, branch, commits = git_info
-            branch_str = f" ({branch})" if branch else ""
-            lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
+        if not HAS_GIT and s.cwd:
+            lines.append(("  Git:     (git not found)", curses.color_pair(CP_WARN) | curses.A_DIM))
+        else:
+            git_info = self._get_git_info(s.cwd) if s.cwd else None
+            if git_info:
+                repo_name, branch, commits = git_info
+                branch_str = f" ({branch})" if branch else ""
+                lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
         if not has_tmux and not s.first_msg and not s.summary:
             lines.append(("  (empty session — no messages yet)",
                            curses.color_pair(CP_DIM) | curses.A_DIM))
@@ -1449,16 +1453,19 @@ class CCSApp:
                                curses.color_pair(CP_STATUS) | curses.A_BOLD))
 
         # Git info with full commit log
-        git_info = self._get_git_info(s.cwd) if s.cwd else None
-        if git_info:
-            repo_name, branch, commits = git_info
-            branch_str = f" ({branch})" if branch else ""
-            lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
-            for sha, subject in commits:
-                cl = f"    {sha} {subject}"
-                if len(cl) > w - 4:
-                    cl = cl[:w - 7] + "..."
-                lines.append((cl, curses.color_pair(CP_DIM)))
+        if not HAS_GIT and s.cwd:
+            lines.append(("  Git:     (git not found)", curses.color_pair(CP_WARN) | curses.A_DIM))
+        else:
+            git_info = self._get_git_info(s.cwd) if s.cwd else None
+            if git_info:
+                repo_name, branch, commits = git_info
+                branch_str = f" ({branch})" if branch else ""
+                lines.append((f"  Git:     {repo_name}{branch_str}", curses.color_pair(CP_ACCENT)))
+                for sha, subject in commits:
+                    cl = f"    {sha} {subject}"
+                    if len(cl) > w - 4:
+                        cl = cl[:w - 7] + "..."
+                    lines.append((cl, curses.color_pair(CP_DIM)))
 
         # First message + topics (shown in info pane)
         has_tmux = s.id in self.tmux_sids
@@ -1504,7 +1511,10 @@ class CCSApp:
         lines: List[Tuple[str, int]] = []
         has_tmux = s.id in self.tmux_sids
 
-        if has_tmux:
+        if not HAS_TMUX:
+            lines.append(("  (tmux not found — install tmux for live session output)",
+                           curses.color_pair(CP_WARN) | curses.A_DIM))
+        elif has_tmux:
             tmux_name = self.tmux_sids[s.id]
             captured = self._capture_tmux_pane(s.id, tmux_name)
             if captured:
