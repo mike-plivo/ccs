@@ -1648,7 +1648,8 @@ class HelpModal(ModalScreen):
             text.append("  c              Change session CWD\n")
             text.append("  d              Delete session (bulk if marked)\n")
             text.append("  D              Delete all empty sessions\n")
-            text.append("  k              Kill tmux session\n\n")
+            text.append("  k              Kill tmux session\n")
+            text.append("  K              Kill all tmux sessions\n\n")
             text.append("Bulk & Sort\n", style=hdr)
             text.append("  Space          Mark / unmark session\n")
             text.append("  u              Unmark all\n")
@@ -2901,7 +2902,7 @@ class CCSApp(App):
         else:
             header.hints = (
                 "\u2191/\u2193 nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
-                " \u00b7 t tag \u00b7 d del \u00b7 k kill tmux \u00b7 / search \u00b7 s sort \u00b7 ? help"
+                " \u00b7 t tag \u00b7 d del \u00b7 k/K kill tmux \u00b7 / search \u00b7 s sort \u00b7 ? help"
             )
 
     def _update_footer(self):
@@ -3507,6 +3508,8 @@ class CCSApp(App):
             self.action_delete_empty()
         elif key == "k":
             self.action_kill_tmux()
+        elif key == "K":
+            self.action_kill_all_tmux()
         elif key == "n":
             self.action_new_session()
         elif key == "e":
@@ -3911,6 +3914,36 @@ class CCSApp(App):
                 "Kill Tmux",
                 f"Kill tmux session for '{label}'?",
                 "The Claude session data is preserved and can be resumed later.",
+                color_style="warning",
+            ),
+            on_result,
+        )
+
+    def action_kill_all_tmux(self):
+        if self.view != "sessions":
+            return
+        if not HAS_TMUX or not self.tmux_sids:
+            self._set_status("No active tmux sessions")
+            return
+        count = len(self.tmux_sids)
+
+        def on_result(confirmed):
+            if confirmed:
+                for sid, tmux_name in list(self.tmux_sids.items()):
+                    subprocess.run(
+                        ["tmux", "kill-session", "-t", tmux_name],
+                        capture_output=True,
+                    )
+                    self.mgr.tmux_unregister(tmux_name)
+                self.tmux_sids.clear()
+                self._set_status(f"Killed {count} tmux session{'s' if count != 1 else ''}")
+                self._do_refresh()
+
+        self.push_screen(
+            ConfirmModal(
+                "Kill All Tmux",
+                f"Kill all {count} active tmux session{'s' if count != 1 else ''}?",
+                "Session data is preserved and can be resumed later.",
                 color_style="warning",
             ),
             on_result,
