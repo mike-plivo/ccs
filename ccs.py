@@ -1630,7 +1630,7 @@ class HelpModal(ModalScreen):
             text.append("  P              Profile picker / manager\n")
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
-            text.append("  Esc / \u2190 / h    Back to Sessions list\n")
+            text.append("  Esc / \u2190        Back to Sessions list\n")
             text.append("  Ctrl-C         Quit\n")
         else:
             text.append("Sessions List\n\n", style=Style(bold=True))
@@ -1639,7 +1639,7 @@ class HelpModal(ModalScreen):
             text.append("  \u2193              Move down\n")
             text.append("  g / G          Jump to first / last\n")
             text.append("  PgUp / PgDn    Page up / down\n")
-            text.append("  \u2192 / l          Open Session View\n\n")
+            text.append("  \u2192              Open Session View\n\n")
             text.append("Actions\n", style=hdr)
             text.append("  \u23ce              Resume with active profile\n")
             text.append("  P              Profile picker / manager\n")
@@ -2895,7 +2895,7 @@ class CCSApp(App):
         header.search_query = self.search_query
         if self.view == "detail":
             header.hints = (
-                "\u2190/Esc back \u00b7 Tab panes \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
+                "\u2190/Esc back \u00b7 Tab panes \u00b7 \u2192/\u23ce resume \u00b7 p pin \u00b7 t tag"
                 " \u00b7 d del \u00b7 k kill tmux"
             )
         else:
@@ -3452,11 +3452,14 @@ class CCSApp(App):
             return
 
         # ── View switching ───────────────────────────────────────
-        if key in ("right", "l"):
+        if key == "right":
             if self.view == "sessions" and self._current_session():
                 self._switch_to_detail()
-            return
-        if key in ("left", "h"):
+                return
+            elif self.view == "detail":
+                self.action_launch()
+                return
+        if key == "left":
             if self.view == "detail":
                 self._switch_to_sessions()
             return
