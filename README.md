@@ -18,7 +18,7 @@ CCS reads session data from `~/.claude/projects/` and provides a full-featured T
 pip install textual rich
 
 # Clone and install
-git clone https://github.com/YOUR_USER/ccs.git
+git clone https://github.com/mike-plivo/ccs.git
 cd ccs
 ./install.sh
 ```
