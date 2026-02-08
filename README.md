@@ -2,7 +2,10 @@
 
 A terminal UI and CLI for browsing, managing, and resuming [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions.
 
+**Original idea and first version created by: Varun Wahi**
+
 CCS reads session data from `~/.claude/projects/` and provides a full-featured TUI with session previews, tmux integration, profiles, themes, and bulk operations.
+
 
 ## Requirements
 
