@@ -282,6 +282,8 @@ class SessionManager:
         """Load projectPath from all sessions-index.json files.
 
         Returns dict mapping session ID to projectPath.
+        Uses per-entry projectPath first, falls back to originalPath
+        for sessions not listed in entries.
         """
         home = str(Path.home())
         result = {}
@@ -289,13 +291,26 @@ class SessionManager:
             try:
                 with open(idx_path) as f:
                     data = json.load(f)
+                orig = data.get("originalPath", "")
                 for entry in data.get("entries", []):
                     sid = entry.get("sessionId", "")
-                    pp = entry.get("projectPath", "")
+                    pp = entry.get("projectPath", "") or orig
                     if sid and pp:
                         if pp.startswith(home):
                             pp = "~" + pp[len(home):]
                         result[sid] = pp
+                # For .jsonl files in this project dir not listed in entries
+                if orig:
+                    proj_dir = os.path.dirname(idx_path)
+                    entry_sids = {e.get("sessionId") for e in data.get("entries", [])}
+                    for fname in os.listdir(proj_dir):
+                        if fname.endswith(".jsonl"):
+                            sid = fname[:-6]
+                            if sid not in entry_sids and sid not in result:
+                                pp = orig
+                                if pp.startswith(home):
+                                    pp = "~" + pp[len(home):]
+                                result[sid] = pp
             except Exception:
                 pass
         return result
@@ -3536,6 +3551,10 @@ class CCSApp(App):
             return
         cmd_parts = ["claude", "--resume", s.id] + extra
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        # cd to project directory so claude can find the session
+        proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
+        if proj_dir and os.path.isdir(proj_dir):
+            cmd_str = f"cd {shlex.quote(proj_dir)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
@@ -4241,7 +4260,8 @@ class CCSApp(App):
                 self._tmux_launch(s, extra)
                 self._do_refresh()
             elif choice == "terminal":
-                self.exit_action = ("resume", s.id, extra)
+                proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
+                self.exit_action = ("resume", s.id, extra, proj_dir)
                 self.exit()
 
         self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
@@ -4814,6 +4834,9 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
         extra = _get_profile_extra(mgr, profile_name)
     opts = f" {' '.join(extra)}" if extra else ""
     print(f"\033[1;36m◆\033[0m Resuming session \033[2m({s.id[:8]}…)\033[0m{opts}")
+    proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
+    if proj_dir and os.path.isdir(proj_dir):
+        os.chdir(proj_dir)
     cmd = ["claude", "--resume", s.id] + extra
     os.execvp("claude", cmd)
 
@@ -5234,10 +5257,12 @@ def main():
             return
 
         if action[0] == "resume":
-            _, sid, extra = action
+            _, sid, extra, proj_dir = action
             cmd = ["claude", "--resume", sid] + extra
             opts = f" {' '.join(extra)}" if extra else ""
             print(f"\033[1;36m◆\033[0m Resuming session \033[2m({sid[:8]}…)\033[0m{opts}")
+            if proj_dir and os.path.isdir(proj_dir):
+                os.chdir(proj_dir)
             os.execvp("claude", cmd)
 
         elif action[0] == "new":
