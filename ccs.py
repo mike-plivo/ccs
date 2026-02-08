@@ -6,19 +6,21 @@ A terminal UI and CLI for browsing, managing, and resuming Claude Code sessions.
 Usage:
     ccs                                    Interactive TUI
     ccs list                               List all sessions
+    ccs scan [-n|--dry-run]                Rescan all Claude sessions
     ccs resume <id|tag> [-p <profile>]     Resume session
     ccs resume <id|tag> --claude <opts>    Resume with raw claude options
     ccs new <name>                         New named session
-    ccs tmp                                Ephemeral session
+    ccs new -e [name]                      Ephemeral session (auto-deleted on exit)
     ccs pin/unpin <id|tag>                 Pin/unpin a session
     ccs tag <id|tag> <tag>                 Set tag on session
     ccs tag rename <oldtag> <newtag>       Rename a tag
     ccs untag <id|tag>                     Remove tag
     ccs delete <id|tag>                    Delete a session
     ccs delete --empty                     Delete all empty sessions
+    ccs info <id|tag>                      Show session details
     ccs search <query>                     Search sessions
     ccs export <id|tag>                    Export session as markdown
-    ccs profile list|set|new|delete        Manage profiles
+    ccs profile list|info|set|new|delete    Manage profiles
     ccs theme list|set                     Manage themes
     ccs tmux list                          List running tmux sessions
     ccs tmux attach <name>                 Attach to tmux session
@@ -137,6 +139,7 @@ class Session:
     summary: str
     first_msg: str
     first_msg_long: str
+    last_msg: str
     tag: str
     pinned: bool
     mtime: float
@@ -165,7 +168,7 @@ class Session:
 
     @property
     def label(self) -> str:
-        return self.summary or self.first_msg or "(empty session)"
+        return self.summary or self.last_msg or self.first_msg or "(empty session)"
 
     def get_sort_key(self, sort_mode: str = "date") -> Tuple:
         tier = 0 if self.pinned else 1
@@ -355,12 +358,13 @@ class SessionManager:
                 summary = cached.get("summary", "")
                 fm = cached.get("first_msg", "")
                 fm_long = cached.get("first_msg_long", "")
+                lm = cached.get("last_msg", "")
                 sums = cached.get("summaries", [])
                 msg_count = cached.get("msg_count", 0)
                 praw = cached.get("project_raw", praw)
                 pdisp = cached.get("project_display", pdisp)
             else:
-                summary, fm, fm_long = "", "", ""
+                summary, fm, fm_long, lm = "", "", "", ""
                 sums: List[str] = []
                 msg_count = 0
                 try:
@@ -378,11 +382,14 @@ class SessionManager:
                                     summary = s
                             elif msg_type in ("user", "assistant"):
                                 msg_count += 1
-                                if msg_type == "user" and not fm:
+                                if msg_type == "user":
                                     txt = self._extract_text(d.get("message", {}))
                                     if txt:
-                                        fm = txt[:120].replace("\n", " ").replace("\t", " ")
-                                        fm_long = txt[:800]
+                                        clean = txt[:120].replace("\n", " ").replace("\t", " ")
+                                        if not fm:
+                                            fm = clean
+                                            fm_long = txt[:800]
+                                        lm = clean
                 except Exception:
                     pass
                 cache[sid] = {
@@ -390,6 +397,7 @@ class SessionManager:
                     "summary": summary,
                     "first_msg": fm,
                     "first_msg_long": fm_long,
+                    "last_msg": lm,
                     "msg_count": msg_count,
                     "summaries": sums,
                     "project_raw": praw,
@@ -412,7 +420,8 @@ class SessionManager:
             out.append(Session(
                 id=sid, project_raw=praw, project_display=pdisp,
                 summary=summary, first_msg=fm,
-                first_msg_long=fm_long, tag=tag, pinned=pinned,
+                first_msg_long=fm_long, last_msg=lm,
+                tag=tag, pinned=pinned,
                 mtime=file_mtime, summaries=sums, path=jp,
                 msg_count=msg_count,
             ))
@@ -1022,6 +1031,13 @@ ModalScreen {
 
 #sessions-view.hidden {
     display: none;
+}
+
+#session-columns {
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-style: dim;
 }
 
 SessionListWidget {
@@ -1708,6 +1724,7 @@ class HelpModal(ModalScreen):
             text.append("  P              Profile picker / manager\n")
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
+            text.append("  S              Rescan all Claude sessions\n")
             text.append("  Esc / \u2190        Back to Sessions list\n")
             text.append("  Ctrl-C         Quit\n")
         else:
@@ -1738,6 +1755,7 @@ class HelpModal(ModalScreen):
             text.append("Other\n", style=hdr)
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
+            text.append("  S              Rescan all Claude sessions\n")
             text.append("  Esc            Quit\n")
             text.append("  Ctrl-C         Quit\n")
 
@@ -2978,6 +2996,7 @@ class CCSApp(App):
             yield HeaderBox(id="header-content")
             yield MenuButton(id="menu-button")
         with Container(id="sessions-view"):
+            yield Static(id="session-columns")
             sl = SessionListWidget(id="session-list")
             sl.border_title = "Sessions"
             yield sl
@@ -3084,6 +3103,18 @@ class CCSApp(App):
             self.tmux_idle,
             self.tmux_claude_state,
             self.marked,
+        )
+        # Update column header
+        max_tag_w = 0
+        for s in self.filtered:
+            if s.tag:
+                tw = len(s.tag) + 3
+                if tw > max_tag_w:
+                    max_tag_w = tw
+        tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
+        hdr = f"      {tag_hdr}{'Modified':<18s}{'Msgs':<6s}{'Project':<25s}Description"
+        self.query_one("#session-columns", Static).update(
+            Text(hdr, style=Style(dim=True))
         )
         # Restore selection
         if prev_id is not None:
@@ -3747,6 +3778,7 @@ class CCSApp(App):
                 items.append(("i   Send Input", "send_input"))
             items.extend([
                 ("r   Refresh", "refresh"),
+                ("S   Rescan All Sessions", "rescan"),
                 ("H   Change Theme", "theme"),
                 ("P   Profiles", "profiles"),
                 ("?   Help", "help"),
@@ -3771,6 +3803,7 @@ class CCSApp(App):
                 ("s   Cycle Sort", "sort"),
                 ("/   Search", "search"),
                 ("r   Refresh", "refresh"),
+                ("S   Rescan All Sessions", "rescan"),
                 ("H   Change Theme", "theme"),
                 ("P   Profiles", "profiles"),
                 ("?   Help", "help"),
@@ -3798,6 +3831,7 @@ class CCSApp(App):
                 "sort": self.action_cycle_sort,
                 "search": self.action_search,
                 "refresh": self.action_refresh,
+                "rescan": self.action_rescan,
                 "theme": self.action_cycle_theme,
                 "profiles": self.action_profiles,
                 "help": self.action_help,
@@ -3839,6 +3873,9 @@ class CCSApp(App):
             return
         if key in ("r", "f5"):
             self.action_refresh()
+            return
+        if key == "S":
+            self.action_rescan()
             return
         if key == "escape":
             self.action_escape_action()
@@ -4035,6 +4072,18 @@ class CCSApp(App):
     def action_refresh(self):
         self._do_refresh(force=True)
         self._set_status("Refreshed session list")
+
+    def action_rescan(self):
+        """Full rescan: clear caches and rediscover all Claude sessions."""
+        self.mgr._scan_cache = None
+        try:
+            os.remove(CACHE_FILE)
+        except OSError:
+            pass
+        self._git_cache.clear()
+        self._do_refresh(force=True)
+        count = len(self.sessions)
+        self._set_status(f"Rescan complete: {count} session{'s' if count != 1 else ''} found")
 
     def action_cursor_down(self):
         if self.view == "sessions":
@@ -4508,10 +4557,11 @@ def cmd_help():
 \033[1mUsage:\033[0m
   ccs                                    Interactive TUI
   ccs list                               List all sessions
+  ccs scan [-n|--dry-run]                Rescan all Claude sessions
   ccs resume <id|tag> [-p <profile>]     Resume session
   ccs resume <id|tag> --claude <opts>    Resume with raw claude options
   ccs new <name>                         New named session
-  ccs tmp                                Ephemeral session
+  ccs new -e [name]                      Ephemeral session (auto-deleted on exit)
   ccs pin <id|tag>                       Pin a session
   ccs unpin <id|tag>                     Unpin a session
   ccs tag <id|tag> <tag>                 Set tag on session
@@ -4519,9 +4569,11 @@ def cmd_help():
   ccs untag <id|tag>                     Remove tag from session
   ccs delete <id|tag>                    Delete a session
   ccs delete --empty                     Delete all empty sessions
+  ccs info <id|tag>                      Show session details
   ccs search <query>                     Search sessions by text
   ccs export <id|tag>                    Export session as markdown
   ccs profile list                       List profiles
+  ccs profile info <name>                Show profile details
   ccs profile set <name>                 Set active profile
   ccs profile new <name> [flags]         Create profile from CLI flags
   ccs profile delete <name>              Delete a profile
@@ -4549,16 +4601,114 @@ def cmd_help():
 \033[2mPress ? in the TUI for keybindings help.\033[0m""")
 
 
+def cmd_scan(mgr: SessionManager, dry_run: bool = False):
+    """Full rescan: clear caches and rediscover all Claude sessions."""
+    if dry_run:
+        cmd_scan_dry_run(mgr)
+        return
+    mgr._scan_cache = None
+    try:
+        os.remove(CACHE_FILE)
+    except OSError:
+        pass
+    sessions = mgr.scan(force=True)
+    print(f"\033[1;36m◆\033[0m Rescan complete: {len(sessions)} session{'s' if len(sessions) != 1 else ''} found")
+
+
+def cmd_scan_dry_run(mgr: SessionManager):
+    """Show what scan would find and clean up, without making changes."""
+    meta = mgr._load_meta()
+    proj_paths = mgr._load_project_paths()
+    pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
+    seen_sids = set()
+    keep = []
+    delete_empty = []
+    delete_missing_proj = []
+
+    for jp in glob.glob(pattern):
+        sid = os.path.basename(jp).replace(".jsonl", "")
+        seen_sids.add(sid)
+        praw = os.path.basename(os.path.dirname(jp))
+        pdisp = proj_paths.get(sid) or mgr._decode_proj_fallback(praw, mgr.user)
+        proj_path = os.path.expanduser(pdisp) if pdisp else ""
+
+        # Count messages
+        msg_count = 0
+        summary = ""
+        fm = ""
+        try:
+            with open(jp, "r", errors="replace") as f:
+                for ln in f:
+                    try:
+                        d = json.loads(ln)
+                    except Exception:
+                        continue
+                    t = d.get("type")
+                    if t == "summary":
+                        summary = d.get("summary", "") or summary
+                    elif t in ("user", "assistant"):
+                        msg_count += 1
+                        if t == "user" and not fm:
+                            fm = mgr._extract_text(d.get("message", {}))[:80]
+        except Exception:
+            pass
+
+        tag = meta.get(sid, {}).get("tag", "")
+        label = tag or summary or fm or sid[:12]
+
+        if msg_count == 0:
+            delete_empty.append((sid, pdisp, label))
+        elif proj_path and not os.path.isdir(proj_path):
+            delete_missing_proj.append((sid, pdisp, label))
+        else:
+            keep.append((sid, pdisp, label, msg_count))
+
+    orphaned_meta = [sid for sid in meta if sid not in seen_sids]
+
+    print(f"\033[1;36m◆\033[0m Dry run — no changes made\n")
+    print(f"  \033[1;32mKeep:\033[0m {len(keep)} sessions")
+    for sid, pdisp, label, mc in keep:
+        print(f"    {sid[:12]}  {pdisp[:30]:<30s}  {mc:>4d}m  {label[:40]}")
+
+    if delete_empty:
+        print(f"\n  \033[1;31mDelete (empty):\033[0m {len(delete_empty)} sessions")
+        for sid, pdisp, label in delete_empty:
+            print(f"    {sid[:12]}  {pdisp[:30]:<30s}  {label[:40]}")
+
+    if delete_missing_proj:
+        print(f"\n  \033[1;31mDelete (missing project dir):\033[0m {len(delete_missing_proj)} sessions")
+        for sid, pdisp, label in delete_missing_proj:
+            print(f"    {sid[:12]}  {pdisp[:30]:<30s}  {label[:40]}")
+
+    if orphaned_meta:
+        print(f"\n  \033[1;33mOrphaned metadata:\033[0m {len(orphaned_meta)} entries")
+        for sid in orphaned_meta:
+            tag = meta[sid].get("tag", "")
+            print(f"    {sid[:12]}  {tag or '-'}")
+
+    if not delete_empty and not delete_missing_proj and not orphaned_meta:
+        print("\n  Nothing to clean up.")
+
+
 def cmd_list(mgr: SessionManager):
     sessions = mgr.scan()
     if not sessions:
         print("No sessions found.")
         return
+    max_tag_w = 0
+    for s in sessions:
+        if s.tag:
+            tw = len(s.tag) + 3
+            if tw > max_tag_w:
+                max_tag_w = tw
+    tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
+    print(f"  \033[2m  {tag_hdr}{'Modified':<18s}{'ID':<14s}{'Project':<24s}  Description\033[0m")
     for s in sessions:
         pin = "★ " if s.pinned else "  "
-        tag = f"[{s.tag}] " if s.tag else ""
+        tag = f"[{s.tag}]" if s.tag else ""
+        tag_col = f"{tag:<{max_tag_w}}" if max_tag_w else ""
         label = s.label[:60]
-        print(f"  {pin}{tag}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
+        print(f"  {pin}{tag_col}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
 
 
 def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
@@ -4574,26 +4724,26 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
     os.execvp("claude", cmd)
 
 
-def cmd_new(mgr: SessionManager, name: str, extra: List[str]):
+def cmd_new(mgr: SessionManager, name: str, extra: List[str], ephemeral: bool = False):
     uid = str(uuid_mod.uuid4())
-    mgr._set_meta(uid, tag=name)
-    print(f"\033[1;36m◆\033[0m Starting named session: "
-          f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
-    cmd = ["claude", "--session-id", uid] + extra
-    os.execvp("claude", cmd)
-
-
-def cmd_tmp(mgr: SessionManager, extra: List[str]):
-    uid = str(uuid_mod.uuid4())
-    mgr._set_meta(uid, ephemeral=True)
-    print(f"\033[1;36m◆\033[0m Starting ephemeral session \033[2m({uid[:8]}…)\033[0m")
-    cmd = ["claude", "--session-id", uid] + extra
-    try:
-        subprocess.run(cmd)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        mgr.purge_ephemeral()
+    if ephemeral:
+        mgr._set_meta(uid, ephemeral=True)
+        if name:
+            mgr._set_meta(uid, tag=name, ephemeral=True)
+        print(f"\033[1;36m◆\033[0m Starting ephemeral session \033[2m({uid[:8]}…)\033[0m")
+        cmd = ["claude", "--session-id", uid] + extra
+        try:
+            subprocess.run(cmd)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            mgr.purge_ephemeral()
+    else:
+        mgr._set_meta(uid, tag=name)
+        print(f"\033[1;36m◆\033[0m Starting named session: "
+              f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
+        cmd = ["claude", "--session-id", uid] + extra
+        os.execvp("claude", cmd)
 
 
 def cmd_pin(mgr: SessionManager, query: str):
@@ -4701,11 +4851,20 @@ def cmd_search(mgr: SessionManager, query: str):
         print(f"No sessions matching '{query}'.")
         return
     print(f"{len(matches)} match{'es' if len(matches) != 1 else ''}:")
+    max_tag_w = 0
+    for s in matches:
+        if s.tag:
+            tw = len(s.tag) + 3
+            if tw > max_tag_w:
+                max_tag_w = tw
+    tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
+    print(f"  \033[2m  {tag_hdr}{'Modified':<18s}{'ID':<14s}{'Project':<24s}  Description\033[0m")
     for s in matches:
         pin = "★ " if s.pinned else "  "
-        tag = f"[{s.tag}] " if s.tag else ""
+        tag = f"[{s.tag}]" if s.tag else ""
+        tag_col = f"{tag:<{max_tag_w}}" if max_tag_w else ""
         label = s.label[:60]
-        print(f"  {pin}{tag}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
+        print(f"  {pin}{tag_col}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
 
 
 def cmd_profile_list(mgr: SessionManager):
@@ -4772,6 +4931,48 @@ def cmd_profile_new(mgr: SessionManager, name: str, cli_args: List[str]):
     print(f"Created profile: {name}")
 
 
+def cmd_profile_info(mgr: SessionManager, name: str):
+    profiles = mgr.load_profiles()
+    profile = next((p for p in profiles if p.get("name") == name), None)
+    if not profile:
+        print(f"\033[31mProfile '{name}' not found.\033[0m")
+        sys.exit(1)
+    active = mgr.load_active_profile_name()
+    active_str = " (active)" if name == active else ""
+    print(f"\033[1;36m◆\033[0m Profile: \033[1m{name}\033[0m{active_str}")
+    print(f"  Mode:            {'tmux' if profile.get('tmux', True) else 'terminal'}")
+    model = profile.get("model", "") or "default"
+    for display_name, mid in MODELS:
+        if mid == profile.get("model", ""):
+            model = display_name
+            break
+    print(f"  Model:           {model}")
+    perm = profile.get("permission_mode", "") or "default"
+    print(f"  Permissions:     {perm}")
+    flags = profile.get("flags", [])
+    if flags:
+        print(f"  Flags:           {' '.join(flags)}")
+    sp = profile.get("system_prompt", "").strip()
+    if sp:
+        display = sp[:80] + ("..." if len(sp) > 80 else "")
+        print(f"  System prompt:   {display}")
+    tools = profile.get("tools", "").strip()
+    if tools:
+        print(f"  Tools:           {tools}")
+    mcp = profile.get("mcp_config", "").strip()
+    if mcp:
+        print(f"  MCP config:      {mcp}")
+    custom = profile.get("custom_args", "").strip()
+    if custom:
+        print(f"  Custom args:     {custom}")
+    expert = profile.get("expert_args", "").strip()
+    if expert:
+        print(f"  Expert args:     {expert}")
+    args = build_args_from_profile(profile)
+    if args:
+        print(f"  \033[2mCLI: claude {' '.join(args)}\033[0m")
+
+
 def cmd_profile_delete(mgr: SessionManager, name: str):
     if name.lower() == "default":
         print("\033[31mCannot delete the default profile.\033[0m")
@@ -4800,6 +5001,25 @@ def cmd_theme_set(mgr: SessionManager, name: str):
         sys.exit(1)
     mgr.save_theme(name)
     print(f"Theme set to: {name}")
+
+
+def cmd_info(mgr: SessionManager, query: str):
+    s = _find_session(mgr, query)
+    ts = datetime.datetime.fromtimestamp(s.mtime).strftime("%Y-%m-%d %H:%M")
+    pinned_str = " (pinned)" if s.pinned else ""
+    print(f"\033[1;36m◆\033[0m Session: \033[1m{s.id}\033[0m{pinned_str}")
+    if s.tag:
+        print(f"  Tag:             {s.tag}")
+    print(f"  Project:         {s.project_display}")
+    print(f"  Modified:        {ts} ({s.age})")
+    print(f"  Messages:        {s.msg_count}")
+    if s.summary:
+        print(f"  Summary:         {s.summary}")
+    if s.first_msg:
+        print(f"  First message:   {s.first_msg}")
+    if s.last_msg and s.last_msg != s.first_msg:
+        print(f"  Last message:    {s.last_msg}")
+    print(f"  File:            {s.path}")
 
 
 def cmd_export(mgr: SessionManager, query: str):
@@ -4931,7 +5151,7 @@ def main():
             cmd_new(mgr, name, [])
 
         elif action[0] == "tmp":
-            cmd_tmp(mgr, [])
+            cmd_new(mgr, "", [], ephemeral=True)
 
         return
 
@@ -4942,6 +5162,10 @@ def main():
 
     elif verb == "list":
         cmd_list(mgr)
+
+    elif verb == "scan":
+        dry = "--dry-run" in args[1:] or "-n" in args[1:]
+        cmd_scan(mgr, dry_run=dry)
 
     elif verb == "resume":
         if len(args) < 2:
@@ -4963,13 +5187,19 @@ def main():
         cmd_resume(mgr, query, profile_name, claude_args)
 
     elif verb == "new":
-        if len(args) < 2:
-            print("\033[31mUsage: ccs new <name>\033[0m")
+        ephemeral = False
+        rest = args[1:]
+        if "-e" in rest:
+            ephemeral = True
+            rest.remove("-e")
+        if "--ephemeral" in rest:
+            ephemeral = True
+            rest.remove("--ephemeral")
+        if not rest and not ephemeral:
+            print("\033[31mUsage: ccs new <name> | ccs new -e [name]\033[0m")
             sys.exit(1)
-        cmd_new(mgr, args[1], args[2:])
-
-    elif verb == "tmp":
-        cmd_tmp(mgr, args[1:])
+        name = rest[0] if rest else ""
+        cmd_new(mgr, name, rest[1:], ephemeral=ephemeral)
 
     elif verb == "pin":
         if len(args) < 2:
@@ -5016,6 +5246,12 @@ def main():
             sys.exit(1)
         cmd_search(mgr, " ".join(args[1:]))
 
+    elif verb == "info":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs info <id|tag>\033[0m")
+            sys.exit(1)
+        cmd_info(mgr, args[1])
+
     elif verb == "export":
         if len(args) < 2:
             print("\033[31mUsage: ccs export <id|tag>\033[0m")
@@ -5024,11 +5260,16 @@ def main():
 
     elif verb == "profile":
         if len(args) < 2:
-            print("\033[31mUsage: ccs profile list|set|new|delete\033[0m")
+            print("\033[31mUsage: ccs profile list|info|set|new|delete\033[0m")
             sys.exit(1)
         sub = args[1]
         if sub == "list":
             cmd_profile_list(mgr)
+        elif sub == "info":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs profile info <name>\033[0m")
+                sys.exit(1)
+            cmd_profile_info(mgr, args[2])
         elif sub == "set":
             if len(args) < 3:
                 print("\033[31mUsage: ccs profile set <name>\033[0m")
