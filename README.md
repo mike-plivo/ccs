@@ -132,6 +132,8 @@ ccs tmux kill --all                    Kill all ccs tmux sessions
 
 ## Profiles
 
+<img src="img/ccs-claude-profile-management.png" width="600">
+
 Profiles store launch configurations (model, permission mode, flags, system prompt, tools, MCP config). Create and manage profiles from the TUI (`P`) or CLI:
 
 ```bash
