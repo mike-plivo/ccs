@@ -4075,15 +4075,29 @@ class CCSApp(App):
 
     def action_rescan(self):
         """Full rescan: clear caches and rediscover all Claude sessions."""
-        self.mgr._scan_cache = None
-        try:
-            os.remove(CACHE_FILE)
-        except OSError:
-            pass
-        self._git_cache.clear()
-        self._do_refresh(force=True)
-        count = len(self.sessions)
-        self._set_status(f"Rescan complete: {count} session{'s' if count != 1 else ''} found")
+        def on_result(confirmed):
+            if not confirmed:
+                return
+            self.mgr._scan_cache = None
+            try:
+                os.remove(CACHE_FILE)
+            except OSError:
+                pass
+            self._git_cache.clear()
+            self._do_refresh(force=True)
+            count = len(self.sessions)
+            self._set_status(f"Rescan complete: {count} session{'s' if count != 1 else ''} found")
+
+        self.push_screen(
+            ConfirmModal(
+                "Rescan",
+                "Rescan all Claude sessions?",
+                "This will clear all caches and re-read every session file.\n"
+                "Empty sessions and sessions with missing project directories will be deleted.",
+                color_style="warning",
+            ),
+            on_result,
+        )
 
     def action_cursor_down(self):
         if self.view == "sessions":
