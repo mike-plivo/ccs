@@ -1857,6 +1857,12 @@ class ConfirmModal(ModalScreen[bool]):
                 return
         except Exception:
             pass
+        try:
+            box = self.query_one("#confirm-box")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(False)
+        except Exception:
+            pass
 
     def on_key(self, event):
         key = event.key
@@ -1970,6 +1976,12 @@ class LaunchModal(ModalScreen[str]):
                     return
             except Exception:
                 pass
+        try:
+            box = self.query_one("#launch-box")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
+        except Exception:
+            pass
 
     def on_key(self, event):
         key = event.key
@@ -2043,6 +2055,14 @@ class InputModal(ModalScreen[str]):
         self.query_one("#input-hints", Static).update(hints)
         self.query_one("#input-area", TextArea).focus()
 
+    def on_click(self, event):
+        try:
+            box = self.query_one("#input-container")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
+        except Exception:
+            pass
+
     def on_key(self, event):
         if event.key == "ctrl+d":
             event.stop()
@@ -2101,6 +2121,14 @@ class SimpleInputModal(ModalScreen[str]):
         inp.focus()
         # Move cursor to end
         inp.cursor_position = len(self.initial)
+
+    def on_click(self, event):
+        try:
+            box = self.query_one("#simple-input-container")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
+        except Exception:
+            pass
 
     def on_input_submitted(self, event: Input.Submitted):
         self.dismiss(event.value.strip())
@@ -2276,6 +2304,14 @@ class PathInputModal(ModalScreen[str]):
             self._refresh_completions(selected)
             return
 
+    def on_click(self, event):
+        try:
+            box = self.query_one("#path-input-container")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
+        except Exception:
+            pass
+
     def on_input_submitted(self, event: Input.Submitted):
         self.dismiss(event.value.strip().rstrip("/"))
 
@@ -2364,6 +2400,14 @@ class ThemeModal(ModalScreen[str]):
                     self._preview_current()
                     self.dismiss(THEME_NAMES[self.cur])
                     return
+        except Exception:
+            pass
+        try:
+            box = self.query_one("#theme-box")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                if self._on_preview:
+                    self._on_preview(self._original)
+                self.dismiss(None)
         except Exception:
             pass
 
@@ -2505,6 +2549,12 @@ class ProfilesModal(ModalScreen[str]):
                     if name:
                         self.dismiss(f"activate:{name}")
                     return
+        except Exception:
+            pass
+        try:
+            box = self.query_one("#profiles-box")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
         except Exception:
             pass
 
@@ -2820,6 +2870,12 @@ class ProfileEditModal(ModalScreen[dict]):
                     return
         except Exception:
             pass
+        try:
+            box = self.query_one("#profedit-box")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
+        except Exception:
+            pass
 
     def on_key(self, event):
         key = event.key
@@ -2990,6 +3046,7 @@ class CCSApp(App):
         self._status_timer = None
         self._last_click_time = 0.0
         self._last_click_idx = -1
+        self._last_preview_click = 0.0
 
     def compose(self) -> ComposeResult:
         with Container(id="header"):
@@ -3723,31 +3780,54 @@ class CCSApp(App):
         """Handle clicks — header opens menu, detail panels switch focus."""
         if isinstance(self.screen, ModalScreen):
             return
-        # Click on detail view panels to switch focus
+        now = time.monotonic()
+        # Click on detail view panels to switch focus; double-click on preview opens launch
         if self.view == "detail":
             try:
+                tmux = self.query_one("#tmux-pane")
+                if tmux.region.contains(event.screen_x, event.screen_y):
+                    if (now - self._last_preview_click) < 0.4:
+                        self._last_preview_click = 0.0
+                        self.action_launch()
+                        return
+                    self._last_preview_click = now
+                    self._set_detail_focus("tmux")
+                    return
                 info = self.query_one("#info-scroll")
                 if info.region.contains(event.screen_x, event.screen_y):
                     self._set_detail_focus("info")
                     return
-                tmux = self.query_one("#tmux-pane")
-                if tmux.region.contains(event.screen_x, event.screen_y):
-                    self._set_detail_focus("tmux")
-                    return
             except Exception:
                 pass
-        # Click on profile badge opens profiles modal
+        elif self.view == "sessions":
+            # Double-click on preview pane opens launch modal
+            try:
+                pp = self.query_one("#preview", PreviewPane)
+                if pp.region.contains(event.screen_x, event.screen_y):
+                    if (now - self._last_preview_click) < 0.4:
+                        self._last_preview_click = 0.0
+                        self.action_launch()
+                        return
+                    self._last_preview_click = now
+            except Exception:
+                pass
+        # Click on header view/profile labels
         try:
             hdr = self.query_one("#header-content", HeaderBox)
             if hdr.region.contains(event.screen_x, event.screen_y):
-                # Profile badge is on line 2 (row index 1 within widget)
                 rel_y = event.screen_y - hdr.region.y
                 if rel_y == 1:
-                    # "Profile:  <name> " occupies first ~30 columns
                     rel_x = event.screen_x - hdr.region.x
+                    # Profile badge area
                     badge_end = len("Profile:  ") + len(self.active_profile_name) + 2
                     if rel_x <= badge_end:
                         self.action_profiles()
+                        return
+                    # View label area — click "Session View" to go back
+                    view_start = badge_end + len("  View: ")
+                    view_end = view_start + len(f" {self.query_one('#header-content', HeaderBox).view_name} ") + 1
+                    if view_start <= rel_x <= view_end and self.view == "detail":
+                        self._switch_to_sessions()
                         return
         except Exception:
             pass
