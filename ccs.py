@@ -3654,6 +3654,7 @@ class CCSApp(App):
         mark_label = "Unmark" if is_marked else "Mark"
         items = [
             ("Launch Session", "launch"),
+            ("View Details", "view"),
             (mark_label, "mark"),
             ("Toggle Pin", "pin"),
             ("Set Tag", "tag"),
@@ -3665,6 +3666,8 @@ class CCSApp(App):
         def on_result(action):
             if action == "launch":
                 self.action_launch()
+            elif action == "view":
+                self._switch_to_detail()
             elif action == "mark":
                 self.action_mark()
             elif action == "pin":
