@@ -2810,7 +2810,7 @@ class ContextMenuModal(ModalScreen[str]):
 
     DEFAULT_CSS = """
     ContextMenuModal {
-        align: center middle;
+        align: right top;
         background: $background 15%;
     }
     #ctx-menu-box {
