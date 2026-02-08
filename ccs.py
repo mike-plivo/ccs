@@ -1027,6 +1027,8 @@ ModalScreen {
 SessionListWidget {
     height: 3fr;
     border: heavy $accent;
+    border-title-color: $accent-darken-2;
+    border-title-style: dim;
     scrollbar-size: 1 1;
 }
 
@@ -1038,6 +1040,8 @@ SessionListWidget > .option-list--option-highlighted {
 PreviewPane {
     height: 2fr;
     border: heavy $accent;
+    border-title-color: $accent-darken-2;
+    border-title-style: dim;
     padding: 0 1;
     overflow-y: auto;
 }
@@ -1362,13 +1366,6 @@ def _append_session_meta(
     """
     tc = lambda role, fb="": _tc(app, role, fb) if app else fb
 
-    # Pinned badge
-    if s.pinned:
-        text.append(
-            "  \u2605 PINNED\n",
-            style=Style(color=tc("pin-color", "#ffff00"), bold=True),
-        )
-
     # Tag
     if s.tag:
         text.append(
@@ -1376,12 +1373,18 @@ def _append_session_meta(
             style=Style(color=tc("tag-color", "#00ff00"), bold=True),
         )
 
-    # Session ID (truncated)
+    # Session ID (truncated) with optional pinned indicator
     sid_display = s.id[:36] + ("..." if len(s.id) > 36 else "")
     text.append(
-        f"  Session: {sid_display}\n",
+        f"  Session: {sid_display}",
         style=Style(color=tc("dim-color", "#888888")),
     )
+    if s.pinned:
+        text.append(
+            " (pinned)",
+            style=Style(color=tc("pin-color", "#ffff00")),
+        )
+    text.append("\n")
 
     # Project
     text.append(
@@ -2975,8 +2978,12 @@ class CCSApp(App):
             yield HeaderBox(id="header-content")
             yield MenuButton(id="menu-button")
         with Container(id="sessions-view"):
-            yield SessionListWidget(id="session-list")
-            yield PreviewPane(id="preview")
+            sl = SessionListWidget(id="session-list")
+            sl.border_title = "Sessions"
+            yield sl
+            pp = PreviewPane(id="preview")
+            pp.border_title = "Details"
+            yield pp
         with Container(id="detail-view"):
             info_scroll = ScrollableContainer(id="info-scroll")
             info_scroll.border_title = "Session Info"
