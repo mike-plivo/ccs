@@ -3760,7 +3760,10 @@ class CCSApp(App):
             if idx == self._last_click_idx and (now - self._last_click_time) < 0.4:
                 self._last_click_time = 0.0
                 self._last_click_idx = -1
-                self._show_session_context_menu()
+                if self.view == "sessions":
+                    self.action_launch()
+                elif self.view == "detail":
+                    self.action_launch()
             else:
                 self._last_click_time = now
                 self._last_click_idx = idx
