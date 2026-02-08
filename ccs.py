@@ -2953,7 +2953,7 @@ class CCSApp(App):
             with info_scroll:
                 yield InfoPane(id="info-pane")
             tmux_pane = TmuxPane(id="tmux-pane")
-            tmux_pane.border_title = "Tmux Preview"
+            tmux_pane.border_title = "Claude Preview"
             yield tmux_pane
         yield FooterBar(id="footer")
 
@@ -3111,7 +3111,7 @@ class CCSApp(App):
         header.search_query = self.search_query
         if self.view == "detail":
             header.hints = (
-                "\u2190/Esc back \u00b7 Tab panes \u00b7 \u2192/\u23ce resume \u00b7 p pin \u00b7 t tag"
+                "\u2190/Esc back \u00b7 Tab switch panel \u00b7 \u2192/\u23ce resume \u00b7 p pin \u00b7 t tag"
                 " \u00b7 d del \u00b7 k kill tmux"
             )
         else:
