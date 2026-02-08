@@ -6,9 +6,21 @@ A terminal UI and CLI for browsing, managing, and resuming [Claude Code](https:/
 
 CCS reads session data from `~/.claude/projects/` and provides a full-featured TUI with session previews, tmux integration, profiles, themes, and bulk operations.
 
-![Sessions List](img/ccs-main.png)
+### Sessions List
+<img src="img/ccs-main.png" width="700">
 
-![Launch Mode](img/ccs-session.png)
+### Session View with Launch Modal
+<img src="img/ccs-session-view.png" width="700">
+
+### Launch Mode
+<img src="img/ccs-session-launch.png" width="500">
+
+### Themes
+<p>
+<img src="img/ccs-theme1.png" width="340">
+<img src="img/ccs-theme2.png" width="340">
+<img src="img/ccs-theme3.png" width="340">
+</p>
 
 ## Requirements
 
