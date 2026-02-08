@@ -1034,6 +1034,7 @@ PreviewPane {
     border: heavy $accent;
     border-title-color: $accent-darken-2;
     border-title-style: dim;
+    scrollbar-size: 1 1;
 }
 
 #info-scroll.focused {
@@ -1086,7 +1087,7 @@ class HeaderBox(Static):
     def render(self) -> Text:
         """Build a multi-line Rich Text header.
 
-        Line 1: centered title
+        Line 1: centered title + menu button
         Line 2: Profile badge + View label
         Line 3: context-sensitive hints
         Line 4: session count / sort mode
@@ -1099,7 +1100,7 @@ class HeaderBox(Static):
         text.append(title, style=Style(color=tc("header-color", "#00ffff"), bold=True))
         text.append("\n")
 
-        # Line 2 -- profile + view
+        # Line 2 -- profile + view + menu button
         text.append("Profile: ", style=Style(color=tc("dim-color", "#888888")))
         text.append(
             f" {self.profile_name} ",
@@ -1113,6 +1114,15 @@ class HeaderBox(Static):
         text.append(
             f" {self.view_name} ",
             style=Style(color=tc("tag-color", "#00ff00"), bold=True),
+        )
+        text.append("  ")
+        text.append(
+            " \u2261 Menu (m) ",
+            style=Style(
+                color=tc("badge-fg", "#000000"),
+                bgcolor=tc("accent-color", "#00cccc"),
+                bold=True,
+            ),
         )
         text.append("\n")
 
@@ -2804,8 +2814,8 @@ class ContextMenuModal(ModalScreen[str]):
         background: $background 15%;
     }
     #ctx-menu-box {
-        width: 36;
-        max-height: 20;
+        width: 40;
+        max-height: 28;
         background: $surface;
         border: solid $primary;
         padding: 0 1;
@@ -3111,13 +3121,13 @@ class CCSApp(App):
         header.search_query = self.search_query
         if self.view == "detail":
             header.hints = (
-                "\u2190/Esc back \u00b7 Tab switch panel \u00b7 \u2192/\u23ce resume \u00b7 p pin \u00b7 t tag"
-                " \u00b7 d del \u00b7 k kill tmux"
+                "\u2190/Esc back \u00b7 \u2191/\u2193 scroll \u00b7 Tab switch panel \u00b7 \u2192/\u23ce resume"
+                " \u00b7 p pin \u00b7 t tag \u00b7 d del \u00b7 m menu"
             )
         else:
             header.hints = (
-                "\u2191/\u2193 nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 Space mark \u00b7 p pin"
-                " \u00b7 t tag \u00b7 d del \u00b7 k kill tmux \u00b7 K killall tmux \u00b7 / search \u00b7 s sort \u00b7 ? help"
+                "\u2191/\u2193 nav \u00b7 \u2192 view \u00b7 \u23ce resume \u00b7 p pin \u00b7 t tag"
+                " \u00b7 n new \u00b7 / search \u00b7 s sort \u00b7 m menu \u00b7 ? help"
             )
 
     def _update_footer(self):
@@ -3645,21 +3655,29 @@ class CCSApp(App):
         self.push_screen(ContextMenuModal(label, items), on_result)
 
     def on_click(self, event) -> None:
-        """Handle double-click on header bar."""
+        """Handle clicks — header opens menu, detail panels switch focus."""
         if isinstance(self.screen, ModalScreen):
             return
+        # Click on detail view panels to switch focus
+        if self.view == "detail":
+            try:
+                info = self.query_one("#info-scroll")
+                if info.region.contains(event.screen_x, event.screen_y):
+                    self._set_detail_focus("info")
+                    return
+                tmux = self.query_one("#tmux-pane")
+                if tmux.region.contains(event.screen_x, event.screen_y):
+                    self._set_detail_focus("tmux")
+                    return
+            except Exception:
+                pass
+        # Click on header opens action menu
         try:
             header = self.query_one("#header", HeaderBox)
-            if not header.region.contains(event.screen_x, event.screen_y):
-                return
+            if header.region.contains(event.screen_x, event.screen_y):
+                self._show_action_menu()
         except Exception:
-            return
-        now = time.monotonic()
-        if (now - self._last_header_click_time) < 0.4:
-            self._last_header_click_time = 0.0
-            self._show_header_context_menu()
-        else:
-            self._last_header_click_time = now
+            pass
 
     def _show_header_context_menu(self):
         items = [
@@ -3677,6 +3695,85 @@ class CCSApp(App):
                 self.action_delete_empty()
 
         self.push_screen(ContextMenuModal("Actions", items), on_result)
+
+    def _show_action_menu(self):
+        """Show a menu with all available actions for the current view."""
+        if self.view == "detail":
+            s = self._current_session()
+            has_tmux = s and s.id in self.tmux_sids
+            items = [
+                ("\u23ce  Resume Session", "launch"),
+                ("\u2190  Back to Sessions", "back"),
+                ("Tab Switch Panel", "switch_pane"),
+                ("p   Toggle Pin", "pin"),
+                ("t   Set Tag", "tag"),
+                ("T   Remove Tag", "remove_tag"),
+                ("d   Delete Session", "delete"),
+            ]
+            if has_tmux:
+                items.append(("k   Kill Tmux", "kill_tmux"))
+                items.append(("i   Send Input", "send_input"))
+            items.extend([
+                ("r   Refresh", "refresh"),
+                ("H   Change Theme", "theme"),
+                ("P   Profiles", "profiles"),
+                ("?   Help", "help"),
+            ])
+        else:
+            items = [
+                ("\u23ce  Resume Session", "launch"),
+                ("\u2192  View Details", "view"),
+                ("n   New Session", "new"),
+                ("e   Ephemeral Session", "ephemeral"),
+                ("Space Mark/Unmark", "mark"),
+                ("u   Unmark All", "unmark"),
+                ("p   Toggle Pin", "pin"),
+                ("t   Set Tag", "tag"),
+                ("T   Remove Tag", "remove_tag"),
+                ("d   Delete Session", "delete"),
+                ("D   Delete All Empty", "delete_empty"),
+                ("k   Kill Tmux", "kill_tmux"),
+                ("K   Kill All Tmux", "kill_all_tmux"),
+                ("i   Send Input", "send_input"),
+                ("s   Cycle Sort", "sort"),
+                ("/   Search", "search"),
+                ("r   Refresh", "refresh"),
+                ("H   Change Theme", "theme"),
+                ("P   Profiles", "profiles"),
+                ("?   Help", "help"),
+            ]
+
+        def on_result(action):
+            actions = {
+                "launch": self.action_launch,
+                "back": self._switch_to_sessions,
+                "switch_pane": self.action_switch_pane,
+                "view": self._switch_to_detail,
+                "new": self.action_new_session,
+                "ephemeral": self.action_ephemeral_session,
+                "mark": self.action_mark,
+                "unmark": self.action_unmark_all,
+                "pin": self.action_toggle_pin,
+                "tag": self.action_set_tag,
+                "remove_tag": self.action_remove_tag,
+                "delete": self.action_delete_session,
+                "delete_empty": self.action_delete_empty,
+                "kill_tmux": self.action_kill_tmux,
+                "kill_all_tmux": self.action_kill_all_tmux,
+                "send_input": self.action_send_input,
+                "sort": self.action_cycle_sort,
+                "search": self.action_search,
+                "refresh": self.action_refresh,
+                "theme": self.action_cycle_theme,
+                "profiles": self.action_profiles,
+                "help": self.action_help,
+            }
+            fn = actions.get(action)
+            if fn:
+                fn()
+
+        title = "Detail Actions" if self.view == "detail" else "Session Actions"
+        self.push_screen(ContextMenuModal(title, items), on_result)
 
     def on_key(self, event) -> None:
         """Central key handler — mirrors the curses _handle_input dispatch."""
@@ -3701,6 +3798,9 @@ class CCSApp(App):
             return
         if key == "H":
             self.action_cycle_theme()
+            return
+        if key == "m":
+            self._show_action_menu()
             return
         if key in ("r", "f5"):
             self.action_refresh()
@@ -4312,19 +4412,24 @@ class CCSApp(App):
 
         self.push_screen(InputModal(tmux_name), on_result)
 
-    def action_switch_pane(self):
-        if self.view != "detail":
+    def _set_detail_focus(self, panel: str):
+        """Set the focused panel in detail view ('info' or 'tmux')."""
+        if self.view != "detail" or self.detail_focus == panel:
             return
-        if self.detail_focus == "info":
-            self.detail_focus = "tmux"
+        self.detail_focus = panel
+        if panel == "tmux":
             self.query_one("#info-scroll").remove_class("focused")
             self.query_one("#tmux-pane").add_class("focused")
             self.query_one("#tmux-pane").focus()
         else:
-            self.detail_focus = "info"
             self.query_one("#tmux-pane").remove_class("focused")
             self.query_one("#info-scroll").add_class("focused")
             self.query_one("#info-scroll").focus()
+
+    def action_switch_pane(self):
+        if self.view != "detail":
+            return
+        self._set_detail_focus("tmux" if self.detail_focus == "info" else "info")
 # ── CLI helpers ───────────────────────────────────────────────────────
 
 
