@@ -2923,7 +2923,11 @@ class ProfileEditModal(ModalScreen[dict]):
 
 
 class ContextMenuModal(ModalScreen[str]):
-    """Context menu with clickable items."""
+    """Context menu with clickable items and separator support.
+
+    Items with action_key "---" are rendered as horizontal separators
+    and are not selectable.
+    """
 
     DEFAULT_CSS = """
     ContextMenuModal {
@@ -2932,7 +2936,7 @@ class ContextMenuModal(ModalScreen[str]):
     }
     #ctx-menu-box {
         width: 40;
-        max-height: 28;
+        max-height: 36;
         background: $surface;
         border: solid $primary;
         padding: 0 1;
@@ -2949,11 +2953,19 @@ class ContextMenuModal(ModalScreen[str]):
     """
 
     def __init__(self, title, items):
-        """items: list of (label, action_key) tuples. action_key is returned on select."""
+        """items: list of (label, action_key) tuples. action_key "---" = separator."""
         super().__init__()
         self.title_text = title
         self.items = items
+        # Find first selectable index
         self.cur = 0
+        for i, (_, key) in enumerate(items):
+            if key != "---":
+                self.cur = i
+                break
+
+    def _is_separator(self, idx):
+        return self.items[idx][1] == "---"
 
     def compose(self):
         with Vertical(id="ctx-menu-box"):
@@ -2974,9 +2986,12 @@ class ContextMenuModal(ModalScreen[str]):
         tc = lambda role, fb="": _tc(self.app, role, fb)
         sel_color = tc("header-color", "#00ffff")
         dim_color = tc("dim-color", "#888888")
-        for i, (label, _key) in enumerate(self.items):
+        sep_color = tc("dim-color", "#555555")
+        for i, (label, key) in enumerate(self.items):
             widget = self.query_one(f"#ctx-item-{i}", Static)
-            if i == self.cur:
+            if key == "---":
+                widget.update(Text("  " + "\u2500" * 34, style=Style(color=sep_color)))
+            elif i == self.cur:
                 widget.update(Text(f" > {label}", style=Style(color=sel_color, bold=True, reverse=True)))
             else:
                 widget.update(Text(f"   {label}", style=Style(color=dim_color)))
@@ -2984,6 +2999,8 @@ class ContextMenuModal(ModalScreen[str]):
     def on_click(self, event):
         """Handle clicks on menu items."""
         for i in range(len(self.items)):
+            if self._is_separator(i):
+                continue
             try:
                 widget = self.query_one(f"#ctx-item-{i}", Static)
                 if widget.region.contains(event.screen_x, event.screen_y):
@@ -2999,23 +3016,29 @@ class ContextMenuModal(ModalScreen[str]):
         except Exception:
             self.dismiss(None)
 
+    def _move_cursor(self, direction):
+        """Move cursor skipping separators. direction: 1=down, -1=up."""
+        n = len(self.items)
+        new = self.cur + direction
+        while 0 <= new < n and self._is_separator(new):
+            new += direction
+        if 0 <= new < n:
+            self.cur = new
+            self._refresh_display()
+
     def on_key(self, event):
         key = event.key
         event.stop()
         event.prevent_default()
-        n = len(self.items)
         if key == "escape":
             self.dismiss(None)
         elif key == "up":
-            if self.cur > 0:
-                self.cur -= 1
-                self._refresh_display()
+            self._move_cursor(-1)
         elif key == "down":
-            if self.cur < n - 1:
-                self.cur += 1
-                self._refresh_display()
+            self._move_cursor(1)
         elif key in ("enter", "return"):
-            self.dismiss(self.items[self.cur][1])
+            if not self._is_separator(self.cur):
+                self.dismiss(self.items[self.cur][1])
 
 
 class CCSApp(App):
@@ -3872,22 +3895,27 @@ class CCSApp(App):
 
     def _show_action_menu(self):
         """Show a menu with all available actions for the current view."""
+        s = self._current_session()
         if self.view == "detail":
-            s = self._current_session()
             has_tmux = s and s.id in self.tmux_sids
+            is_pinned = s and s.pinned
+            pin_label = "Unpin" if is_pinned else "Pin"
             items = [
                 ("\u23ce  Resume Session", "launch"),
                 ("\u2190  Back to Sessions", "back"),
                 ("Tab Switch Panel", "switch_pane"),
-                ("p   Toggle Pin", "pin"),
+                ("", "---"),
+                (f"p   {pin_label} Session", "pin"),
                 ("t   Set Tag", "tag"),
                 ("T   Remove Tag", "remove_tag"),
                 ("d   Delete Session", "delete"),
             ]
             if has_tmux:
+                items.append(("", "---"))
                 items.append(("k   Kill Tmux", "kill_tmux"))
                 items.append(("i   Send Input", "send_input"))
             items.extend([
+                ("", "---"),
                 ("r   Refresh", "refresh"),
                 ("S   Rescan All Sessions", "rescan"),
                 ("H   Change Theme", "theme"),
@@ -3896,30 +3924,43 @@ class CCSApp(App):
                 ("    Exit", "exit"),
             ])
         else:
+            is_pinned = s and s.pinned
+            is_marked = s and s.id in self.marked
+            pin_label = "Unpin" if is_pinned else "Pin"
+            mark_label = "Unmark" if is_marked else "Mark"
+            has_tmux = s and s.id in self.tmux_sids
             items = [
                 ("\u23ce  Resume Session", "launch"),
-                ("\u2192  View Details", "view"),
-                ("n   New Session", "new"),
-                ("e   Ephemeral Session", "ephemeral"),
-                ("Space Mark/Unmark", "mark"),
+                ("\u2192  Session View", "view"),
+                ("", "---"),
+                (f"Spc {mark_label} Session", "mark"),
                 ("u   Unmark All", "unmark"),
-                ("p   Toggle Pin", "pin"),
+                (f"p   {pin_label} Session", "pin"),
                 ("t   Set Tag", "tag"),
                 ("T   Remove Tag", "remove_tag"),
+                ("", "---"),
+                ("n   New Session", "new"),
+                ("e   Ephemeral Session", "ephemeral"),
+                ("", "---"),
                 ("d   Delete Session", "delete"),
                 ("D   Delete All Empty", "delete_empty"),
-                ("k   Kill Tmux", "kill_tmux"),
+            ]
+            if has_tmux:
+                items.append(("k   Kill Tmux", "kill_tmux"))
+            items.extend([
                 ("K   Kill All Tmux", "kill_all_tmux"),
                 ("i   Send Input", "send_input"),
+                ("", "---"),
                 ("s   Cycle Sort", "sort"),
                 ("/   Search", "search"),
                 ("r   Refresh", "refresh"),
                 ("S   Rescan All Sessions", "rescan"),
+                ("", "---"),
                 ("H   Change Theme", "theme"),
                 ("P   Profiles", "profiles"),
                 ("?   Help", "help"),
                 ("    Exit", "exit"),
-            ]
+            ])
 
         def on_result(action):
             actions = {
