@@ -1178,6 +1178,12 @@ class HeaderBox(Static):
             f" {self.view_name} ",
             style=Style(color=tc("tag-color", "#00ff00"), bold=True),
         )
+        if self.view_name == "Session View":
+            text.append("  ")
+            text.append(
+                " \u25c0 Back ",
+                style=Style(color=tc("badge-fg", "#000000"), bgcolor=tc("dim-color", "#888888"), bold=True),
+            )
         text.append("\n")
 
         # Line 3 -- hints
@@ -3842,12 +3848,15 @@ class CCSApp(App):
                     if rel_x <= badge_end:
                         self.action_profiles()
                         return
-                    # View label area — click "Session View" to go back
-                    view_start = badge_end + len("  View: ")
-                    view_end = view_start + len(f" {self.query_one('#header-content', HeaderBox).view_name} ") + 1
-                    if view_start <= rel_x <= view_end and self.view == "detail":
-                        self._switch_to_sessions()
-                        return
+                    # Back button (only in detail view)
+                    if self.view == "detail":
+                        view_label = " Session View "
+                        back_label = " \u25c0 Back "
+                        back_start = badge_end + len("  View: ") + len(view_label) + 2
+                        back_end = back_start + len(back_label)
+                        if back_start <= rel_x <= back_end:
+                            self._switch_to_sessions()
+                            return
         except Exception:
             pass
         # Click on menu button opens action menu
