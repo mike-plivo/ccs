@@ -992,6 +992,19 @@ ModalScreen {
     padding: 0 1;
     border: heavy $accent;
     background: $surface;
+    layout: horizontal;
+}
+#header-content {
+    width: 1fr;
+    height: auto;
+}
+#menu-button {
+    width: auto;
+    min-width: 12;
+    height: 1;
+    dock: right;
+    padding: 0 1;
+    margin-top: 1;
 }
 
 #sessions-view {
@@ -1073,6 +1086,21 @@ TmuxPane.focused {
 # ── Widget classes ────────────────────────────────────────────────────
 
 
+class MenuButton(Static):
+    """Clickable menu button in the header."""
+
+    def render(self) -> Text:
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        return Text(
+            " \u2261 Menu ",
+            style=Style(
+                color=tc("badge-fg", "#000000"),
+                bgcolor=tc("accent-color", "#00cccc"),
+                bold=True,
+            ),
+        )
+
+
 class HeaderBox(Static):
     """Header showing title, profile badge, view label, and hints."""
 
@@ -1100,7 +1128,7 @@ class HeaderBox(Static):
         text.append(title, style=Style(color=tc("header-color", "#00ffff"), bold=True))
         text.append("\n")
 
-        # Line 2 -- profile + view + menu button
+        # Line 2 -- profile + view
         text.append("Profile: ", style=Style(color=tc("dim-color", "#888888")))
         text.append(
             f" {self.profile_name} ",
@@ -1114,15 +1142,6 @@ class HeaderBox(Static):
         text.append(
             f" {self.view_name} ",
             style=Style(color=tc("tag-color", "#00ff00"), bold=True),
-        )
-        text.append("  ")
-        text.append(
-            " \u2261 Menu (m) ",
-            style=Style(
-                color=tc("badge-fg", "#000000"),
-                bgcolor=tc("accent-color", "#00cccc"),
-                bold=True,
-            ),
         )
         text.append("\n")
 
@@ -2950,10 +2969,11 @@ class CCSApp(App):
         self._status_timer = None
         self._last_click_time = 0.0
         self._last_click_idx = -1
-        self._last_header_click_time = 0.0
 
     def compose(self) -> ComposeResult:
-        yield HeaderBox(id="header")
+        with Container(id="header"):
+            yield HeaderBox(id="header-content")
+            yield MenuButton(id="menu-button")
         with Container(id="sessions-view"):
             yield SessionListWidget(id="session-list")
             yield PreviewPane(id="preview")
@@ -3112,7 +3132,7 @@ class CCSApp(App):
             tmux_pane.update_content(None)
 
     def _update_header(self):
-        header = self.query_one("#header", HeaderBox)
+        header = self.query_one("#header-content", HeaderBox)
         header.view_name = "Session View" if self.view == "detail" else "Sessions"
         header.profile_name = self.active_profile_name
         header.session_count = len(self.filtered)
@@ -3630,19 +3650,23 @@ class CCSApp(App):
         if not s:
             return
         label = s.tag or s.label[:30] or s.id[:12]
+        is_marked = s.id in self.marked
+        mark_label = "Unmark" if is_marked else "Mark"
         items = [
             ("Launch Session", "launch"),
+            (mark_label, "mark"),
             ("Toggle Pin", "pin"),
             ("Set Tag", "tag"),
         ]
-        sid = s.id
-        if sid in self.tmux_sids:
+        if s.id in self.tmux_sids:
             items.append(("Kill Tmux", "kill_tmux"))
         items.append(("Delete Session", "delete"))
 
         def on_result(action):
             if action == "launch":
                 self.action_launch()
+            elif action == "mark":
+                self.action_mark()
             elif action == "pin":
                 self.action_toggle_pin()
             elif action == "tag":
@@ -3671,30 +3695,28 @@ class CCSApp(App):
                     return
             except Exception:
                 pass
-        # Click on header opens action menu
+        # Click on profile badge opens profiles modal
         try:
-            header = self.query_one("#header", HeaderBox)
-            if header.region.contains(event.screen_x, event.screen_y):
+            hdr = self.query_one("#header-content", HeaderBox)
+            if hdr.region.contains(event.screen_x, event.screen_y):
+                # Profile badge is on line 2 (row index 1 within widget)
+                rel_y = event.screen_y - hdr.region.y
+                if rel_y == 1:
+                    # "Profile:  <name> " occupies first ~30 columns
+                    rel_x = event.screen_x - hdr.region.x
+                    badge_end = len("Profile:  ") + len(self.active_profile_name) + 2
+                    if rel_x <= badge_end:
+                        self.action_profiles()
+                        return
+        except Exception:
+            pass
+        # Click on menu button opens action menu
+        try:
+            btn = self.query_one("#menu-button", MenuButton)
+            if btn.region.contains(event.screen_x, event.screen_y):
                 self._show_action_menu()
         except Exception:
             pass
-
-    def _show_header_context_menu(self):
-        items = [
-            ("New Session", "new"),
-            ("New Ephemeral Session", "ephemeral"),
-            ("Delete All Empty", "delete_empty"),
-        ]
-
-        def on_result(action):
-            if action == "new":
-                self.action_new_session()
-            elif action == "ephemeral":
-                self.action_ephemeral_session()
-            elif action == "delete_empty":
-                self.action_delete_empty()
-
-        self.push_screen(ContextMenuModal("Actions", items), on_result)
 
     def _show_action_menu(self):
         """Show a menu with all available actions for the current view."""
@@ -3718,6 +3740,7 @@ class CCSApp(App):
                 ("H   Change Theme", "theme"),
                 ("P   Profiles", "profiles"),
                 ("?   Help", "help"),
+                ("    Exit", "exit"),
             ])
         else:
             items = [
@@ -3741,6 +3764,7 @@ class CCSApp(App):
                 ("H   Change Theme", "theme"),
                 ("P   Profiles", "profiles"),
                 ("?   Help", "help"),
+                ("    Exit", "exit"),
             ]
 
         def on_result(action):
@@ -3767,6 +3791,7 @@ class CCSApp(App):
                 "theme": self.action_cycle_theme,
                 "profiles": self.action_profiles,
                 "help": self.action_help,
+                "exit": self.action_quit_confirm,
             }
             fn = actions.get(action)
             if fn:
