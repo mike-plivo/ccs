@@ -3089,7 +3089,7 @@ class ContextMenuModal(ModalScreen[str]):
         key = event.key
         event.stop()
         event.prevent_default()
-        if key == "escape":
+        if key in ("escape", "m"):
             self.dismiss(None)
         elif key == "up":
             self._move_cursor(-1)
