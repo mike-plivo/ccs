@@ -4227,26 +4227,27 @@ class CCSApp(App):
 
     def action_rescan(self):
         """Full rescan: clear caches and rediscover all Claude sessions."""
-        def on_result(confirmed):
-            if not confirmed:
-                return
-            self.mgr._scan_cache = None
-            try:
-                os.remove(CACHE_FILE)
-            except OSError:
-                pass
-            self._git_cache.clear()
-            self._do_refresh(force=True)
-            count = len(self.sessions)
-            self._set_status(f"Rescan complete: {count} session{'s' if count != 1 else ''} found")
+        def on_result(text):
+            if text and text.strip() == "SCAN":
+                self.mgr._scan_cache = None
+                try:
+                    os.remove(CACHE_FILE)
+                except OSError:
+                    pass
+                self._git_cache.clear()
+                self._do_refresh(force=True)
+                count = len(self.sessions)
+                self._set_status(f"Rescan complete: {count} session{'s' if count != 1 else ''} found")
+            elif text is not None:
+                self._set_status("Rescan cancelled (type SCAN to confirm)")
 
         self.push_screen(
-            ConfirmModal(
-                "Rescan",
-                "Rescan all Claude sessions?",
+            SimpleInputModal(
+                "Rescan all Claude sessions?\n\n"
                 "This will clear all caches and re-read every session file.\n"
-                "Empty sessions and sessions with missing project directories will be deleted.",
-                color_style="warning",
+                "Empty sessions will be deleted.\n"
+                "Type SCAN to confirm:",
+                placeholder="Type SCAN to confirm",
             ),
             on_result,
         )
