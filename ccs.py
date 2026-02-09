@@ -3648,32 +3648,19 @@ class CCSApp(App):
         proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
         if proj_dir and os.path.isdir(proj_dir):
             cmd_str = f"cd {shlex.quote(proj_dir)} && {cmd_str}"
-        # Prepend ephemeral env vars (never stored)
+        full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
+        tmux_args = [
+            "tmux", "new-session", "-d", "-s", tmux_name,
+            "-x", "200", "-y", "50",
+        ]
+        # Pass env vars via tmux -e flag (tmux 3.2+)
         if env_vars:
-            exports = []
             for line in env_vars.strip().splitlines():
                 line = line.strip()
                 if line and "=" in line and not line.startswith("#"):
-                    exports.append(f"export {line}")
-            if exports:
-                cmd_str = " && ".join(exports) + " && " + cmd_str
-        full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
-        subprocess.run(
-            [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                tmux_name,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "bash",
-                "-c",
-                full_cmd,
-            ]
-        )
+                    tmux_args.extend(["-e", line])
+        tmux_args.extend(["bash", "-c", full_cmd])
+        subprocess.run(tmux_args)
         self._tmux_attach(tmux_name, s.id)
 
     def _session_file_exists(self, sid):
