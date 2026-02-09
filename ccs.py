@@ -2117,9 +2117,10 @@ class InputModal(ModalScreen[str]):
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
-    def __init__(self, target_name: str = "tmux"):
+    def __init__(self, target_name: str = "tmux", subtitle: str = ""):
         super().__init__()
         self.target_name = target_name
+        self.subtitle = subtitle
 
     def compose(self) -> ComposeResult:
         with Vertical(id="input-container"):
@@ -2129,9 +2130,12 @@ class InputModal(ModalScreen[str]):
 
     def on_mount(self):
         tc = lambda role, fb="": _tc(self.app, role, fb)
-        title_text = Text(f"Send to {self.target_name}", style=Style(color=tc("header-color", "#00ffff"), bold=True))
-        self.query_one("#input-title", Static).update(title_text)
-        hints = Text("Ctrl+D Send  \u00b7  \u23ce New line  \u00b7  Esc Cancel", style=Style(color=tc("dim-color", "#888888")))
+        text = Text()
+        text.append(f"Send to {self.target_name}", style=Style(color=tc("header-color", "#00ffff"), bold=True))
+        if self.subtitle:
+            text.append(f"\n{self.subtitle}", style=Style(color=tc("dim-color", "#888888")))
+        self.query_one("#input-title", Static).update(text)
+        hints = Text("Ctrl+D Send  \u00b7  \u23ce New line  \u00b7  Esc Cancel/Skip", style=Style(color=tc("dim-color", "#888888")))
         self.query_one("#input-hints", Static).update(hints)
         self.query_one("#input-area", TextArea).focus()
 
@@ -3632,7 +3636,7 @@ class CCSApp(App):
             f' tmux kill-session -t {tn} 2>/dev/null || true'
         )
 
-    def _tmux_launch(self, s, extra):
+    def _tmux_launch(self, s, extra, env_vars=""):
         tmux_name = TMUX_PREFIX + s.id
         if s.id in self.mgr.tmux_alive_sids():
             self._tmux_attach(tmux_name, s.id)
@@ -3643,6 +3647,15 @@ class CCSApp(App):
         proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
         if proj_dir and os.path.isdir(proj_dir):
             cmd_str = f"cd {shlex.quote(proj_dir)} && {cmd_str}"
+        # Prepend ephemeral env vars (never stored)
+        if env_vars:
+            exports = []
+            for line in env_vars.strip().splitlines():
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    exports.append(f"export {line}")
+            if exports:
+                cmd_str = " && ".join(exports) + " && " + cmd_str
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
         subprocess.run(
             [
@@ -4378,14 +4391,24 @@ class CCSApp(App):
         extra = self._active_profile_args()
         label = s.tag or s.label[:40] or s.id[:12]
 
+        def on_env_result(env_text):
+            env_vars = env_text if env_text and env_text.strip() else ""
+            self._tmux_launch(s, extra, env_vars=env_vars)
+            self._do_refresh()
+
         def on_result(choice):
             if choice is None:
                 return
             if choice == "view":
                 self._switch_to_detail()
             elif choice == "tmux":
-                self._tmux_launch(s, extra)
-                self._do_refresh()
+                self.push_screen(
+                    InputModal(
+                        target_name="Environment Variables",
+                        subtitle="One per line: KEY=VALUE (optional, Esc to skip)\nNot stored anywhere \u2014 lives only in this tmux session.",
+                    ),
+                    on_env_result,
+                )
             elif choice == "terminal":
                 proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
                 self.exit_action = ("resume", s.id, extra, proj_dir)
