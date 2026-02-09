@@ -1793,6 +1793,65 @@ class HelpModal(ModalScreen):
         self.dismiss()
 
 
+class InfoModal(ModalScreen):
+    """Simple info popup with OK button. Dismissed by any key, click, or Esc."""
+
+    DEFAULT_CSS = """
+    InfoModal {
+        align: center middle;
+        background: $background 25%;
+    }
+    #info-modal-box {
+        width: 60;
+        height: auto;
+        border: heavy $accent;
+        background: $surface;
+        padding: 2 3;
+    }
+    #info-modal-message { text-align: center; }
+    #info-modal-ok { text-align: center; margin-top: 1; }
+    #info-modal-hints { text-align: center; margin-top: 1; }
+    """
+
+    def __init__(self, title: str, message: str, color_style: str = "normal"):
+        super().__init__()
+        self.title_text = title
+        self.message_text = message
+        self.color_style = color_style
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="info-modal-box"):
+            yield Static(id="info-modal-message")
+            yield Static(id="info-modal-ok")
+            yield Static(id="info-modal-hints")
+
+    def on_mount(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        if self.color_style == "warning":
+            color = "#ff8800"
+        elif self.color_style == "danger":
+            color = tc("warn-color", "#ff4444")
+        else:
+            color = tc("header-color", "#00ffff")
+        box = self.query_one("#info-modal-box")
+        box.styles.border = ("heavy", color)
+        text = Text()
+        text.append(f"{self.title_text}\n\n", style=Style(color=color, bold=True))
+        text.append(self.message_text, style=Style(color=tc("dim-color", "#888888")))
+        self.query_one("#info-modal-message", Static).update(text)
+        ok_style = Style(color=color, bold=True, reverse=True)
+        self.query_one("#info-modal-ok", Static).update(Text("  OK  ", style=ok_style, justify="center"))
+        hints = Text("Enter/Esc/Click to close", style=Style(color=tc("dim-color", "#555555")), justify="center")
+        self.query_one("#info-modal-hints", Static).update(hints)
+
+    def on_click(self, event):
+        self.dismiss()
+
+    def on_key(self, event):
+        event.stop()
+        self.dismiss()
+
+
 class ConfirmModal(ModalScreen[bool]):
     """Yes/No confirmation dialog with arrow-key navigation."""
 
@@ -4251,15 +4310,7 @@ class CCSApp(App):
                     lines.append("No changes detected")
                 detail = "\n".join(lines)
                 self._set_status(f"Rescan complete: {new_count} session{'s' if new_count != 1 else ''} found")
-                self.push_screen(
-                    ConfirmModal(
-                        "Rescan Complete",
-                        detail,
-                        color_style="normal",
-                        default_yes=True,
-                    ),
-                    lambda _: None,
-                )
+                self.push_screen(InfoModal("Rescan Complete", detail))
             elif text is not None:
                 self._set_status("Rescan cancelled (type SCAN to confirm)")
 
