@@ -4396,8 +4396,8 @@ class CCSApp(App):
         if self.view == "sessions" and self.marked:
             count = len(self.marked)
 
-            def on_result(confirmed):
-                if confirmed:
+            def on_result(text):
+                if text and text.strip() == "DELETE":
                     deleted = 0
                     for s in list(self.sessions):
                         if s.id in self.marked:
@@ -4408,12 +4408,15 @@ class CCSApp(App):
                     self.marked.clear()
                     self._set_status(f"Deleted {deleted} session(s)")
                     self._do_refresh()
+                elif text is not None:
+                    self._set_status("Delete cancelled (type DELETE to confirm)")
 
             self.push_screen(
-                ConfirmModal(
-                    "Delete",
-                    f"Delete {count} marked sessions?",
-                    "WARNING: This will permanently delete the Claude session data and cannot be recovered.",
+                SimpleInputModal(
+                    f"Delete {count} marked sessions?\n\n"
+                    "WARNING: This permanently deletes the Claude session data.\n"
+                    "Type DELETE to confirm:",
+                    placeholder="Type DELETE to confirm",
                 ),
                 on_result,
             )
@@ -4423,8 +4426,8 @@ class CCSApp(App):
             return
         label = s.tag or s.label[:40] or s.id[:12]
 
-        def on_result(confirmed):
-            if confirmed:
+        def on_result(text):
+            if text and text.strip() == "DELETE":
                 self._kill_tmux_for_session(s.id)
                 self.mgr.delete(s)
                 self._remove_ephemeral_id(s.id)
@@ -4432,15 +4435,19 @@ class CCSApp(App):
                 if self.view == "detail":
                     self._switch_to_sessions()
                 self._do_refresh()
+            elif text is not None:
+                self._set_status("Delete cancelled (type DELETE to confirm)")
 
         tmux_warning = ""
         if s.id in self.tmux_sids:
             tmux_warning = "\nThe active tmux session will also be killed."
         self.push_screen(
-            ConfirmModal(
-                "Delete",
-                f"Delete '{label}'?",
-                "WARNING: This will permanently delete the Claude session data and cannot be recovered." + tmux_warning,
+            SimpleInputModal(
+                f"Delete '{label}'?\n\n"
+                "WARNING: This permanently deletes the Claude session data.\n"
+                "This cannot be recovered." + tmux_warning + "\n"
+                "Type DELETE to confirm:",
+                placeholder="Type DELETE to confirm",
             ),
             on_result,
         )
@@ -4973,12 +4980,14 @@ def _cli_kill_tmux(sid):
 def cmd_delete_session(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
     label = s.tag or s.label[:40] or s.id[:12]
-    print(f"Delete '{label}'? [y/N] ", end="", flush=True)
+    print(f"\033[1;31mDelete '{label}'?\033[0m")
+    print("\033[33mWARNING: This permanently deletes the Claude session data and cannot be recovered.\033[0m")
+    print("Type DELETE to confirm: ", end="", flush=True)
     try:
-        answer = input().strip().lower()
+        answer = input().strip()
     except (EOFError, KeyboardInterrupt):
         answer = ""
-    if answer == "y":
+    if answer == "DELETE":
         _cli_kill_tmux(s.id)
         mgr.delete(s)
         print(f"Deleted: {label}")

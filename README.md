@@ -156,7 +156,9 @@ All CCS data is stored in `~/.config/ccs/`:
 | `ccs_active_profile.txt` | Currently active profile |
 | `ccs_theme.txt` | Selected theme |
 
-CCS reads session data from `~/.claude/projects/` but never modifies Claude's own configuration.
+CCS reads session data from `~/.claude/projects/`. CCS metadata (tags, pins, profiles) is stored separately and does not affect Claude's configuration.
+
+**Important:** Deleting a session in CCS permanently deletes the underlying Claude session data (the `.jsonl` file in `~/.claude/projects/`). This action cannot be undone. As a safeguard, all delete operations require typing `DELETE` in uppercase to confirm.
 
 ## License
 
