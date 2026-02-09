@@ -4229,6 +4229,8 @@ class CCSApp(App):
         """Full rescan: clear caches and rediscover all Claude sessions."""
         def on_result(text):
             if text and text.strip() == "SCAN":
+                prev_count = len(self.sessions)
+                prev_ids = {s.id for s in self.sessions}
                 self.mgr._scan_cache = None
                 try:
                     os.remove(CACHE_FILE)
@@ -4236,8 +4238,28 @@ class CCSApp(App):
                     pass
                 self._git_cache.clear()
                 self._do_refresh(force=True)
-                count = len(self.sessions)
-                self._set_status(f"Rescan complete: {count} session{'s' if count != 1 else ''} found")
+                new_count = len(self.sessions)
+                new_ids = {s.id for s in self.sessions}
+                added = len(new_ids - prev_ids)
+                removed = len(prev_ids - new_ids)
+                lines = [f"Sessions found: {new_count}"]
+                if added:
+                    lines.append(f"New sessions discovered: {added}")
+                if removed:
+                    lines.append(f"Sessions removed (empty): {removed}")
+                if not added and not removed:
+                    lines.append("No changes detected")
+                detail = "\n".join(lines)
+                self._set_status(f"Rescan complete: {new_count} session{'s' if new_count != 1 else ''} found")
+                self.push_screen(
+                    ConfirmModal(
+                        "Rescan Complete",
+                        detail,
+                        color_style="normal",
+                        default_yes=True,
+                    ),
+                    lambda _: None,
+                )
             elif text is not None:
                 self._set_status("Rescan cancelled (type SCAN to confirm)")
 
