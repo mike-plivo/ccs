@@ -4781,6 +4781,16 @@ def cmd_scan(mgr: SessionManager, dry_run: bool = False):
     if dry_run:
         cmd_scan_dry_run(mgr)
         return
+    print("\033[33mThis will clear all caches and re-read every session file.\033[0m")
+    print("\033[33mEmpty sessions will be deleted.\033[0m")
+    print("Type SCAN to confirm: ", end="", flush=True)
+    try:
+        answer = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer != "SCAN":
+        print("Cancelled.")
+        return
     mgr._scan_cache = None
     try:
         os.remove(CACHE_FILE)
