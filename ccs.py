@@ -3648,15 +3648,23 @@ class CCSApp(App):
         proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
         if proj_dir and os.path.isdir(proj_dir):
             cmd_str = f"cd {shlex.quote(proj_dir)} && {cmd_str}"
-        full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
-        shell = os.environ.get("SHELL", "/bin/sh")
-        tmux_args = ["tmux", "new-session", "-d", "-s", tmux_name]
-        # Pass env vars via tmux -e flag
+        # Prepend export statements so subprocesses (claude, its tools) inherit vars
+        env_lines = []
         if env_vars:
             for line in env_vars.strip().splitlines():
                 line = line.strip()
                 if line and "=" in line and not line.startswith("#"):
-                    tmux_args.extend(["-e", line])
+                    key, _, value = line.partition("=")
+                    env_lines.append((key.strip(), value))
+            if env_lines:
+                exports = " && ".join(f"export {k}={shlex.quote(v)}" for k, v in env_lines)
+                cmd_str = exports + " && " + cmd_str
+        full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
+        shell = os.environ.get("SHELL", "/bin/sh")
+        tmux_args = ["tmux", "new-session", "-d", "-s", tmux_name]
+        # Also pass via tmux -e for session-level visibility
+        for k, v in env_lines:
+            tmux_args.extend(["-e", f"{k}={v}"])
         tmux_args.extend(["-x", "200", "-y", "50", shell, "-c", full_cmd])
         subprocess.run(tmux_args)
         self._tmux_attach(tmux_name, s.id)
