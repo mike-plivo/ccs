@@ -3649,17 +3649,18 @@ class CCSApp(App):
         if proj_dir and os.path.isdir(proj_dir):
             cmd_str = f"cd {shlex.quote(proj_dir)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
+        shell = os.environ.get("SHELL", "/bin/sh")
         tmux_args = [
             "tmux", "new-session", "-d", "-s", tmux_name,
             "-x", "200", "-y", "50",
         ]
-        # Pass env vars via tmux -e flag (tmux 3.2+)
+        # Use env command to set vars for the shell process
         if env_vars:
+            tmux_args.append("env")
             for line in env_vars.strip().splitlines():
                 line = line.strip()
                 if line and "=" in line and not line.startswith("#"):
-                    tmux_args.extend(["-e", line])
-        shell = os.environ.get("SHELL", "/bin/sh")
+                    tmux_args.append(line)
         tmux_args.extend([shell, "-c", full_cmd])
         subprocess.run(tmux_args)
         self._tmux_attach(tmux_name, s.id)
