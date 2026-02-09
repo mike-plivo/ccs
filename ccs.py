@@ -3659,7 +3659,8 @@ class CCSApp(App):
                 line = line.strip()
                 if line and "=" in line and not line.startswith("#"):
                     tmux_args.extend(["-e", line])
-        tmux_args.extend(["bash", "-c", full_cmd])
+        shell = os.environ.get("SHELL", "/bin/sh")
+        tmux_args.extend([shell, "-c", full_cmd])
         subprocess.run(tmux_args)
         self._tmux_attach(tmux_name, s.id)
 
@@ -3738,20 +3739,12 @@ class CCSApp(App):
         if cwd:
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
+        shell = os.environ.get("SHELL", "/bin/sh")
         subprocess.run(
             [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                tmux_name,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "bash",
-                "-c",
-                full_cmd,
+                "tmux", "new-session", "-d", "-s", tmux_name,
+                "-x", "200", "-y", "50",
+                shell, "-c", full_cmd,
             ]
         )
         self._tmux_attach(tmux_name, uid)
@@ -3765,20 +3758,12 @@ class CCSApp(App):
         if cwd:
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
+        shell = os.environ.get("SHELL", "/bin/sh")
         subprocess.run(
             [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                tmux_name,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "bash",
-                "-c",
-                full_cmd,
+                "tmux", "new-session", "-d", "-s", tmux_name,
+                "-x", "200", "-y", "50",
+                shell, "-c", full_cmd,
             ]
         )
         self._tmux_attach(tmux_name, uid)
