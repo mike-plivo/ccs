@@ -1962,9 +1962,9 @@ class ConfirmModal(ModalScreen[bool]):
 class LaunchModal(ModalScreen[str]):
     """Launch mode selector with arrow/vim key navigation."""
 
-    # 0=Tmux  1=Terminal  2=Session View  3=Cancel
-    _ACTIONS = ["tmux", "terminal", "view", None]
-    _LABELS = ["\u26a1 Tmux", "Terminal", "Session View", "Cancel"]
+    # 0=Tmux  1=Tmux Expert  2=Terminal  3=Session View  4=Cancel
+    _ACTIONS = ["tmux", "tmux_expert", "terminal", "view", None]
+    _LABELS = ["\u26a1 Tmux", "\u26a1 Tmux Expert", "Terminal", "Session View", "Cancel"]
 
     DEFAULT_CSS = """
     LaunchModal {
@@ -2001,8 +2001,9 @@ class LaunchModal(ModalScreen[str]):
         self._actions = list(self._ACTIONS)
         self._labels = list(self._LABELS)
         if not show_view:
-            self._actions.pop(2)
-            self._labels.pop(2)
+            idx = self._actions.index("view")
+            self._actions.pop(idx)
+            self._labels.pop(idx)
         self.sel = 0 if HAS_TMUX else 1
 
     def compose(self) -> ComposeResult:
@@ -3974,6 +3975,7 @@ class CCSApp(App):
             pin_label = "Unpin" if is_pinned else "Pin"
             items = [
                 ("\u23ce  Resume Session", "launch"),
+                ("\u26a1  Tmux Expert", "tmux_expert"),
                 ("\u2190  Back to Sessions", "back"),
                 ("Tab Switch Panel", "switch_pane"),
                 ("", "---"),
@@ -4003,6 +4005,7 @@ class CCSApp(App):
             has_tmux = s and s.id in self.tmux_sids
             items = [
                 ("\u23ce  Resume Session", "launch"),
+                ("\u26a1  Tmux Expert", "tmux_expert"),
                 ("\u2192  Session View", "view"),
                 ("", "---"),
                 (f"Spc {mark_label} Session", "mark"),
@@ -4037,6 +4040,7 @@ class CCSApp(App):
         def on_result(action):
             actions = {
                 "launch": self.action_launch,
+                "tmux_expert": self._action_tmux_expert,
                 "back": self._switch_to_sessions,
                 "switch_pane": self.action_switch_pane,
                 "view": self._switch_to_detail,
@@ -4402,6 +4406,9 @@ class CCSApp(App):
             if choice == "view":
                 self._switch_to_detail()
             elif choice == "tmux":
+                self._tmux_launch(s, extra)
+                self._do_refresh()
+            elif choice == "tmux_expert":
                 self.push_screen(
                     InputModal(
                         target_name="Environment Variables",
@@ -4415,6 +4422,26 @@ class CCSApp(App):
                 self.exit()
 
         self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
+
+    def _action_tmux_expert(self):
+        """Launch tmux with env vars prompt (called from menu)."""
+        s = self._current_session()
+        if not s:
+            return
+        extra = self._active_profile_args()
+
+        def on_env_result(env_text):
+            env_vars = env_text if env_text and env_text.strip() else ""
+            self._tmux_launch(s, extra, env_vars=env_vars)
+            self._do_refresh()
+
+        self.push_screen(
+            InputModal(
+                target_name="Environment Variables",
+                subtitle="One per line: KEY=VALUE (optional, Esc to skip)\nNot stored anywhere \u2014 lives only in this tmux session.",
+            ),
+            on_env_result,
+        )
 
     def action_mark(self):
         if self.view != "sessions":
