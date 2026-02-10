@@ -3671,7 +3671,7 @@ class CCSApp(App):
             "-x", "200", "-y", "50", full_cmd,
         ])
         # Auto-kill expert sessions on detach so env vars don't persist
-        if env_lines:
+        if pairs:
             subprocess.run([
                 "tmux", "set-hook", "-t", tmux_name,
                 "client-detached",
