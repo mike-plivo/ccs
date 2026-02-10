@@ -130,6 +130,15 @@ ccs tmux kill --all                    Kill all ccs tmux sessions
 | `d` | Delete session |
 | `Left / Esc` | Back to sessions list |
 
+## Tmux Expert Mode
+
+Tmux Expert allows launching a session with **ephemeral environment variables** (e.g. AWS credentials, API keys). The variables are set inline on the `claude` command and are never stored anywhere.
+
+- Available in the Launch modal and the menu (`m`) as **Tmux Expert**
+- Enter one `KEY=VALUE` per line (Ctrl+D to confirm, Esc to cancel)
+- Variables are passed directly to the `claude` process and inherited by all its subcommands
+- **On detach (Ctrl+B, D), the tmux session is automatically killed** to avoid preserving sensitive env vars
+
 ## Profiles
 
 <img src="img/ccs-claude-profile-management.png" width="600">
