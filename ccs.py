@@ -3670,14 +3670,13 @@ class CCSApp(App):
             "tmux", "new-session", "-d", "-s", tmux_name,
             "-x", "200", "-y", "50", full_cmd,
         ])
+        self._tmux_attach(tmux_name, s.id)
         # Auto-kill expert sessions on detach so env vars don't persist
         if pairs:
-            subprocess.run([
-                "tmux", "set-hook", "-t", tmux_name,
-                "client-detached",
-                f"kill-session -t {shlex.quote(tmux_name)}",
-            ])
-        self._tmux_attach(tmux_name, s.id)
+            subprocess.run(
+                ["tmux", "kill-session", "-t", tmux_name],
+                stderr=subprocess.DEVNULL,
+            )
 
     def _session_file_exists(self, sid):
         """Check if a Claude session .jsonl file exists for this ID."""
