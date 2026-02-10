@@ -3640,8 +3640,15 @@ class CCSApp(App):
     def _tmux_launch(self, s, extra, env_vars=""):
         tmux_name = TMUX_PREFIX + s.id
         if s.id in self.mgr.tmux_alive_sids():
-            self._tmux_attach(tmux_name, s.id)
-            return
+            if env_vars:
+                # Kill existing session so we can restart with new env vars
+                subprocess.run(
+                    ["tmux", "kill-session", "-t", tmux_name],
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                self._tmux_attach(tmux_name, s.id)
+                return
         cmd_parts = ["claude", "--resume", s.id] + extra
         # Inline env vars directly before the claude command: K1=V1 K2=V2 claude ...
         env_prefix = ""
