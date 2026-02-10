@@ -3645,8 +3645,8 @@ class CCSApp(App):
         cmd_parts = ["claude", "--resume", s.id] + extra
         # Inline env vars directly before the claude command: K1=V1 K2=V2 claude ...
         env_prefix = ""
+        pairs = []
         if env_vars:
-            pairs = []
             for line in env_vars.strip().splitlines():
                 line = line.strip()
                 if line.startswith("export "):
