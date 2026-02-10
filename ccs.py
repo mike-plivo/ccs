@@ -2153,7 +2153,7 @@ class InputModal(ModalScreen[str]):
             event.stop()
             ta = self.query_one("#input-area", TextArea)
             text = ta.text
-            self.dismiss(text if text.strip() else None)
+            self.dismiss(text if text.strip() else "")
 
     def action_cancel(self):
         self.dismiss(None)
