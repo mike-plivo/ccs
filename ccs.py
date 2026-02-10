@@ -3643,30 +3643,40 @@ class CCSApp(App):
             self._tmux_attach(tmux_name, s.id)
             return
         cmd_parts = ["claude", "--resume", s.id] + extra
-        cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+        # Inline env vars directly before the claude command: K1=V1 K2=V2 claude ...
+        env_prefix = ""
+        if env_vars:
+            pairs = []
+            for line in env_vars.strip().splitlines():
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if line and "=" in line and not line.startswith("#"):
+                    key, _, value = line.partition("=")
+                    value = value.strip()
+                    # Strip surrounding quotes the user may have included
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                        value = value[1:-1]
+                    pairs.append(f"{key.strip()}={shlex.quote(value)}")
+            if pairs:
+                env_prefix = " ".join(pairs) + " "
+        cmd_str = env_prefix + " ".join(shlex.quote(p) for p in cmd_parts)
         # cd to project directory so claude can find the session
         proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
         if proj_dir and os.path.isdir(proj_dir):
             cmd_str = f"cd {shlex.quote(proj_dir)} && {cmd_str}"
-        # Prepend export statements so subprocesses (claude, its tools) inherit vars
-        env_lines = []
-        if env_vars:
-            for line in env_vars.strip().splitlines():
-                line = line.strip()
-                if line and "=" in line and not line.startswith("#"):
-                    key, _, value = line.partition("=")
-                    env_lines.append((key.strip(), value))
-            if env_lines:
-                exports = " && ".join(f"export {k}={shlex.quote(v)}" for k, v in env_lines)
-                cmd_str = exports + " && " + cmd_str
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
-        shell = os.environ.get("SHELL", "/bin/sh")
-        tmux_args = ["tmux", "new-session", "-d", "-s", tmux_name]
-        # Also pass via tmux -e for session-level visibility
-        for k, v in env_lines:
-            tmux_args.extend(["-e", f"{k}={v}"])
-        tmux_args.extend(["-x", "200", "-y", "50", shell, "-c", full_cmd])
-        subprocess.run(tmux_args)
+        subprocess.run([
+            "tmux", "new-session", "-d", "-s", tmux_name,
+            "-x", "200", "-y", "50", full_cmd,
+        ])
+        # Auto-kill expert sessions on detach so env vars don't persist
+        if env_lines:
+            subprocess.run([
+                "tmux", "set-hook", "-t", tmux_name,
+                "client-detached",
+                f"kill-session -t {shlex.quote(tmux_name)}",
+            ])
         self._tmux_attach(tmux_name, s.id)
 
     def _session_file_exists(self, sid):
@@ -3744,12 +3754,11 @@ class CCSApp(App):
         if cwd:
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
-        shell = os.environ.get("SHELL", "/bin/sh")
         subprocess.run(
             [
                 "tmux", "new-session", "-d", "-s", tmux_name,
                 "-x", "200", "-y", "50",
-                shell, "-c", full_cmd,
+                full_cmd,
             ]
         )
         self._tmux_attach(tmux_name, uid)
@@ -3763,12 +3772,11 @@ class CCSApp(App):
         if cwd:
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         full_cmd = self._tmux_wrap_cmd(cmd_str, tmux_name)
-        shell = os.environ.get("SHELL", "/bin/sh")
         subprocess.run(
             [
                 "tmux", "new-session", "-d", "-s", tmux_name,
                 "-x", "200", "-y", "50",
-                shell, "-c", full_cmd,
+                full_cmd,
             ]
         )
         self._tmux_attach(tmux_name, uid)
@@ -4373,8 +4381,9 @@ class CCSApp(App):
         label = s.tag or s.label[:40] or s.id[:12]
 
         def on_env_result(env_text):
-            env_vars = env_text if env_text and env_text.strip() else ""
-            self._tmux_launch(s, extra, env_vars=env_vars)
+            if env_text is None:
+                return
+            self._tmux_launch(s, extra, env_vars=env_text.strip())
             self._do_refresh()
 
         def on_result(choice):
@@ -4389,7 +4398,7 @@ class CCSApp(App):
                 self.push_screen(
                     InputModal(
                         target_name="Environment Variables",
-                        subtitle="One per line: KEY=VALUE (optional, Esc to skip)\nNot stored anywhere \u2014 lives only in this tmux session.",
+                        subtitle="One per line: KEY=VALUE (Esc to cancel)\nNot stored anywhere \u2014 lives only in this tmux session.\nWarning: detaching will kill the tmux session to avoid preserving env vars.",
                     ),
                     on_env_result,
                 )
@@ -4408,14 +4417,15 @@ class CCSApp(App):
         extra = self._active_profile_args()
 
         def on_env_result(env_text):
-            env_vars = env_text if env_text and env_text.strip() else ""
-            self._tmux_launch(s, extra, env_vars=env_vars)
+            if env_text is None:
+                return
+            self._tmux_launch(s, extra, env_vars=env_text.strip())
             self._do_refresh()
 
         self.push_screen(
             InputModal(
                 target_name="Environment Variables",
-                subtitle="One per line: KEY=VALUE (optional, Esc to skip)\nNot stored anywhere \u2014 lives only in this tmux session.",
+                subtitle="One per line: KEY=VALUE (Esc to cancel)\nNot stored anywhere \u2014 lives only in this tmux session.\nWarning: detaching will kill the tmux session to avoid preserving env vars.",
             ),
             on_env_result,
         )
