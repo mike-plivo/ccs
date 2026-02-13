@@ -63,7 +63,7 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -1299,11 +1299,12 @@ def build_session_row(
     else:
         text.append("   ")
 
-    # Tag column
+    # Tag column — truncate long tags to [abcdefgh...]
     if s.tag:
-        disp_tag = f"[{s.tag}]"
-        if tag_col_w and len(disp_tag) > tag_col_w - 1:
-            disp_tag = disp_tag[: tag_col_w - 2] + "]"
+        if len(s.tag) > 8:
+            disp_tag = f"[{s.tag[:8]}...]"
+        else:
+            disp_tag = f"[{s.tag}]"
         text.append(disp_tag, style=Style(color=tc("tag-color", "#00ff00"), bold=True))
         pad = max(0, tag_col_w - len(disp_tag))
         text.append(" " * pad)
@@ -1361,11 +1362,14 @@ class SessionListWidget(OptionList):
         marked: set,
     ):
         """Clear and rebuild the option list from *sessions*."""
-        # Compute tag column width (widest "[tag]" + padding)
+        # Compute tag column width (widest displayed tag + padding)
+        # Tags > 8 chars are truncated to [abcdefgh...] = 13 chars + space = 14
         max_tag_w = 0
         for s in sessions:
             if s.tag:
-                tw = len(s.tag) + 3  # "[" + tag + "] "
+                tw = min(len(s.tag), 8) + 3  # "[" + tag(max 8) + "] "
+                if len(s.tag) > 8:
+                    tw = 14  # "[" + 8 + "..." + "]" + " "
                 if tw > max_tag_w:
                     max_tag_w = tw
 
@@ -2184,16 +2188,17 @@ class SimpleInputModal(ModalScreen[str]):
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
-    def __init__(self, title: str, initial: str = "", placeholder: str = ""):
+    def __init__(self, title: str, initial: str = "", placeholder: str = "", max_length: int = 0):
         super().__init__()
         self.title_text = title
         self.initial = initial
         self.placeholder = placeholder
+        self.max_length = max_length
 
     def compose(self) -> ComposeResult:
         with Vertical(id="simple-input-container"):
             yield Static(id="simple-input-title")
-            yield Input(value=self.initial, placeholder=self.placeholder, id="simple-input-field")
+            yield Input(value=self.initial, placeholder=self.placeholder, max_length=self.max_length or 0, id="simple-input-field")
             yield Static(id="simple-input-hints")
 
     def on_mount(self):
@@ -3273,7 +3278,9 @@ class CCSApp(App):
         max_tag_w = 0
         for s in self.filtered:
             if s.tag:
-                tw = len(s.tag) + 3
+                tw = min(len(s.tag), 8) + 3
+                if len(s.tag) > 8:
+                    tw = 14
                 if tw > max_tag_w:
                     max_tag_w = tw
         tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
@@ -4486,7 +4493,7 @@ class CCSApp(App):
                 self._do_refresh()
 
         self.push_screen(
-            SimpleInputModal("Set Tag", s.tag or "", "Enter tag name"),
+            SimpleInputModal("Set Tag", s.tag or "", "Enter tag name (max 24 chars)", max_length=24),
             on_result,
         )
 
