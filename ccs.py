@@ -63,7 +63,7 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -325,8 +325,35 @@ class SessionManager:
         if p in ("~", "-workdir"):
             return p
         if p.startswith("~-"):
-            return "~/" + p[2:].replace("-", "/")
+            base = os.path.expanduser("~")
+            resolved = SessionManager._resolve_dashed_path(base, p[2:])
+            home = str(Path.home())
+            if resolved.startswith(home):
+                return "~" + resolved[len(home):]
+            return resolved
         return p.replace("-", "/")
+
+    @staticmethod
+    def _resolve_dashed_path(base: str, remainder: str) -> str:
+        """Resolve dash-separated remainder by checking the filesystem.
+
+        Tries longest directory name matches first so that directories
+        with dashes in their name (e.g. turnformer-indic) are preferred
+        over splitting into subdirectories (turnformer/indic).
+        """
+        if not remainder:
+            return base
+        parts = remainder.split("-")
+        for i in range(len(parts), 0, -1):
+            candidate = "-".join(parts[:i])
+            full_path = os.path.join(base, candidate)
+            if os.path.isdir(full_path):
+                rest = "-".join(parts[i:])
+                if not rest:
+                    return full_path
+                return SessionManager._resolve_dashed_path(full_path, rest)
+        # No directory match — fall back to replacing dashes with slashes
+        return os.path.join(base, remainder.replace("-", "/"))
 
     @staticmethod
     def _extract_text(msg) -> str:
