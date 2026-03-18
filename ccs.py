@@ -3338,6 +3338,35 @@ class CCSApp(App):
         # Hide continuations unless toggled on (search always shows all)
         if not self.show_continuations and not q:
             self.filtered = [s for s in self.filtered if not s.is_continuation]
+        elif self.show_continuations and not q:
+            # Group continuations under their root parent
+            by_id = {s.id: s for s in self.sessions}
+            roots = [s for s in self.filtered if not s.is_continuation]
+            conts = [s for s in self.filtered if s.is_continuation]
+            # Map each continuation to its root ancestor
+            root_children: dict = {}
+            for s in conts:
+                root = s.parent_id
+                visited = {s.id}
+                while root in by_id and by_id[root].is_continuation and by_id[root].parent_id:
+                    if root in visited:
+                        break
+                    visited.add(root)
+                    root = by_id[root].parent_id
+                root_children.setdefault(root, []).append(s)
+            # Sort children by date (newest first)
+            for children in root_children.values():
+                children.sort(key=lambda s: -s.mtime)
+            # Rebuild: insert continuations after their root
+            result = []
+            for s in roots:
+                result.append(s)
+                if s.id in root_children:
+                    result.extend(root_children.pop(s.id))
+            # Append orphan continuations (parent not in filtered list)
+            for children in root_children.values():
+                result.extend(children)
+            self.filtered = result
 
     def _rebuild_list(self):
         sl = self.query_one("#session-list", SessionListWidget)
