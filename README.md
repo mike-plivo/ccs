@@ -104,6 +104,7 @@ ccs tmux kill --all                    Kill all ccs tmux sessions
 | `t / T` | Set / remove tag |
 | `d` | Delete session |
 | `D` | Delete all empty sessions |
+| `C` | Toggle continuation sessions |
 | `k / K` | Kill tmux session / all |
 | `Space` | Mark / unmark session |
 | `u` | Unmark all |
@@ -129,6 +130,16 @@ ccs tmux kill --all                    Kill all ccs tmux sessions
 | `t / T` | Set / remove tag |
 | `d` | Delete session |
 | `Left / Esc` | Back to sessions list |
+
+## Continuation Sessions
+
+When Claude Code runs out of context, it creates a new **continuation session** with a summary of the previous conversation. CCS detects these automatically and hides them by default to keep the session list clean.
+
+- **Hidden by default** -- only root/parent sessions are shown with a `+N` badge indicating how many continuations exist
+- **Toggle with `C`** -- press `C` to show/hide continuation sessions; when visible, they appear grouped under their parent with a `↳` prefix and dimmed text
+- **Search includes all** -- searching always includes continuation sessions regardless of the toggle
+- **Orphan promotion** -- if a continuation's parent was deleted, it's promoted to a standalone session
+- **Bulk archive** -- use the menu (`m`) to delete all continuation sessions at once
 
 ## Tmux Expert Mode
 
