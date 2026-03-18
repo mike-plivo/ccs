@@ -415,6 +415,7 @@ class SessionManager:
                 sums: List[str] = []
                 msg_count = 0
                 first_entry_sid = ""
+                has_cont_text = False
                 try:
                     with open(jp, "r", errors="replace") as f:
                         for ln in f:
@@ -441,11 +442,16 @@ class SessionManager:
                                             fm = clean
                                             fm_long = txt[:800]
                                         lm = clean
+                                        if not has_cont_text and txt.startswith("This session is being continued"):
+                                            has_cont_text = True
                 except Exception:
                     pass
-                # Detect continuation: first entry's sessionId differs from filename
-                # (Claude creates continuations with the parent's sessionId in the first entry)
-                is_cont = bool(first_entry_sid and first_entry_sid != sid)
+                # Detect continuation: sessionId mismatch AND continuation text present
+                is_cont = bool(
+                    has_cont_text
+                    and first_entry_sid
+                    and first_entry_sid != sid
+                )
                 cont_parent = first_entry_sid if is_cont else ""
                 cache[sid] = {
                     "mtime": file_mtime,
@@ -513,8 +519,17 @@ class SessionManager:
 
     @staticmethod
     def build_continuation_chains(sessions: List["Session"]) -> None:
-        """Walk continuation chains and set continuation_count on root sessions."""
+        """Walk continuation chains and set continuation_count on root sessions.
+
+        Orphan continuations (parent not in session list) are promoted to
+        standalone sessions so they aren't hidden.
+        """
         by_id = {s.id: s for s in sessions}
+        # Promote orphan continuations (parent deleted) to standalone
+        for s in sessions:
+            if s.is_continuation and s.parent_id and s.parent_id not in by_id:
+                s.is_continuation = False
+                s.parent_id = ""
         # Find root ancestor for each continuation
         root_counts: dict = {}
         for s in sessions:
