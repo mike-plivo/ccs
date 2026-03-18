@@ -63,7 +63,7 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -146,6 +146,9 @@ class Session:
     summaries: List[str] = field(default_factory=list)
     path: str = ""
     msg_count: int = 0
+    is_continuation: bool = False
+    parent_id: str = ""
+    continuation_count: int = 0
 
     @property
     def ts(self) -> str:
@@ -405,10 +408,13 @@ class SessionManager:
                 msg_count = cached.get("msg_count", 0)
                 praw = cached.get("project_raw", praw)
                 pdisp = cached.get("project_display", pdisp)
+                is_cont = cached.get("is_continuation", False)
+                cont_parent = cached.get("parent_id", "")
             else:
                 summary, fm, fm_long, lm = "", "", "", ""
                 sums: List[str] = []
                 msg_count = 0
+                first_entry_sid = ""
                 try:
                     with open(jp, "r", errors="replace") as f:
                         for ln in f:
@@ -417,6 +423,9 @@ class SessionManager:
                             except Exception:
                                 continue
                             msg_type = d.get("type")
+                            # Capture sessionId from first entry for parent linking
+                            if not first_entry_sid and d.get("sessionId"):
+                                first_entry_sid = d["sessionId"]
                             if msg_type == "summary":
                                 s = d.get("summary", "")
                                 if s:
@@ -434,6 +443,10 @@ class SessionManager:
                                         lm = clean
                 except Exception:
                     pass
+                # Detect continuation: first entry's sessionId differs from filename
+                # (Claude creates continuations with the parent's sessionId in the first entry)
+                is_cont = bool(first_entry_sid and first_entry_sid != sid)
+                cont_parent = first_entry_sid if is_cont else ""
                 cache[sid] = {
                     "mtime": file_mtime,
                     "summary": summary,
@@ -444,6 +457,8 @@ class SessionManager:
                     "summaries": sums,
                     "project_raw": praw,
                     "project_display": pdisp,
+                    "is_continuation": is_cont,
+                    "parent_id": cont_parent,
                 }
                 cache_dirty = True
 
@@ -466,6 +481,7 @@ class SessionManager:
                 tag=tag, pinned=pinned,
                 mtime=file_mtime, summaries=sums, path=jp,
                 msg_count=msg_count,
+                is_continuation=is_cont, parent_id=cont_parent,
             ))
 
         # Batch-delete metadata for empty sessions
@@ -494,6 +510,28 @@ class SessionManager:
 
         out.sort(key=lambda s: s.get_sort_key(sort_mode))
         return out
+
+    @staticmethod
+    def build_continuation_chains(sessions: List["Session"]) -> None:
+        """Walk continuation chains and set continuation_count on root sessions."""
+        by_id = {s.id: s for s in sessions}
+        # Find root ancestor for each continuation
+        root_counts: dict = {}
+        for s in sessions:
+            if not s.is_continuation or not s.parent_id:
+                continue
+            # Walk up to find root
+            root = s.parent_id
+            visited = {s.id}
+            while root in by_id and by_id[root].is_continuation and by_id[root].parent_id:
+                if root in visited:
+                    break
+                visited.add(root)
+                root = by_id[root].parent_id
+            root_counts[root] = root_counts.get(root, 0) + 1
+        # Set counts on root sessions
+        for s in sessions:
+            s.continuation_count = root_counts.get(s.id, 0)
 
     def toggle_pin(self, sid: str) -> bool:
         current = self._get_meta(sid).get("pinned", False)
@@ -1296,6 +1334,7 @@ def build_session_row(
     tmux_state: Optional[str],
     is_marked: bool,
     tag_col_w: int = 0,
+    show_continuations: bool = False,
 ) -> Text:
     """Build a Rich Text row for a session in the option list.
 
@@ -1325,6 +1364,15 @@ def build_session_row(
         text.append(" ")
     else:
         text.append("   ")
+
+    # Continuation badge on parent, ↳ prefix on continuations
+    if show_continuations and s.is_continuation:
+        text.append("\u21b3", style=Style(dim=True))
+    elif s.continuation_count > 0:
+        text.append(f"+{s.continuation_count}", style=Style(color=tc("accent-color", "#00cccc")))
+    else:
+        text.append("  ")
+    text.append(" ")
 
     # Tag column — truncate long tags to [abcdefgh...]
     if s.tag:
@@ -1366,7 +1414,10 @@ def build_session_row(
     desc = s.label
     if len(desc) > 50:
         desc = desc[:49] + "\u2026"
-    text.append(desc)
+    if show_continuations and s.is_continuation:
+        text.append(desc, style=Style(dim=True))
+    else:
+        text.append(desc)
 
     return text
 
@@ -1387,6 +1438,7 @@ class SessionListWidget(OptionList):
         tmux_idle: set,
         tmux_claude_state: dict,
         marked: set,
+        show_continuations: bool = False,
     ):
         """Clear and rebuild the option list from *sessions*."""
         # Compute tag column width (widest displayed tag + padding)
@@ -1408,7 +1460,7 @@ class SessionListWidget(OptionList):
             is_marked = s.id in marked
             row = build_session_row(
                 self.app, s, has_tmux, is_idle, tmux_state,
-                is_marked, max_tag_w,
+                is_marked, max_tag_w, show_continuations,
             )
             self.add_option(Option(row, id=s.id))
 
@@ -1794,6 +1846,7 @@ class HelpModal(ModalScreen):
             text.append("  t / T          Set / remove tag\n")
             text.append("  d              Delete session (bulk if marked)\n")
             text.append("  D              Delete all empty sessions\n")
+            text.append("  C              Toggle continuations\n")
             text.append("  k              Kill tmux session\n")
             text.append("  K              Kill all tmux sessions\n\n")
             text.append("Bulk & Sort\n", style=hdr)
@@ -3187,6 +3240,7 @@ class CCSApp(App):
         self._last_click_time = 0.0
         self._last_click_idx = -1
         self._last_preview_click = 0.0
+        self.show_continuations = False
 
     def compose(self) -> ComposeResult:
         with Container(id="header"):
@@ -3238,6 +3292,7 @@ class CCSApp(App):
     def _do_refresh(self, force=False):
         """Refresh session data and rebuild UI."""
         self.sessions = self.mgr.scan(self.sort_mode, force=force)
+        SessionManager.build_continuation_chains(self.sessions)
         if HAS_TMUX:
             self.tmux_sids = self.mgr.tmux_alive_sids()
         else:
@@ -3280,6 +3335,9 @@ class CCSApp(App):
                 or q in s.project_display.lower()
                 or q in s.id.lower()
             ]
+        # Hide continuations unless toggled on (search always shows all)
+        if not self.show_continuations and not q:
+            self.filtered = [s for s in self.filtered if not s.is_continuation]
 
     def _rebuild_list(self):
         sl = self.query_one("#session-list", SessionListWidget)
@@ -3300,6 +3358,7 @@ class CCSApp(App):
             self.tmux_idle,
             self.tmux_claude_state,
             self.marked,
+            self.show_continuations,
         )
         # Update column header
         max_tag_w = 0
@@ -3311,7 +3370,7 @@ class CCSApp(App):
                 if tw > max_tag_w:
                     max_tag_w = tw
         tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
-        hdr = f"      {tag_hdr}{'Modified':<18s}{'Msgs':<6s}{'Project':<25s}Description"
+        hdr = f"         {tag_hdr}{'Modified':<18s}{'Msgs':<6s}{'Project':<25s}Description"
         self.query_one("#session-columns", Static).update(
             Text(hdr, style=Style(dim=True))
         )
@@ -4044,6 +4103,8 @@ class CCSApp(App):
                 ("", "---"),
                 ("d   Delete Session", "delete"),
                 ("D   Delete All Empty", "delete_empty"),
+                ("C   Toggle Continuations", "toggle_cont"),
+                ("    Archive Continuations", "archive_cont"),
             ]
             if has_tmux:
                 items.append(("k   Kill Tmux", "kill_tmux"))
@@ -4078,6 +4139,8 @@ class CCSApp(App):
                 "remove_tag": self.action_remove_tag,
                 "delete": self.action_delete_session,
                 "delete_empty": self.action_delete_empty,
+                "toggle_cont": self.action_toggle_continuations,
+                "archive_cont": self.action_archive_continuations,
                 "kill_tmux": self.action_kill_tmux,
                 "kill_all_tmux": self.action_kill_all_tmux,
                 "send_input": self.action_send_input,
@@ -4214,6 +4277,8 @@ class CCSApp(App):
             self.action_delete_session()
         elif key == "D":
             self.action_delete_empty()
+        elif key == "C":
+            self.action_toggle_continuations()
         elif key == "k":
             self.action_kill_tmux()
         elif key == "K":
@@ -4625,6 +4690,43 @@ class CCSApp(App):
         self.push_screen(
             ConfirmModal("Delete Empty", f"Delete {count} empty sessions?"),
             on_result,
+        )
+
+    def action_toggle_continuations(self):
+        if self.view != "sessions":
+            return
+        self.show_continuations = not self.show_continuations
+        label = "shown" if self.show_continuations else "hidden"
+        self._set_status(f"Continuations {label}")
+        self._apply_filter()
+        self._rebuild_list()
+        self._update_preview()
+
+    def action_archive_continuations(self):
+        """Delete all continuation sessions."""
+        if self.view != "sessions":
+            return
+        cont_sessions = [s for s in self.sessions if s.is_continuation]
+        if not cont_sessions:
+            self._set_status("No continuation sessions to archive")
+            return
+        count = len(cont_sessions)
+
+        def on_confirm(text):
+            if text and text.strip().upper() == "DELETE":
+                for s in cont_sessions:
+                    self._kill_tmux_for_session(s.id)
+                    self.mgr.delete(s)
+                self._set_status(f"Deleted {count} continuation(s)")
+                self._do_refresh()
+
+        self.push_screen(
+            SimpleInputModal(
+                f"Delete {count} Continuations",
+                "",
+                "Type DELETE to confirm",
+            ),
+            on_confirm,
         )
 
     def action_kill_tmux(self):
