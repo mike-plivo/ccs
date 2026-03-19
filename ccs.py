@@ -149,6 +149,8 @@ class Session:
     is_continuation: bool = False
     parent_id: str = ""
     continuation_count: int = 0
+    hide_when_collapsed: bool = False
+    chain_root: str = ""  # root ancestor ID for grouping
 
     @property
     def ts(self) -> str:
@@ -519,10 +521,12 @@ class SessionManager:
 
     @staticmethod
     def build_continuation_chains(sessions: List["Session"]) -> None:
-        """Walk continuation chains and set continuation_count on root sessions.
+        """Walk continuation chains, find latest per chain, set badges.
 
         Orphan continuations (parent not in session list) are promoted to
         standalone sessions so they aren't hidden.
+        The latest session in each chain gets the +N badge and stays visible;
+        all other chain members are hidden when collapsed.
         """
         by_id = {s.id: s for s in sessions}
         # Promote orphan continuations (parent deleted) to standalone
@@ -530,12 +534,11 @@ class SessionManager:
             if s.is_continuation and s.parent_id and s.parent_id not in by_id:
                 s.is_continuation = False
                 s.parent_id = ""
-        # Find root ancestor for each continuation
-        root_counts: dict = {}
+        # Build chains: map each session to its root ancestor
+        chain_members: dict = {}  # root_id -> [all sessions in chain]
         for s in sessions:
             if not s.is_continuation or not s.parent_id:
                 continue
-            # Walk up to find root
             root = s.parent_id
             visited = {s.id}
             while root in by_id and by_id[root].is_continuation and by_id[root].parent_id:
@@ -543,10 +546,22 @@ class SessionManager:
                     break
                 visited.add(root)
                 root = by_id[root].parent_id
-            root_counts[root] = root_counts.get(root, 0) + 1
-        # Set counts on root sessions
-        for s in sessions:
-            s.continuation_count = root_counts.get(s.id, 0)
+            chain_members.setdefault(root, []).append(s)
+        # For each chain, find the latest session and set flags
+        for root_id, children in chain_members.items():
+            # Include the root itself in the chain
+            all_in_chain = list(children)
+            if root_id in by_id:
+                all_in_chain.append(by_id[root_id])
+            # Find the session with the most recent mtime
+            latest = max(all_in_chain, key=lambda s: s.mtime)
+            count = len(all_in_chain) - 1  # exclude the latest from count
+            latest.continuation_count = count
+            # Set chain_root and hide flags on all members
+            for s in all_in_chain:
+                s.chain_root = latest.id
+                if s.id != latest.id:
+                    s.hide_when_collapsed = True
 
     def toggle_pin(self, sid: str) -> bool:
         current = self._get_meta(sid).get("pinned", False)
@@ -554,7 +569,7 @@ class SessionManager:
         return not current
 
     def set_tag(self, sid: str, tag: str):
-        self._set_meta(sid, tag=tag[:10] if tag else "")
+        self._set_meta(sid, tag=tag[:24] if tag else "")
 
     def remove_tag(self, sid: str):
         self.set_tag(sid, "")
@@ -1381,7 +1396,7 @@ def build_session_row(
         text.append("   ")
 
     # Continuation badge on parent, ↳ prefix on continuations
-    if show_continuations and s.is_continuation:
+    if show_continuations and s.hide_when_collapsed:
         text.append("\u21b3", style=Style(dim=True))
     elif s.continuation_count > 0:
         text.append(f"+{s.continuation_count}", style=Style(color=tc("accent-color", "#00cccc")))
@@ -1429,7 +1444,7 @@ def build_session_row(
     desc = s.label
     if len(desc) > 50:
         desc = desc[:49] + "\u2026"
-    if show_continuations and s.is_continuation:
+    if show_continuations and s.hide_when_collapsed:
         text.append(desc, style=Style(dim=True))
     else:
         text.append(desc)
@@ -3350,36 +3365,24 @@ class CCSApp(App):
                 or q in s.project_display.lower()
                 or q in s.id.lower()
             ]
-        # Hide continuations unless toggled on (search always shows all)
+        # Hide chain members unless toggled on (search always shows all)
         if not self.show_continuations and not q:
-            self.filtered = [s for s in self.filtered if not s.is_continuation]
+            self.filtered = [s for s in self.filtered if not s.hide_when_collapsed]
         elif self.show_continuations and not q:
-            # Group continuations under their root parent
-            by_id = {s.id: s for s in self.sessions}
-            roots = [s for s in self.filtered if not s.is_continuation]
-            conts = [s for s in self.filtered if s.is_continuation]
-            # Map each continuation to its root ancestor
-            root_children: dict = {}
-            for s in conts:
-                root = s.parent_id
-                visited = {s.id}
-                while root in by_id and by_id[root].is_continuation and by_id[root].parent_id:
-                    if root in visited:
-                        break
-                    visited.add(root)
-                    root = by_id[root].parent_id
-                root_children.setdefault(root, []).append(s)
-            # Sort children by date (newest first)
-            for children in root_children.values():
+            # Group chain members under the latest session (badge holder)
+            visible = [s for s in self.filtered if not s.hide_when_collapsed]
+            chain_children: dict = {}
+            for s in self.filtered:
+                if s.hide_when_collapsed and s.chain_root:
+                    chain_children.setdefault(s.chain_root, []).append(s)
+            for children in chain_children.values():
                 children.sort(key=lambda s: -s.mtime)
-            # Rebuild: insert continuations after their root
             result = []
-            for s in roots:
+            for s in visible:
                 result.append(s)
-                if s.id in root_children:
-                    result.extend(root_children.pop(s.id))
-            # Append orphan continuations (parent not in filtered list)
-            for children in root_children.values():
+                if s.id in chain_children:
+                    result.extend(chain_children.pop(s.id))
+            for children in chain_children.values():
                 result.extend(children)
             self.filtered = result
 
@@ -4750,7 +4753,7 @@ class CCSApp(App):
         """Delete all continuation sessions."""
         if self.view != "sessions":
             return
-        cont_sessions = [s for s in self.sessions if s.is_continuation]
+        cont_sessions = [s for s in self.sessions if s.hide_when_collapsed]
         if not cont_sessions:
             self._set_status("No continuation sessions to archive")
             return
