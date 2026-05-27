@@ -67,7 +67,7 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.4.4"
+VERSION = "1.4.7"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
