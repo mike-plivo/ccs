@@ -920,6 +920,9 @@ class CodexProvider(CLIProvider):
             ).fetchall()
             for row in rows:
                 sid = row["id"]
+                rollout = row["rollout_path"] or ""
+                if rollout and not os.path.exists(rollout):
+                    continue
                 sm = meta.get(sid, {})
                 tag = sm.get("tag", "")
                 pinned = sm.get("pinned", False)
@@ -928,7 +931,6 @@ class CodexProvider(CLIProvider):
                 fm_long = (row["first_user_message"] or "")[:800]
                 cwd = row["cwd"] or ""
                 mtime = row["updated_at"] or 0
-                rollout = row["rollout_path"] or ""
                 pdisp = cwd.replace(str(Path.home()), "~") if cwd else ""
                 out.append(Session(
                     id=sid, project_raw="codex", project_display=pdisp,
@@ -1008,9 +1010,12 @@ class CodexProvider(CLIProvider):
             return False
         try:
             row = conn.execute(
-                "SELECT 1 FROM threads WHERE id = ?", (session_id,)
+                "SELECT rollout_path FROM threads WHERE id = ?", (session_id,)
             ).fetchone()
-            return row is not None
+            if not row:
+                return False
+            rollout = row["rollout_path"] or ""
+            return bool(rollout) and os.path.exists(rollout)
         except Exception:
             return False
         finally:
