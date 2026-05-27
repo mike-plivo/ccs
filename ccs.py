@@ -672,7 +672,7 @@ def profile_summary(p: dict) -> str:
     return " · ".join(parts) if parts else "default settings"
 
 
-def build_profile_edit_rows(expert_mode: bool) -> List[Tuple[str, int]]:
+def build_profile_edit_rows(expert_mode: bool, cli: str = "claude") -> List[Tuple[str, int]]:
     """Build the list of (row_type, index) tuples for profile editor."""
     rows: List[Tuple[str, int]] = []
     rows.append((ROW_PROF_NAME, 0))
@@ -682,12 +682,15 @@ def build_profile_edit_rows(expert_mode: bool) -> List[Tuple[str, int]]:
         rows.append((ROW_EXPERT, 0))
     else:
         rows.append((ROW_MODEL, 0))
-        rows.append((ROW_PERMMODE, 0))
-        for i in range(len(TOGGLE_FLAGS)):
-            rows.append((ROW_TOGGLE, i))
+        if cli in ("claude", "codex"):
+            rows.append((ROW_PERMMODE, 0))
+        if cli == "claude":
+            for i in range(len(TOGGLE_FLAGS)):
+                rows.append((ROW_TOGGLE, i))
         rows.append((ROW_SYSPROMPT, 0))
-        rows.append((ROW_TOOLS, 0))
-        rows.append((ROW_MCP, 0))
+        if cli == "claude":
+            rows.append((ROW_TOOLS, 0))
+            rows.append((ROW_MCP, 0))
         rows.append((ROW_CUSTOM, 0))
     rows.append((ROW_PROF_SAVE, 0))
     return rows
@@ -3321,7 +3324,7 @@ class ProfileEditModal(ModalScreen[dict]):
             self.custom_val = ""
             self.expert_args = ""
             self.use_tmux = True
-        self.rows = build_profile_edit_rows(self.expert_mode)
+        self.rows = build_profile_edit_rows(self.expert_mode, CLI_CHOICES[self.cli_idx][1])
         self.cur = 0
         self._editing_field = None
 
@@ -3349,7 +3352,7 @@ class ProfileEditModal(ModalScreen[dict]):
         self.query_one("#profedit-title", Static).update(title)
 
     def _refresh_display(self):
-        self.rows = build_profile_edit_rows(self.expert_mode)
+        self.rows = build_profile_edit_rows(self.expert_mode, CLI_CHOICES[self.cli_idx][1])
         if self.cur >= len(self.rows):
             self.cur = max(0, len(self.rows) - 1)
 
@@ -3378,11 +3381,14 @@ class ProfileEditModal(ModalScreen[dict]):
             elif rtype == ROW_TMUX:
                 line = f"{prefix}Launch mode:  {cb(self.use_tmux)} tmux   {cb(not self.use_tmux)} direct"
             elif rtype == ROW_EXPERT:
-                line = f"{prefix}claude {self.expert_args or '(enter args)'}"
+                cli_bin = CLI_CHOICES[self.cli_idx][1]
+                line = f"{prefix}{cli_bin} {self.expert_args or '(enter args)'}"
             elif rtype == ROW_MODEL:
                 line = f"{prefix}Model:       {MODELS[self.model_idx][0]}"
             elif rtype == ROW_PERMMODE:
-                line = f"{prefix}Permissions: {PERMISSION_MODES[self.perm_idx][0]}"
+                cli_bin = CLI_CHOICES[self.cli_idx][1]
+                perm_label = "Sandbox:     " if cli_bin == "codex" else "Permissions: "
+                line = f"{prefix}{perm_label}{PERMISSION_MODES[self.perm_idx][0]}"
             elif rtype == ROW_TOGGLE:
                 flag_name = TOGGLE_FLAGS[ridx][0]
                 line = f"{prefix}{flag_name:<38s} {cb(self.toggles[ridx])}"
@@ -3884,7 +3890,7 @@ class CCSApp(App):
                 if tw > max_tag_w:
                     max_tag_w = tw
         tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
-        hdr = f"         {tag_hdr}{'Modified':<18s}{'Msgs':<6s}{'Project':<25s}Description"
+        hdr = f"             {tag_hdr}{'Modified':<18s}{'Msgs':<6s}{'Project':<25s}Description"
         self.query_one("#session-columns", Static).update(
             Text(hdr, style=Style(dim=True))
         )
