@@ -38,7 +38,9 @@ import re
 import subprocess
 import sys
 import shlex
+import fcntl
 import shutil
+import tempfile
 import time
 import uuid as uuid_mod
 from dataclasses import dataclass, field
@@ -63,7 +65,7 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -251,8 +253,19 @@ class SessionManager:
             return default
 
     def _save(self, p, data):
-        with open(p, "w") as f:
-            json.dump(data, f, indent=2)
+        p = str(p)
+        dir_name = os.path.dirname(p) or "."
+        fd, tmp = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, p)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _load_meta(self) -> dict:
         return self._load(META_FILE, {})
@@ -263,25 +276,38 @@ class SessionManager:
     def _get_meta(self, sid: str) -> dict:
         return self._load_meta().get(sid, {})
 
+    def _with_meta_lock(self, fn):
+        lock_path = str(META_FILE) + ".lock"
+        with open(lock_path, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                return fn()
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
     def _set_meta(self, sid: str, **kwargs):
-        meta = self._load_meta()
-        entry = meta.get(sid, {})
-        for k, v in kwargs.items():
-            if v in (None, "", False):
-                entry.pop(k, None)
+        def _do():
+            meta = self._load_meta()
+            entry = meta.get(sid, {})
+            for k, v in kwargs.items():
+                if v is None or v == "":
+                    entry.pop(k, None)
+                else:
+                    entry[k] = v
+            if entry:
+                meta[sid] = entry
             else:
-                entry[k] = v
-        if entry:
-            meta[sid] = entry
-        else:
-            meta.pop(sid, None)
-        self._save_meta(meta)
+                meta.pop(sid, None)
+            self._save_meta(meta)
+        self._with_meta_lock(_do)
 
     def _delete_meta(self, sid: str):
-        meta = self._load_meta()
-        if sid in meta:
-            meta.pop(sid)
-            self._save_meta(meta)
+        def _do():
+            meta = self._load_meta()
+            if sid in meta:
+                meta.pop(sid)
+                self._save_meta(meta)
+        self._with_meta_lock(_do)
 
     def _load_project_paths(self) -> dict:
         """Load projectPath from all sessions-index.json files.
@@ -470,9 +496,12 @@ class SessionManager:
                 }
                 cache_dirty = True
 
-            # Auto-delete sessions with no user/assistant messages
+            # Auto-delete sessions with no user/assistant messages (skip recent files)
             if msg_count == 0:
                 try:
+                    age = time.time() - os.path.getmtime(jp)
+                    if age < 60:
+                        continue
                     os.remove(jp)
                 except OSError:
                     pass
@@ -707,7 +736,7 @@ def build_args_from_profile(profile: dict) -> List[str]:
     """Build CLI args list from a profile dict."""
     expert = profile.get("expert_args", "").strip()
     if expert:
-        return expert.split()
+        return shlex.split(expert)
     extra: List[str] = []
     model = profile.get("model", "")
     if model:
@@ -724,7 +753,7 @@ def build_args_from_profile(profile: dict) -> List[str]:
     if profile.get("mcp_config", "").strip():
         extra.extend(["--mcp-config", profile["mcp_config"].strip()])
     if profile.get("custom_args", "").strip():
-        extra.extend(profile["custom_args"].strip().split())
+        extra.extend(shlex.split(profile["custom_args"].strip()))
     return extra
 
 
@@ -2062,9 +2091,9 @@ class ConfirmModal(ModalScreen[bool]):
         key = event.key
         event.stop()
         event.prevent_default()
-        if key in ("y", "Y", "ctrl+c"):
+        if key in ("y", "Y"):
             self.dismiss(True)
-        elif key in ("n", "N", "escape"):
+        elif key in ("n", "N", "escape", "ctrl+c"):
             self.dismiss(False)
         elif key in ("enter", "return"):
             self.dismiss(self.sel == 0)
@@ -3583,7 +3612,7 @@ class CCSApp(App):
 
     def _remove_ephemeral_id(self, sid):
         """Clear the ephemeral flag for a session ID."""
-        self.mgr._set_meta(sid, ephemeral=False)
+        self.mgr._set_meta(sid, ephemeral=None)
 
     def _cleanup_gone_sessions(self, gone_sids):
         """Auto-delete ephemeral sessions whose tmux has exited."""
@@ -3800,11 +3829,13 @@ class CCSApp(App):
                     line = line[7:].strip()
                 if line and "=" in line and not line.startswith("#"):
                     key, _, value = line.partition("=")
+                    key = key.strip()
+                    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key):
+                        continue
                     value = value.strip()
-                    # Strip surrounding quotes the user may have included
                     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
                         value = value[1:-1]
-                    pairs.append(f"{key.strip()}={shlex.quote(value)}")
+                    pairs.append(f"{key}={shlex.quote(value)}")
             if pairs:
                 env_prefix = " ".join(pairs) + " "
         cmd_str = env_prefix + " ".join(shlex.quote(p) for p in cmd_parts)
@@ -3818,12 +3849,17 @@ class CCSApp(App):
             "-x", "200", "-y", "50", full_cmd,
         ])
         self._tmux_attach(tmux_name, s.id)
-        # Auto-kill expert sessions on detach so env vars don't persist
+        # Kill expert sessions on detach only if the process has exited
         if pairs:
-            subprocess.run(
-                ["tmux", "kill-session", "-t", tmux_name],
-                stderr=subprocess.DEVNULL,
+            rc = subprocess.run(
+                ["tmux", "list-panes", "-t", tmux_name, "-F", "#{pane_dead}"],
+                capture_output=True, text=True,
             )
+            if rc.returncode != 0 or rc.stdout.strip() == "1":
+                subprocess.run(
+                    ["tmux", "kill-session", "-t", tmux_name],
+                    stderr=subprocess.DEVNULL,
+                )
 
     def _session_file_exists(self, sid):
         """Check if a Claude session .jsonl file exists for this ID."""
@@ -4760,7 +4796,7 @@ class CCSApp(App):
         count = len(cont_sessions)
 
         def on_confirm(text):
-            if text and text.strip().upper() == "DELETE":
+            if text and text.strip() == "DELETE":
                 for s in cont_sessions:
                     self._kill_tmux_for_session(s.id)
                     self.mgr.delete(s)
@@ -5245,7 +5281,7 @@ def cmd_pin(mgr: SessionManager, query: str):
 def cmd_unpin(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
     if mgr._get_meta(s.id).get("pinned"):
-        mgr._set_meta(s.id, pinned=False)
+        mgr._set_meta(s.id, pinned=None)
         print(f"Unpinned: {s.tag or s.id[:12]}")
     else:
         print(f"Not pinned: {s.tag or s.id[:12]}")
@@ -5578,6 +5614,9 @@ def cmd_tmux_attach(mgr: SessionManager, name: str):
     if not HAS_TMUX:
         print("\033[31mtmux is not installed.\033[0m")
         sys.exit(1)
+    if not name.startswith(TMUX_PREFIX):
+        print(f"\033[31mNot a CCS session (must start with '{TMUX_PREFIX}').\033[0m")
+        sys.exit(1)
     rc = subprocess.run(["tmux", "has-session", "-t", name], capture_output=True).returncode
     if rc != 0:
         print(f"\033[31mNo tmux session named '{name}'.\033[0m")
@@ -5588,6 +5627,9 @@ def cmd_tmux_attach(mgr: SessionManager, name: str):
 def cmd_tmux_kill(mgr: SessionManager, name: str):
     if not HAS_TMUX:
         print("\033[31mtmux is not installed.\033[0m")
+        sys.exit(1)
+    if not name.startswith(TMUX_PREFIX):
+        print(f"\033[31mNot a CCS session (must start with '{TMUX_PREFIX}').\033[0m")
         sys.exit(1)
     rc = subprocess.run(["tmux", "has-session", "-t", name], capture_output=True).returncode
     if rc != 0:
