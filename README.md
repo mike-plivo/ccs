@@ -1,10 +1,10 @@
-# CCS - Claude Code Session Manager
+# CCS - Coding CLI Session Manager
 
-A terminal UI and CLI for browsing, managing, and resuming [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions.
+A terminal UI and CLI for browsing, managing, and resuming sessions across multiple coding assistants: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), and [opencode](https://github.com/nicholasgriffintn/opencode).
 
 **Original idea and first version created by: Varun Wahi**
 
-CCS reads session data from `~/.claude/projects/` and provides a full-featured TUI with session previews, tmux integration, profiles, themes, and bulk operations.
+CCS provides a unified interface for all your coding CLI sessions with session previews, tmux integration, profiles, themes, and bulk operations.
 
 ### Sessions List
 <img src="img/ccs-main.png" width="700">
@@ -22,10 +22,20 @@ CCS reads session data from `~/.claude/projects/` and provides a full-featured T
 <img src="img/ccs-theme3.png" width="340">
 </p>
 
+## Supported CLIs
+
+| CLI | Sessions | Resume | New | Badge |
+|-----|----------|--------|-----|-------|
+| Claude Code | `~/.claude/projects/*.jsonl` | Yes | Yes | `[C]` |
+| Codex | `~/.codex/state_*.sqlite` | Yes | Yes | `[X]` |
+| opencode | `~/.local/share/opencode/opencode.db` | Yes | Yes | `[O]` |
+
+CCS auto-detects installed CLIs and their sessions. Each session shows a badge indicating which CLI it belongs to.
+
 ## Requirements
 
 - Python 3.9+
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and configured
+- At least one supported CLI installed: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), or [opencode](https://github.com/nicholasgriffintn/opencode)
 - Optional: [tmux](https://github.com/tmux/tmux) (for background session management)
 - Optional: [git](https://git-scm.com/) (for repository info in session details)
 
@@ -56,18 +66,19 @@ alias ccs='python3 ~/.local/bin/ccs.py'
 
 ```bash
 ccs                  # Launch interactive TUI
-ccs list             # List all sessions
+ccs list             # List all sessions (all CLIs)
 ccs resume <id|tag>  # Resume a session
+ccs providers        # Show detected CLIs and status
 ccs help             # Show all commands
 ```
 
 ### CLI Commands
 
 ```
-ccs list                               List all sessions
-ccs scan [-n|--dry-run]                Rescan all Claude sessions
+ccs list                               List all sessions (all CLIs)
+ccs scan [-n|--dry-run]                Rescan all sessions
 ccs resume <id|tag> [-p <profile>]     Resume session
-ccs resume <id|tag> --claude <opts>    Resume with raw claude options
+ccs resume <id|tag> --claude <opts>    Resume with raw CLI options
 ccs new <name>                         New named session
 ccs new -e [name]                      Ephemeral session (auto-deleted on exit)
 ccs pin/unpin <id|tag>                 Pin/unpin a session
@@ -80,6 +91,7 @@ ccs info <id|tag>                      Show session details
 ccs search <query>                     Search sessions
 ccs export <id|tag>                    Export session as markdown
 ccs profile list|info|set|new|delete   Manage profiles
+ccs providers                          List CLI providers and status
 ccs theme list|set                     Manage themes
 ccs tmux list                          List running tmux sessions
 ccs tmux attach <name>                 Attach to tmux session
@@ -98,8 +110,8 @@ ccs tmux kill --all                    Kill all ccs tmux sessions
 | `PgUp/PgDn` | Page up / down |
 | `Right` | Open Session View |
 | `Enter` | Resume session |
-| `n` | New named session |
-| `e` | New ephemeral session |
+| `n` | New named session (prompts CLI choice) |
+| `e` | New ephemeral session (prompts CLI choice) |
 | `p` | Toggle pin |
 | `t / T` | Set / remove tag |
 | `d` | Delete session |
@@ -143,7 +155,7 @@ When Claude Code runs out of context, it creates a new **continuation session** 
 
 ## Tmux Expert Mode
 
-Tmux Expert allows launching a session with **ephemeral environment variables** (e.g. AWS credentials, API keys). The variables are set inline on the `claude` command and are never stored anywhere.
+Tmux Expert allows launching a session with **ephemeral environment variables** (e.g. AWS credentials, API keys). The variables are set inline on the CLI command and are never stored anywhere.
 
 - Available in the Launch modal and the menu (`m`) as **Tmux Expert**
 - Enter one `KEY=VALUE` per line (Ctrl+D to confirm, Esc to cancel)
@@ -154,7 +166,9 @@ Tmux Expert allows launching a session with **ephemeral environment variables** 
 
 <img src="img/ccs-claude-profile-management.png" width="600">
 
-Profiles store launch configurations (model, permission mode, flags, system prompt, tools, MCP config). Create and manage profiles from the TUI (`P`) or CLI:
+Profiles store launch configurations and are CLI-aware -- each profile targets a specific CLI (Claude, Codex, or opencode) and only shows relevant options for that CLI. When launching a session with a CLI that doesn't match the active profile, CCS prompts you to select an appropriate profile.
+
+Create and manage profiles from the TUI (`P`) or CLI:
 
 ```bash
 ccs profile list           # List all profiles
@@ -176,9 +190,9 @@ All CCS data is stored in `~/.config/ccs/`:
 | `ccs_active_profile.txt` | Currently active profile |
 | `ccs_theme.txt` | Selected theme |
 
-CCS reads session data from `~/.claude/projects/`. CCS metadata (tags, pins, profiles) is stored separately and does not affect Claude's configuration.
+CCS reads session data from each CLI's storage location (see Supported CLIs above). CCS metadata (tags, pins, profiles) is stored separately and does not affect any CLI's configuration.
 
-**Important:** Deleting a session in CCS permanently deletes the underlying Claude session data (the `.jsonl` file in `~/.claude/projects/`). This action cannot be undone. As a safeguard, all delete operations require typing `DELETE` in uppercase to confirm.
+**Important:** Deleting a session in CCS permanently deletes the underlying session data. This action cannot be undone. As a safeguard, all delete operations require typing `DELETE` in uppercase to confirm.
 
 ## License
 
