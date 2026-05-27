@@ -1052,13 +1052,14 @@ class OpencodeProvider(CLIProvider):
         except Exception:
             return None
 
-    def _discover_tables(self, conn: sqlite3.Connection) -> Tuple[str, str]:
-        """Discover session and message table names."""
+    def _discover_tables(self, conn: sqlite3.Connection) -> Tuple[str, str, str]:
+        """Discover session, message, and part table names."""
         cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = {row[0] for row in cur.fetchall()}
         session_tbl = "session" if "session" in tables else "sessions" if "sessions" in tables else ""
         msg_tbl = "message" if "message" in tables else "messages" if "messages" in tables else ""
-        return session_tbl, msg_tbl
+        part_tbl = "part" if "part" in tables else ""
+        return session_tbl, msg_tbl, part_tbl
 
     def scan_sessions(self, meta: dict, user: str) -> List[Session]:
         out: List[Session] = []
@@ -1066,18 +1067,54 @@ class OpencodeProvider(CLIProvider):
         if not conn:
             return out
         try:
-            session_tbl, _ = self._discover_tables(conn)
+            session_tbl, msg_tbl, part_tbl = self._discover_tables(conn)
             if not session_tbl:
                 return out
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({session_tbl})").fetchall()}
             title_col = "title" if "title" in cols else "NULL"
-            count_col = "message_count" if "message_count" in cols else "0"
-            created_col = "created_at" if "created_at" in cols else "NULL"
-            updated_col = "updated_at" if "updated_at" in cols else created_col
-            rows = conn.execute(
-                f"SELECT id, {title_col} as title, {count_col} as msg_count, "
-                f"{created_col} as created_at, {updated_col} as updated_at FROM {session_tbl}"
-            ).fetchall()
+            created_col = next((c for c in ("time_created", "created_at") if c in cols), "NULL")
+            updated_col = next((c for c in ("time_updated", "updated_at") if c in cols), created_col)
+            count_col = "message_count" if "message_count" in cols else None
+            if count_col:
+                rows = conn.execute(
+                    f"SELECT id, {title_col} as title, {count_col} as msg_count, "
+                    f"{created_col} as created_at, {updated_col} as updated_at FROM {session_tbl}"
+                ).fetchall()
+            elif msg_tbl:
+                rows = conn.execute(
+                    f"SELECT s.id, s.{title_col} as title, "
+                    f"COUNT(m.id) as msg_count, "
+                    f"s.{created_col} as created_at, s.{updated_col} as updated_at "
+                    f"FROM {session_tbl} s LEFT JOIN {msg_tbl} m ON m.session_id = s.id "
+                    f"GROUP BY s.id"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT id, {title_col} as title, 1 as msg_count, "
+                    f"{created_col} as created_at, {updated_col} as updated_at FROM {session_tbl}"
+                ).fetchall()
+            # Build first-user-message lookup from part table
+            first_user_msgs: dict = {}
+            if part_tbl and msg_tbl:
+                try:
+                    fm_rows = conn.execute(
+                        f"SELECT p.session_id, p.data FROM {part_tbl} p "
+                        f"INNER JOIN {msg_tbl} m ON m.id = p.message_id "
+                        f"WHERE json_extract(m.data, '$.role') = 'user' "
+                        f"ORDER BY p.rowid"
+                    ).fetchall()
+                    for fr in fm_rows:
+                        sid_key = fr["session_id"]
+                        if sid_key in first_user_msgs:
+                            continue
+                        try:
+                            pd = json.loads(fr["data"]) if fr["data"] else {}
+                        except Exception:
+                            continue
+                        if pd.get("type") == "text" and pd.get("text"):
+                            first_user_msgs[sid_key] = pd["text"]
+                except Exception:
+                    pass
             for row in rows:
                 sid = str(row["id"])
                 title = row["title"] or ""
@@ -1085,7 +1122,9 @@ class OpencodeProvider(CLIProvider):
                 if msg_count == 0:
                     continue
                 sm = meta.get(sid, {})
-                # Parse timestamp — try epoch float, then ISO string
+                fm_text = first_user_msgs.get(sid, title)
+                fm = fm_text[:120].replace("\n", " ")
+                fm_long = fm_text[:800]
                 mtime = 0.0
                 raw_ts = row["updated_at"] or row["created_at"]
                 if raw_ts:
@@ -1101,8 +1140,8 @@ class OpencodeProvider(CLIProvider):
                             pass
                 out.append(Session(
                     id=sid, project_raw="opencode", project_display="opencode",
-                    summary=title, first_msg=title,
-                    first_msg_long=title, last_msg="",
+                    summary=title, first_msg=fm,
+                    first_msg_long=fm_long, last_msg="",
                     tag=sm.get("tag", ""), pinned=sm.get("pinned", False),
                     mtime=mtime, cli="opencode", path=str(OPENCODE_DB),
                     msg_count=int(msg_count),
@@ -1119,31 +1158,74 @@ class OpencodeProvider(CLIProvider):
         if not conn:
             return msgs
         try:
-            _, msg_tbl = self._discover_tables(conn)
+            _, msg_tbl, part_tbl = self._discover_tables(conn)
             if not msg_tbl:
                 return msgs
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({msg_tbl})").fetchall()}
-            role_col = "role" if "role" in cols else "NULL"
-            content_col = "content" if "content" in cols else "text" if "text" in cols else "NULL"
-            ts_col = "created_at" if "created_at" in cols else "NULL"
             sid_col = "session_id" if "session_id" in cols else "sessionId" if "sessionId" in cols else None
             if not sid_col:
                 return msgs
-            rows = conn.execute(
-                f"SELECT {role_col} as role, {content_col} as content, {ts_col} as ts "
-                f"FROM {msg_tbl} WHERE {sid_col} = ? ORDER BY rowid",
-                (session.id,),
-            ).fetchall()
-            for row in rows:
-                role = row["role"] or "assistant"
-                content = row["content"] or ""
-                if isinstance(content, str) and content.startswith("{"):
+            has_data = "data" in cols
+            if has_data:
+                # Build part text lookup: message_id -> concatenated text parts
+                part_texts: dict = {}
+                if part_tbl:
+                    part_rows = conn.execute(
+                        f"SELECT message_id, data FROM {part_tbl} "
+                        f"WHERE session_id = ? ORDER BY rowid",
+                        (session.id,),
+                    ).fetchall()
+                    for pr in part_rows:
+                        try:
+                            pd = json.loads(pr["data"]) if pr["data"] else {}
+                        except Exception:
+                            continue
+                        if pd.get("type") == "text" and pd.get("text"):
+                            mid = pr["message_id"]
+                            part_texts[mid] = (part_texts.get(mid, "") + " " + pd["text"]).strip()
+                rows = conn.execute(
+                    f"SELECT id, data, time_created FROM {msg_tbl} "
+                    f"WHERE {sid_col} = ? ORDER BY rowid",
+                    (session.id,),
+                ).fetchall()
+                for row in rows:
                     try:
-                        parsed = json.loads(content)
-                        content = parsed.get("text", parsed.get("content", content))
+                        d = json.loads(row["data"]) if row["data"] else {}
                     except Exception:
-                        pass
-                msgs.append({"role": role, "content": str(content), "timestamp": str(row["ts"] or "")})
+                        continue
+                    role = d.get("role", "assistant")
+                    if role not in ("user", "assistant"):
+                        continue
+                    mid = row["id"]
+                    content = part_texts.get(mid, "")
+                    if not content:
+                        content = d.get("content", d.get("text", ""))
+                        if isinstance(content, list):
+                            content = " ".join(
+                                c.get("text", "") for c in content
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            )
+                    ts = d.get("time", {}).get("created", row["time_created"] or "")
+                    msgs.append({"role": role, "content": str(content), "timestamp": str(ts)})
+            else:
+                role_col = "role" if "role" in cols else "NULL"
+                content_col = "content" if "content" in cols else "text" if "text" in cols else "NULL"
+                ts_col = next((c for c in ("time_created", "created_at") if c in cols), "NULL")
+                rows = conn.execute(
+                    f"SELECT {role_col} as role, {content_col} as content, {ts_col} as ts "
+                    f"FROM {msg_tbl} WHERE {sid_col} = ? ORDER BY rowid",
+                    (session.id,),
+                ).fetchall()
+                for row in rows:
+                    role = row["role"] or "assistant"
+                    content = row["content"] or ""
+                    if isinstance(content, str) and content.startswith("{"):
+                        try:
+                            parsed = json.loads(content)
+                            content = parsed.get("text", parsed.get("content", content))
+                        except Exception:
+                            pass
+                    msgs.append({"role": role, "content": str(content), "timestamp": str(row["ts"] or "")})
         except Exception:
             pass
         finally:
@@ -1178,7 +1260,9 @@ class OpencodeProvider(CLIProvider):
         if not conn:
             return
         try:
-            session_tbl, msg_tbl = self._discover_tables(conn)
+            session_tbl, msg_tbl, part_tbl = self._discover_tables(conn)
+            if part_tbl:
+                conn.execute(f"DELETE FROM {part_tbl} WHERE session_id = ?", (session.id,))
             if msg_tbl:
                 sid_col = "session_id"
                 cols = {row[1] for row in conn.execute(f"PRAGMA table_info({msg_tbl})").fetchall()}
@@ -1198,7 +1282,7 @@ class OpencodeProvider(CLIProvider):
         if not conn:
             return False
         try:
-            session_tbl, _ = self._discover_tables(conn)
+            session_tbl, _, _ = self._discover_tables(conn)
             if not session_tbl:
                 return False
             row = conn.execute(f"SELECT 1 FROM {session_tbl} WHERE id = ?", (session_id,)).fetchone()
