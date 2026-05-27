@@ -74,7 +74,6 @@ VERSION = "1.4.0"
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "").split(",")[0] or str(Path.home() / ".codex"))
-CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
 OPENCODE_DATA_DIR = Path(
     os.environ.get("OPENCODE_CONFIG_DIR", "")
     or str(Path.home() / ".local" / "share" / "opencode")
@@ -329,7 +328,7 @@ class SessionManager:
     def init_providers(self):
         self.providers = _init_providers()
 
-    def get_provider(self, cli_name: str) -> Optional[CLIProvider]:
+    def get_provider(self, cli_name: str) -> Optional["CLIProvider"]:
         return self.providers.get(cli_name)
 
     @staticmethod
@@ -888,81 +887,68 @@ class CodexProvider(CLIProvider):
     display_name = "Codex"
     binary = "codex"
 
-    def is_available(self) -> bool:
-        return CODEX_SESSIONS_DIR.exists() or shutil.which("codex") is not None
+    def _find_state_db(self) -> Optional[Path]:
+        """Find the Codex state SQLite database (state_*.sqlite)."""
+        for p in sorted(CODEX_HOME.glob("state_*.sqlite"), reverse=True):
+            return p
+        return None
 
-    def _session_files(self) -> List[Tuple[str, str]]:
-        """Return (session_id, file_path) for all Codex session files."""
-        results = []
-        pattern = str(CODEX_SESSIONS_DIR / "*" / "*" / "*" / "rollout-*.jsonl")
-        for jp in glob.glob(pattern):
-            fname = os.path.basename(jp)
-            parts = fname.replace(".jsonl", "").split("-", 1)
-            if len(parts) == 2:
-                # rollout-<timestamp>-<UUID> — extract UUID (last 36 chars)
-                rest = parts[1]
-                if len(rest) >= 36:
-                    sid = rest[-36:]
-                else:
-                    sid = rest
-            else:
-                sid = fname.replace(".jsonl", "")
-            results.append((sid, jp))
-        return results
+    def is_available(self) -> bool:
+        return self._find_state_db() is not None or shutil.which("codex") is not None
+
+    def _get_db(self) -> Optional[sqlite3.Connection]:
+        db_path = self._find_state_db()
+        if not db_path:
+            return None
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except Exception:
+            return None
 
     def scan_sessions(self, meta: dict, user: str) -> List[Session]:
         out: List[Session] = []
-        for sid, jp in self._session_files():
-            sm = meta.get(sid, {})
-            tag = sm.get("tag", "")
-            pinned = sm.get("pinned", False)
-            file_mtime = os.path.getmtime(jp)
-            summary, fm, fm_long, lm = "", "", "", ""
-            msg_count = 0
-            try:
-                with open(jp, "r", errors="replace") as f:
-                    for ln in f:
-                        try:
-                            d = json.loads(ln)
-                        except Exception:
-                            continue
-                        payload = d.get("payload", d)
-                        role = payload.get("role", d.get("type", ""))
-                        if role in ("user", "assistant"):
-                            msg_count += 1
-                            content = payload.get("content", "")
-                            if isinstance(content, list):
-                                content = " ".join(
-                                    c.get("text", "") for c in content
-                                    if isinstance(c, dict) and c.get("type") == "text"
-                                )
-                            if role == "user" and content:
-                                clean = content[:120].replace("\n", " ").replace("\t", " ")
-                                if not fm:
-                                    fm = clean
-                                    fm_long = content[:800]
-                                lm = clean
-                        elif d.get("type") == "summary":
-                            summary = d.get("summary", "")
-            except Exception:
-                pass
-            if msg_count == 0:
-                continue
-            # Codex sessions don't have per-project directories like Claude
-            date_parts = jp.replace(str(CODEX_SESSIONS_DIR) + "/", "").split("/")[:3]
-            pdisp = "/".join(date_parts) if len(date_parts) == 3 else ""
-            out.append(Session(
-                id=sid, project_raw="codex", project_display=pdisp,
-                summary=summary, first_msg=fm,
-                first_msg_long=fm_long, last_msg=lm,
-                tag=tag, pinned=pinned,
-                mtime=file_mtime, cli="codex", path=jp,
-                msg_count=msg_count,
-            ))
+        conn = self._get_db()
+        if not conn:
+            return out
+        try:
+            rows = conn.execute(
+                "SELECT id, title, first_user_message, cwd, updated_at, "
+                "rollout_path, tokens_used FROM threads "
+                "WHERE archived = 0 ORDER BY updated_at DESC"
+            ).fetchall()
+            for row in rows:
+                sid = row["id"]
+                sm = meta.get(sid, {})
+                tag = sm.get("tag", "")
+                pinned = sm.get("pinned", False)
+                title = row["title"] or ""
+                fm = (row["first_user_message"] or "")[:120].replace("\n", " ")
+                fm_long = (row["first_user_message"] or "")[:800]
+                cwd = row["cwd"] or ""
+                mtime = row["updated_at"] or 0
+                rollout = row["rollout_path"] or ""
+                pdisp = cwd.replace(str(Path.home()), "~") if cwd else ""
+                out.append(Session(
+                    id=sid, project_raw="codex", project_display=pdisp,
+                    summary=title, first_msg=fm,
+                    first_msg_long=fm_long, last_msg=fm,
+                    tag=tag, pinned=pinned,
+                    mtime=mtime, cli="codex", path=rollout,
+                    msg_count=max(1, (row["tokens_used"] or 0) // 500),
+                ))
+        except Exception:
+            pass
+        finally:
+            conn.close()
         return out
 
     def read_messages(self, session: Session) -> List[dict]:
+        """Read messages from the rollout JSONL file if it exists."""
         msgs = []
+        if not session.path or not os.path.exists(session.path):
+            return msgs
         try:
             with open(session.path, "r", errors="replace") as f:
                 for ln in f:
@@ -1005,8 +991,6 @@ class CodexProvider(CLIProvider):
                            "dontAsk": "danger-full-access", "bypassPermissions": "danger-full-access"}
             mapped = sandbox_map.get(perm, perm)
             extra.extend(["--sandbox", mapped])
-        for flag in profile.get("flags", []):
-            extra.append(flag)
         sp = profile.get("system_prompt", "").strip()
         if sp:
             extra.extend(["-c", f"developer_instructions={sp}"])
@@ -1019,11 +1003,18 @@ class CodexProvider(CLIProvider):
             os.remove(session.path)
 
     def session_file_exists(self, session_id: str) -> bool:
-        for _, jp in self._session_files():
-            fname = os.path.basename(jp)
-            if session_id in fname:
-                return True
-        return False
+        conn = self._get_db()
+        if not conn:
+            return False
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM threads WHERE id = ?", (session_id,)
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+        finally:
+            conn.close()
 
 
 class OpencodeProvider(CLIProvider):
@@ -4421,7 +4412,10 @@ class CCSApp(App):
         p = self._active_profile()
         if not p:
             return []
-        cli = cli or p.get("cli", "claude")
+        profile_cli = p.get("cli", "claude")
+        cli = cli or profile_cli
+        if cli != profile_cli:
+            return []
         provider = self.mgr.get_provider(cli)
         if provider:
             return provider.build_args_from_profile(p)
@@ -5547,13 +5541,17 @@ def _find_session(mgr: SessionManager, query: str) -> Session:
     sys.exit(1)
 
 
-def _get_profile_extra(mgr: SessionManager, profile_name: Optional[str] = None) -> List[str]:
-    """Get CLI args from a profile (active by default)."""
+def _get_profile_extra(mgr: SessionManager, profile_name: Optional[str] = None,
+                       target_cli: Optional[str] = None) -> List[str]:
+    """Get CLI args from a profile (active by default).
+    If target_cli is given and differs from the profile's CLI, returns []."""
     profiles = mgr.load_profiles()
     name = profile_name or mgr.load_active_profile_name()
     prof = next((p for p in profiles if p.get("name") == name), None)
     if prof:
         cli = prof.get("cli", "claude")
+        if target_cli and target_cli != cli:
+            return []
         provider = mgr.get_provider(cli)
         if provider:
             return provider.build_args_from_profile(prof)
@@ -5724,7 +5722,7 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
     if claude_args is not None:
         extra = claude_args
     else:
-        extra = _get_profile_extra(mgr, profile_name)
+        extra = _get_profile_extra(mgr, profile_name, target_cli=s.cli)
     provider = mgr.get_provider(s.cli) or mgr.get_provider("claude")
     cmd = provider.build_resume_cmd(s.id, extra)
     opts = f" {' '.join(extra)}" if extra else ""
