@@ -1072,17 +1072,19 @@ class OpencodeProvider(CLIProvider):
                 return out
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({session_tbl})").fetchall()}
             title_col = "title" if "title" in cols else "NULL"
+            dir_col = "directory" if "directory" in cols else "NULL"
             created_col = next((c for c in ("time_created", "created_at") if c in cols), "NULL")
             updated_col = next((c for c in ("time_updated", "updated_at") if c in cols), created_col)
             count_col = "message_count" if "message_count" in cols else None
             if count_col:
                 rows = conn.execute(
-                    f"SELECT id, {title_col} as title, {count_col} as msg_count, "
+                    f"SELECT id, {title_col} as title, {dir_col} as directory, "
+                    f"{count_col} as msg_count, "
                     f"{created_col} as created_at, {updated_col} as updated_at FROM {session_tbl}"
                 ).fetchall()
             elif msg_tbl:
                 rows = conn.execute(
-                    f"SELECT s.id, s.{title_col} as title, "
+                    f"SELECT s.id, s.{title_col} as title, s.{dir_col} as directory, "
                     f"COUNT(m.id) as msg_count, "
                     f"s.{created_col} as created_at, s.{updated_col} as updated_at "
                     f"FROM {session_tbl} s LEFT JOIN {msg_tbl} m ON m.session_id = s.id "
@@ -1090,11 +1092,13 @@ class OpencodeProvider(CLIProvider):
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    f"SELECT id, {title_col} as title, 1 as msg_count, "
+                    f"SELECT id, {title_col} as title, {dir_col} as directory, "
+                    f"1 as msg_count, "
                     f"{created_col} as created_at, {updated_col} as updated_at FROM {session_tbl}"
                 ).fetchall()
-            # Build first-user-message lookup from part table
+            # Build first/last user-message lookup from part table
             first_user_msgs: dict = {}
+            last_user_msgs: dict = {}
             if part_tbl and msg_tbl:
                 try:
                     fm_rows = conn.execute(
@@ -1105,14 +1109,14 @@ class OpencodeProvider(CLIProvider):
                     ).fetchall()
                     for fr in fm_rows:
                         sid_key = fr["session_id"]
-                        if sid_key in first_user_msgs:
-                            continue
                         try:
                             pd = json.loads(fr["data"]) if fr["data"] else {}
                         except Exception:
                             continue
                         if pd.get("type") == "text" and pd.get("text"):
-                            first_user_msgs[sid_key] = pd["text"]
+                            if sid_key not in first_user_msgs:
+                                first_user_msgs[sid_key] = pd["text"]
+                            last_user_msgs[sid_key] = pd["text"]
                 except Exception:
                     pass
             for row in rows:
@@ -1125,6 +1129,10 @@ class OpencodeProvider(CLIProvider):
                 fm_text = first_user_msgs.get(sid, title)
                 fm = fm_text[:120].replace("\n", " ")
                 fm_long = fm_text[:800]
+                lm_text = last_user_msgs.get(sid, "")
+                lm = lm_text[:120].replace("\n", " ")
+                cwd = row["directory"] or ""
+                pdisp = cwd.replace(str(Path.home()), "~") if cwd else ""
                 mtime = 0.0
                 raw_ts = row["updated_at"] or row["created_at"]
                 if raw_ts:
@@ -1139,9 +1147,9 @@ class OpencodeProvider(CLIProvider):
                         except Exception:
                             pass
                 out.append(Session(
-                    id=sid, project_raw="opencode", project_display="opencode",
+                    id=sid, project_raw="opencode", project_display=pdisp,
                     summary=title, first_msg=fm,
-                    first_msg_long=fm_long, last_msg="",
+                    first_msg_long=fm_long, last_msg=lm,
                     tag=sm.get("tag", ""), pinned=sm.get("pinned", False),
                     mtime=mtime, cli="opencode", path=str(OPENCODE_DB),
                     msg_count=int(msg_count),
