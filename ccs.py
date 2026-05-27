@@ -3692,11 +3692,12 @@ class ContextMenuModal(ModalScreen[str]):
     }
     """
 
-    def __init__(self, title, items):
+    def __init__(self, title, items, centered=False):
         """items: list of (label, action_key) tuples. action_key "---" = separator."""
         super().__init__()
         self.title_text = title
         self.items = items
+        self._centered = centered
         # Find first selectable index
         self.cur = 0
         for i, (_, key) in enumerate(items):
@@ -3714,6 +3715,8 @@ class ContextMenuModal(ModalScreen[str]):
                 yield Static(label, id=f"ctx-item-{i}", classes="ctx-item")
 
     def on_mount(self):
+        if self._centered:
+            self.styles.align = ("center", "middle")
         tc = lambda role, fb="": _tc(self.app, role, fb)
         accent = tc("accent-color", "#00cccc")
         box = self.query_one("#ctx-menu-box")
@@ -5470,7 +5473,7 @@ class CCSApp(App):
 
         cli_name = CLI_NAMES.get(cli, cli)
         self.push_screen(
-            ContextMenuModal(f"Profile for {cli_name}", items), on_pick)
+            ContextMenuModal(f"Profile for {cli_name}", items, centered=True), on_pick)
 
     def _cli_choice_items(self) -> list:
         """Build CLI choice items from available providers."""
@@ -5529,7 +5532,7 @@ class CCSApp(App):
             def on_cli(cli):
                 if cli:
                     _start_new(cli)
-            self.push_screen(ContextMenuModal("New Session — Choose CLI", items), on_cli)
+            self.push_screen(ContextMenuModal("New Session — Choose CLI", items, centered=True), on_cli)
 
     def action_ephemeral_session(self):
         if self.view != "sessions":
@@ -5570,7 +5573,7 @@ class CCSApp(App):
             def on_cli(cli):
                 if cli:
                     _start_ephemeral(cli)
-            self.push_screen(ContextMenuModal("Ephemeral Session — Choose CLI", items), on_cli)
+            self.push_screen(ContextMenuModal("Ephemeral Session — Choose CLI", items, centered=True), on_cli)
 
     def action_search(self):
         if self.view != "sessions":
