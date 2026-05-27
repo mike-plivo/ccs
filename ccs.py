@@ -29,12 +29,14 @@ Usage:
     ccs help                               Show help
 """
 
+import abc
 import json
 import os
 import glob
 import datetime
 import getpass
 import re
+import sqlite3
 import subprocess
 import sys
 import shlex
@@ -45,7 +47,7 @@ import time
 import uuid as uuid_mod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     from textual.app import App, ComposeResult
@@ -65,12 +67,19 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", "").split(",")[0] or str(Path.home() / ".codex"))
+CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
+OPENCODE_DATA_DIR = Path(
+    os.environ.get("OPENCODE_CONFIG_DIR", "")
+    or str(Path.home() / ".local" / "share" / "opencode")
+)
+OPENCODE_DB = OPENCODE_DATA_DIR / "opencode.db"
 CCS_DIR = Path.home() / ".config" / "ccs"
 META_FILE = CCS_DIR / "sessions.json"
 PROFILES_FILE = CCS_DIR / "ccs_profiles.json"
@@ -128,9 +137,15 @@ ROW_CUSTOM = "custom"
 ROW_PROF_NAME = "prof_name"
 ROW_EXPERT = "expert"
 ROW_TMUX = "tmux"
+ROW_CLI = "cli"
 ROW_PROF_SAVE = "prof_save"
 
 # ── Data ──────────────────────────────────────────────────────────────
+
+
+CLI_BADGES = {"claude": "[C]", "codex": "[X]", "opencode": "[O]"}
+CLI_NAMES = {"claude": "Claude", "codex": "Codex", "opencode": "opencode"}
+CLI_CHOICES = [("Claude", "claude"), ("Codex", "codex"), ("opencode", "opencode")]
 
 
 @dataclass
@@ -145,6 +160,7 @@ class Session:
     tag: str
     pinned: bool
     mtime: float
+    cli: str = "claude"
     summaries: List[str] = field(default_factory=list)
     path: str = ""
     msg_count: int = 0
@@ -152,7 +168,7 @@ class Session:
     parent_id: str = ""
     continuation_count: int = 0
     hide_when_collapsed: bool = False
-    chain_root: str = ""  # root ancestor ID for grouping
+    chain_root: str = ""
 
     @property
     def ts(self) -> str:
@@ -197,6 +213,7 @@ class SessionManager:
     def __init__(self):
         self.user = getpass.getuser()
         self._scan_cache = None
+        self.providers: Dict[str, CLIProvider] = {}
         self._ensure()
 
     def _ensure(self):
@@ -309,42 +326,11 @@ class SessionManager:
                 self._save_meta(meta)
         self._with_meta_lock(_do)
 
-    def _load_project_paths(self) -> dict:
-        """Load projectPath from all sessions-index.json files.
+    def init_providers(self):
+        self.providers = _init_providers()
 
-        Returns dict mapping session ID to projectPath.
-        Uses per-entry projectPath first, falls back to originalPath
-        for sessions not listed in entries.
-        """
-        home = str(Path.home())
-        result = {}
-        for idx_path in glob.glob(str(PROJECTS_DIR / "*" / "sessions-index.json")):
-            try:
-                with open(idx_path) as f:
-                    data = json.load(f)
-                orig = data.get("originalPath", "")
-                for entry in data.get("entries", []):
-                    sid = entry.get("sessionId", "")
-                    pp = entry.get("projectPath", "") or orig
-                    if sid and pp:
-                        if pp.startswith(home):
-                            pp = "~" + pp[len(home):]
-                        result[sid] = pp
-                # For .jsonl files in this project dir not listed in entries
-                if orig:
-                    proj_dir = os.path.dirname(idx_path)
-                    entry_sids = {e.get("sessionId") for e in data.get("entries", [])}
-                    for fname in os.listdir(proj_dir):
-                        if fname.endswith(".jsonl"):
-                            sid = fname[:-6]
-                            if sid not in entry_sids and sid not in result:
-                                pp = orig
-                                if pp.startswith(home):
-                                    pp = "~" + pp[len(home):]
-                                result[sid] = pp
-            except Exception:
-                pass
-        return result
+    def get_provider(self, cli_name: str) -> Optional[CLIProvider]:
+        return self.providers.get(cli_name)
 
     @staticmethod
     def _decode_proj_fallback(raw: str, user: str) -> str:
@@ -401,150 +387,25 @@ class SessionManager:
         return ""
 
     def scan(self, sort_mode: str = "date", force: bool = False) -> List[Session]:
+        if not self.providers:
+            self.init_providers()
         meta = self._load_meta()
-        if force:
-            cache = {}
-        elif self._scan_cache is not None:
-            cache = self._scan_cache
-        else:
-            cache = self._load(CACHE_FILE, {})
         out: List[Session] = []
         seen_sids: set = set()
-        cache_dirty = False
-        empty_sids: List[str] = []
-        proj_paths = self._load_project_paths()
-        pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
-
-        for jp in glob.glob(pattern):
-            sid = os.path.basename(jp).replace(".jsonl", "")
-            seen_sids.add(sid)
-            praw = os.path.basename(os.path.dirname(jp))
-            pdisp = proj_paths.get(sid) or self._decode_proj_fallback(praw, self.user)
-            sm = meta.get(sid, {})
-            tag = sm.get("tag", "")
-            pinned = sm.get("pinned", False)
-            file_mtime = os.path.getmtime(jp)
-
-            # Check cache
-            cached = cache.get(sid)
-            if cached and cached.get("mtime") == file_mtime:
-                summary = cached.get("summary", "")
-                fm = cached.get("first_msg", "")
-                fm_long = cached.get("first_msg_long", "")
-                lm = cached.get("last_msg", "")
-                sums = cached.get("summaries", [])
-                msg_count = cached.get("msg_count", 0)
-                praw = cached.get("project_raw", praw)
-                pdisp = cached.get("project_display", pdisp)
-                is_cont = cached.get("is_continuation", False)
-                cont_parent = cached.get("parent_id", "")
-            else:
-                summary, fm, fm_long, lm = "", "", "", ""
-                sums: List[str] = []
-                msg_count = 0
-                first_entry_sid = ""
-                has_cont_text = False
-                try:
-                    with open(jp, "r", errors="replace") as f:
-                        for ln in f:
-                            try:
-                                d = json.loads(ln)
-                            except Exception:
-                                continue
-                            msg_type = d.get("type")
-                            # Capture sessionId from first entry for parent linking
-                            if not first_entry_sid and d.get("sessionId"):
-                                first_entry_sid = d["sessionId"]
-                            if msg_type == "summary":
-                                s = d.get("summary", "")
-                                if s:
-                                    sums.append(s)
-                                    summary = s
-                            elif msg_type in ("user", "assistant"):
-                                msg_count += 1
-                                if msg_type == "user":
-                                    txt = self._extract_text(d.get("message", {}))
-                                    if txt:
-                                        clean = txt[:120].replace("\n", " ").replace("\t", " ")
-                                        if not fm:
-                                            fm = clean
-                                            fm_long = txt[:800]
-                                        lm = clean
-                                        if not has_cont_text and txt.startswith("This session is being continued"):
-                                            has_cont_text = True
-                except Exception:
-                    pass
-                # Detect continuation: sessionId mismatch AND continuation text present
-                is_cont = bool(
-                    has_cont_text
-                    and first_entry_sid
-                    and first_entry_sid != sid
-                )
-                cont_parent = first_entry_sid if is_cont else ""
-                cache[sid] = {
-                    "mtime": file_mtime,
-                    "summary": summary,
-                    "first_msg": fm,
-                    "first_msg_long": fm_long,
-                    "last_msg": lm,
-                    "msg_count": msg_count,
-                    "summaries": sums,
-                    "project_raw": praw,
-                    "project_display": pdisp,
-                    "is_continuation": is_cont,
-                    "parent_id": cont_parent,
-                }
-                cache_dirty = True
-
-            # Auto-delete sessions with no user/assistant messages (skip recent files)
-            if msg_count == 0:
-                try:
-                    age = time.time() - os.path.getmtime(jp)
-                    if age < 60:
-                        continue
-                    os.remove(jp)
-                except OSError:
-                    pass
-                empty_sids.append(sid)
-                seen_sids.discard(sid)
-                cache.pop(sid, None)
-                cache_dirty = True
-                continue
-
-            out.append(Session(
-                id=sid, project_raw=praw, project_display=pdisp,
-                summary=summary, first_msg=fm,
-                first_msg_long=fm_long, last_msg=lm,
-                tag=tag, pinned=pinned,
-                mtime=file_mtime, summaries=sums, path=jp,
-                msg_count=msg_count,
-                is_continuation=is_cont, parent_id=cont_parent,
-            ))
-
-        # Batch-delete metadata for empty sessions
-        if empty_sids:
-            for sid in empty_sids:
-                meta.pop(sid, None)
-
-        # Prune metadata entries for sessions no longer on disk
-        orphaned = [sid for sid in meta if sid not in seen_sids]
-        for sid in orphaned:
-            meta.pop(sid)
-        if empty_sids or orphaned:
-            self._save_meta(meta)
-
-        # Prune cache entries for sessions no longer on disk
-        prev_len = len(cache)
-        cache = {k: v for k, v in cache.items() if k in seen_sids}
-        if len(cache) != prev_len:
-            cache_dirty = True
-        self._scan_cache = cache
-        if cache_dirty:
+        for provider in self.providers.values():
             try:
-                self._save(CACHE_FILE, cache)
+                sessions = provider.scan_sessions(meta, self.user)
+                for s in sessions:
+                    seen_sids.add(s.id)
+                    out.append(s)
             except Exception:
                 pass
-
+        # Prune metadata entries for sessions no longer on disk
+        orphaned = [sid for sid in meta if sid not in seen_sids]
+        if orphaned:
+            for sid in orphaned:
+                meta.pop(sid)
+            self._save_meta(meta)
         out.sort(key=lambda s: s.get_sort_key(sort_mode))
         return out
 
@@ -604,9 +465,18 @@ class SessionManager:
         self.set_tag(sid, "")
 
     def delete(self, s: Session):
-        if os.path.exists(s.path):
+        provider = self.get_provider(s.cli)
+        if provider:
+            provider.delete_session_files(s)
+        elif s.path and os.path.exists(s.path):
             os.remove(s.path)
         self._delete_meta(s.id)
+
+    def read_messages(self, s: Session) -> List[dict]:
+        provider = self.get_provider(s.cli)
+        if provider:
+            return provider.read_messages(s)
+        return []
 
     # ── Profile management ──────────────────────────────────────────
 
@@ -690,16 +560,31 @@ class SessionManager:
             return set()
 
     def purge_ephemeral(self):
+        if not self.providers:
+            self.init_providers()
         meta = self._load_meta()
         ephemeral_sids = [sid for sid, m in meta.items() if m.get("ephemeral")]
         if not ephemeral_sids:
             return
         for uid in ephemeral_sids:
-            for f in glob.glob(str(PROJECTS_DIR / "*" / f"{uid}.jsonl")):
+            cli = meta[uid].get("cli", "claude")
+            provider = self.get_provider(cli)
+            if provider:
+                dummy = Session(
+                    id=uid, project_raw="", project_display="",
+                    summary="", first_msg="", first_msg_long="", last_msg="",
+                    tag="", pinned=False, mtime=0, cli=cli,
+                )
                 try:
-                    os.remove(f)
+                    provider.delete_session_files(dummy)
                 except Exception:
                     pass
+            else:
+                for f in glob.glob(str(PROJECTS_DIR / "*" / f"{uid}.jsonl")):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
             meta.pop(uid, None)
         self._save_meta(meta)
 
@@ -759,12 +644,14 @@ def build_args_from_profile(profile: dict) -> List[str]:
 
 def profile_summary(p: dict) -> str:
     """One-line summary of a profile's settings."""
+    cli = p.get("cli", "claude")
+    cli_badge = CLI_BADGES.get(cli, "[?]")
     tmux_label = "[tmux]" if p.get("tmux", True) else "[direct]"
     expert = p.get("expert_args", "").strip()
     if expert:
         label = expert[:50] + ("..." if len(expert) > 50 else "")
-        return f"{tmux_label} [expert] {label}"
-    parts: List[str] = [tmux_label]
+        return f"{cli_badge} {tmux_label} [expert] {label}"
+    parts: List[str] = [cli_badge, tmux_label]
     model = p.get("model", "")
     for name, mid in MODELS:
         if mid == model and name != "default":
@@ -789,6 +676,7 @@ def build_profile_edit_rows(expert_mode: bool) -> List[Tuple[str, int]]:
     """Build the list of (row_type, index) tuples for profile editor."""
     rows: List[Tuple[str, int]] = []
     rows.append((ROW_PROF_NAME, 0))
+    rows.append((ROW_CLI, 0))
     rows.append((ROW_TMUX, 0))
     if expert_mode:
         rows.append((ROW_EXPERT, 0))
@@ -803,6 +691,525 @@ def build_profile_edit_rows(expert_mode: bool) -> List[Tuple[str, int]]:
         rows.append((ROW_CUSTOM, 0))
     rows.append((ROW_PROF_SAVE, 0))
     return rows
+
+
+# ── CLI Providers ────────────────────────────────────────────────────
+
+
+class CLIProvider(abc.ABC):
+    name: str
+    display_name: str
+    binary: str
+
+    @abc.abstractmethod
+    def is_available(self) -> bool:
+        """True if sessions from this CLI can be found or the binary is installed."""
+
+    @abc.abstractmethod
+    def scan_sessions(self, meta: dict, user: str) -> List[Session]:
+        """Scan and return all sessions for this provider."""
+
+    @abc.abstractmethod
+    def read_messages(self, session: Session) -> List[dict]:
+        """Return list of {role, content, timestamp} dicts."""
+
+    @abc.abstractmethod
+    def build_resume_cmd(self, session_id: str, extra_args: list) -> list:
+        """Build command list to resume a session."""
+
+    @abc.abstractmethod
+    def build_new_cmd(self, session_id: str, extra_args: list) -> list:
+        """Build command list for a new session."""
+
+    @abc.abstractmethod
+    def build_args_from_profile(self, profile: dict) -> list:
+        """Build CLI args from a profile dict."""
+
+    @abc.abstractmethod
+    def delete_session_files(self, session: Session) -> None:
+        """Delete the session's data files."""
+
+    @abc.abstractmethod
+    def session_file_exists(self, session_id: str) -> bool:
+        """Check if session data exists on disk."""
+
+
+class ClaudeProvider(CLIProvider):
+    name = "claude"
+    display_name = "Claude"
+    binary = "claude"
+
+    def __init__(self):
+        self._project_paths: Optional[dict] = None
+
+    def is_available(self) -> bool:
+        return PROJECTS_DIR.exists() or shutil.which("claude") is not None
+
+    def _load_project_paths(self) -> dict:
+        if self._project_paths is not None:
+            return self._project_paths
+        home = str(Path.home())
+        result = {}
+        for idx_path in glob.glob(str(PROJECTS_DIR / "*" / "sessions-index.json")):
+            try:
+                with open(idx_path) as f:
+                    data = json.load(f)
+                orig = data.get("originalPath", "")
+                for entry in data.get("entries", []):
+                    sid = entry.get("sessionId", "")
+                    pp = entry.get("projectPath", "") or orig
+                    if sid and pp:
+                        if pp.startswith(home):
+                            pp = "~" + pp[len(home):]
+                        result[sid] = pp
+                if orig:
+                    proj_dir = os.path.dirname(idx_path)
+                    entry_sids = {e.get("sessionId") for e in data.get("entries", [])}
+                    for fname in os.listdir(proj_dir):
+                        if fname.endswith(".jsonl"):
+                            sid = fname[:-6]
+                            if sid not in entry_sids and sid not in result:
+                                pp = orig
+                                if pp.startswith(home):
+                                    pp = "~" + pp[len(home):]
+                                result[sid] = pp
+            except Exception:
+                pass
+        self._project_paths = result
+        return result
+
+    def scan_sessions(self, meta: dict, user: str) -> List[Session]:
+        out: List[Session] = []
+        proj_paths = self._load_project_paths()
+        pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
+        for jp in glob.glob(pattern):
+            sid = os.path.basename(jp).replace(".jsonl", "")
+            praw = os.path.basename(os.path.dirname(jp))
+            pdisp = proj_paths.get(sid) or SessionManager._decode_proj_fallback(praw, user)
+            sm = meta.get(sid, {})
+            tag = sm.get("tag", "")
+            pinned = sm.get("pinned", False)
+            file_mtime = os.path.getmtime(jp)
+            summary, fm, fm_long, lm = "", "", "", ""
+            sums: List[str] = []
+            msg_count = 0
+            first_entry_sid = ""
+            has_cont_text = False
+            try:
+                with open(jp, "r", errors="replace") as f:
+                    for ln in f:
+                        try:
+                            d = json.loads(ln)
+                        except Exception:
+                            continue
+                        msg_type = d.get("type")
+                        if not first_entry_sid and d.get("sessionId"):
+                            first_entry_sid = d["sessionId"]
+                        if msg_type == "summary":
+                            s = d.get("summary", "")
+                            if s:
+                                sums.append(s)
+                                summary = s
+                        elif msg_type in ("user", "assistant"):
+                            msg_count += 1
+                            if msg_type == "user":
+                                txt = SessionManager._extract_text(d.get("message", {}))
+                                if txt:
+                                    clean = txt[:120].replace("\n", " ").replace("\t", " ")
+                                    if not fm:
+                                        fm = clean
+                                        fm_long = txt[:800]
+                                    lm = clean
+                                    if not has_cont_text and txt.startswith("This session is being continued"):
+                                        has_cont_text = True
+            except Exception:
+                pass
+            is_cont = bool(has_cont_text and first_entry_sid and first_entry_sid != sid)
+            cont_parent = first_entry_sid if is_cont else ""
+            if msg_count == 0:
+                try:
+                    age = time.time() - os.path.getmtime(jp)
+                    if age < 60:
+                        continue
+                    os.remove(jp)
+                except OSError:
+                    pass
+                continue
+            out.append(Session(
+                id=sid, project_raw=praw, project_display=pdisp,
+                summary=summary, first_msg=fm,
+                first_msg_long=fm_long, last_msg=lm,
+                tag=tag, pinned=pinned,
+                mtime=file_mtime, cli="claude", summaries=sums, path=jp,
+                msg_count=msg_count,
+                is_continuation=is_cont, parent_id=cont_parent,
+            ))
+        return out
+
+    def read_messages(self, session: Session) -> List[dict]:
+        msgs = []
+        try:
+            with open(session.path, "r", errors="replace") as f:
+                for ln in f:
+                    try:
+                        d = json.loads(ln)
+                    except Exception:
+                        continue
+                    msg_type = d.get("type")
+                    if msg_type in ("user", "assistant"):
+                        txt = SessionManager._extract_text(d.get("message", {}))
+                        msgs.append({"role": msg_type, "content": txt, "timestamp": ""})
+        except Exception:
+            pass
+        return msgs
+
+    def build_resume_cmd(self, session_id: str, extra_args: list) -> list:
+        return ["claude", "--resume", session_id] + extra_args
+
+    def build_new_cmd(self, session_id: str, extra_args: list) -> list:
+        return ["claude", "--session-id", session_id] + extra_args
+
+    def build_args_from_profile(self, profile: dict) -> list:
+        return build_args_from_profile(profile)
+
+    def delete_session_files(self, session: Session) -> None:
+        if session.path and os.path.exists(session.path):
+            os.remove(session.path)
+
+    def session_file_exists(self, session_id: str) -> bool:
+        return bool(glob.glob(str(PROJECTS_DIR / "*" / f"{session_id}.jsonl")))
+
+
+class CodexProvider(CLIProvider):
+    name = "codex"
+    display_name = "Codex"
+    binary = "codex"
+
+    def is_available(self) -> bool:
+        return CODEX_SESSIONS_DIR.exists() or shutil.which("codex") is not None
+
+    def _session_files(self) -> List[Tuple[str, str]]:
+        """Return (session_id, file_path) for all Codex session files."""
+        results = []
+        pattern = str(CODEX_SESSIONS_DIR / "*" / "*" / "*" / "rollout-*.jsonl")
+        for jp in glob.glob(pattern):
+            fname = os.path.basename(jp)
+            parts = fname.replace(".jsonl", "").split("-", 1)
+            if len(parts) == 2:
+                # rollout-<timestamp>-<UUID> — extract UUID (last 36 chars)
+                rest = parts[1]
+                if len(rest) >= 36:
+                    sid = rest[-36:]
+                else:
+                    sid = rest
+            else:
+                sid = fname.replace(".jsonl", "")
+            results.append((sid, jp))
+        return results
+
+    def scan_sessions(self, meta: dict, user: str) -> List[Session]:
+        out: List[Session] = []
+        for sid, jp in self._session_files():
+            sm = meta.get(sid, {})
+            tag = sm.get("tag", "")
+            pinned = sm.get("pinned", False)
+            file_mtime = os.path.getmtime(jp)
+            summary, fm, fm_long, lm = "", "", "", ""
+            msg_count = 0
+            try:
+                with open(jp, "r", errors="replace") as f:
+                    for ln in f:
+                        try:
+                            d = json.loads(ln)
+                        except Exception:
+                            continue
+                        payload = d.get("payload", d)
+                        role = payload.get("role", d.get("type", ""))
+                        if role in ("user", "assistant"):
+                            msg_count += 1
+                            content = payload.get("content", "")
+                            if isinstance(content, list):
+                                content = " ".join(
+                                    c.get("text", "") for c in content
+                                    if isinstance(c, dict) and c.get("type") == "text"
+                                )
+                            if role == "user" and content:
+                                clean = content[:120].replace("\n", " ").replace("\t", " ")
+                                if not fm:
+                                    fm = clean
+                                    fm_long = content[:800]
+                                lm = clean
+                        elif d.get("type") == "summary":
+                            summary = d.get("summary", "")
+            except Exception:
+                pass
+            if msg_count == 0:
+                continue
+            # Codex sessions don't have per-project directories like Claude
+            date_parts = jp.replace(str(CODEX_SESSIONS_DIR) + "/", "").split("/")[:3]
+            pdisp = "/".join(date_parts) if len(date_parts) == 3 else ""
+            out.append(Session(
+                id=sid, project_raw="codex", project_display=pdisp,
+                summary=summary, first_msg=fm,
+                first_msg_long=fm_long, last_msg=lm,
+                tag=tag, pinned=pinned,
+                mtime=file_mtime, cli="codex", path=jp,
+                msg_count=msg_count,
+            ))
+        return out
+
+    def read_messages(self, session: Session) -> List[dict]:
+        msgs = []
+        try:
+            with open(session.path, "r", errors="replace") as f:
+                for ln in f:
+                    try:
+                        d = json.loads(ln)
+                    except Exception:
+                        continue
+                    payload = d.get("payload", d)
+                    role = payload.get("role", d.get("type", ""))
+                    if role in ("user", "assistant"):
+                        content = payload.get("content", "")
+                        if isinstance(content, list):
+                            content = " ".join(
+                                c.get("text", "") for c in content
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            )
+                        ts = d.get("timestamp", "")
+                        msgs.append({"role": role, "content": content, "timestamp": ts})
+        except Exception:
+            pass
+        return msgs
+
+    def build_resume_cmd(self, session_id: str, extra_args: list) -> list:
+        return ["codex", "resume", session_id] + extra_args
+
+    def build_new_cmd(self, session_id: str, extra_args: list) -> list:
+        return ["codex"] + extra_args
+
+    def build_args_from_profile(self, profile: dict) -> list:
+        expert = profile.get("expert_args", "").strip()
+        if expert:
+            return shlex.split(expert)
+        extra: List[str] = []
+        model = profile.get("model", "")
+        if model:
+            extra.extend(["--model", model])
+        perm = profile.get("permission_mode", "")
+        if perm:
+            sandbox_map = {"plan": "read-only", "acceptEdits": "workspace-write",
+                           "dontAsk": "danger-full-access", "bypassPermissions": "danger-full-access"}
+            mapped = sandbox_map.get(perm, perm)
+            extra.extend(["--sandbox", mapped])
+        for flag in profile.get("flags", []):
+            extra.append(flag)
+        sp = profile.get("system_prompt", "").strip()
+        if sp:
+            extra.extend(["-c", f"developer_instructions={sp}"])
+        if profile.get("custom_args", "").strip():
+            extra.extend(shlex.split(profile["custom_args"].strip()))
+        return extra
+
+    def delete_session_files(self, session: Session) -> None:
+        if session.path and os.path.exists(session.path):
+            os.remove(session.path)
+
+    def session_file_exists(self, session_id: str) -> bool:
+        for _, jp in self._session_files():
+            fname = os.path.basename(jp)
+            if session_id in fname:
+                return True
+        return False
+
+
+class OpencodeProvider(CLIProvider):
+    name = "opencode"
+    display_name = "opencode"
+    binary = "opencode"
+
+    def is_available(self) -> bool:
+        return OPENCODE_DB.exists() or shutil.which("opencode") is not None
+
+    def _get_db(self) -> Optional[sqlite3.Connection]:
+        if not OPENCODE_DB.exists():
+            return None
+        try:
+            conn = sqlite3.connect(str(OPENCODE_DB), timeout=5)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except Exception:
+            return None
+
+    def _discover_tables(self, conn: sqlite3.Connection) -> Tuple[str, str]:
+        """Discover session and message table names."""
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cur.fetchall()}
+        session_tbl = "session" if "session" in tables else "sessions" if "sessions" in tables else ""
+        msg_tbl = "message" if "message" in tables else "messages" if "messages" in tables else ""
+        return session_tbl, msg_tbl
+
+    def scan_sessions(self, meta: dict, user: str) -> List[Session]:
+        out: List[Session] = []
+        conn = self._get_db()
+        if not conn:
+            return out
+        try:
+            session_tbl, _ = self._discover_tables(conn)
+            if not session_tbl:
+                return out
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({session_tbl})").fetchall()}
+            title_col = "title" if "title" in cols else "NULL"
+            count_col = "message_count" if "message_count" in cols else "0"
+            created_col = "created_at" if "created_at" in cols else "NULL"
+            updated_col = "updated_at" if "updated_at" in cols else created_col
+            rows = conn.execute(
+                f"SELECT id, {title_col} as title, {count_col} as msg_count, "
+                f"{created_col} as created_at, {updated_col} as updated_at FROM {session_tbl}"
+            ).fetchall()
+            for row in rows:
+                sid = str(row["id"])
+                title = row["title"] or ""
+                msg_count = row["msg_count"] or 0
+                if msg_count == 0:
+                    continue
+                sm = meta.get(sid, {})
+                # Parse timestamp — try epoch float, then ISO string
+                mtime = 0.0
+                raw_ts = row["updated_at"] or row["created_at"]
+                if raw_ts:
+                    try:
+                        mtime = float(raw_ts)
+                        if mtime > 1e12:
+                            mtime = mtime / 1000.0
+                    except (ValueError, TypeError):
+                        try:
+                            dt = datetime.datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                            mtime = dt.timestamp()
+                        except Exception:
+                            pass
+                out.append(Session(
+                    id=sid, project_raw="opencode", project_display="opencode",
+                    summary=title, first_msg=title,
+                    first_msg_long=title, last_msg="",
+                    tag=sm.get("tag", ""), pinned=sm.get("pinned", False),
+                    mtime=mtime, cli="opencode", path=str(OPENCODE_DB),
+                    msg_count=int(msg_count),
+                ))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return out
+
+    def read_messages(self, session: Session) -> List[dict]:
+        msgs = []
+        conn = self._get_db()
+        if not conn:
+            return msgs
+        try:
+            _, msg_tbl = self._discover_tables(conn)
+            if not msg_tbl:
+                return msgs
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({msg_tbl})").fetchall()}
+            role_col = "role" if "role" in cols else "NULL"
+            content_col = "content" if "content" in cols else "text" if "text" in cols else "NULL"
+            ts_col = "created_at" if "created_at" in cols else "NULL"
+            sid_col = "session_id" if "session_id" in cols else "sessionId" if "sessionId" in cols else None
+            if not sid_col:
+                return msgs
+            rows = conn.execute(
+                f"SELECT {role_col} as role, {content_col} as content, {ts_col} as ts "
+                f"FROM {msg_tbl} WHERE {sid_col} = ? ORDER BY rowid",
+                (session.id,),
+            ).fetchall()
+            for row in rows:
+                role = row["role"] or "assistant"
+                content = row["content"] or ""
+                if isinstance(content, str) and content.startswith("{"):
+                    try:
+                        parsed = json.loads(content)
+                        content = parsed.get("text", parsed.get("content", content))
+                    except Exception:
+                        pass
+                msgs.append({"role": role, "content": str(content), "timestamp": str(row["ts"] or "")})
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return msgs
+
+    def build_resume_cmd(self, session_id: str, extra_args: list) -> list:
+        return ["opencode", "-s", session_id] + extra_args
+
+    def build_new_cmd(self, session_id: str, extra_args: list) -> list:
+        return ["opencode"] + extra_args
+
+    def build_args_from_profile(self, profile: dict) -> list:
+        expert = profile.get("expert_args", "").strip()
+        if expert:
+            return shlex.split(expert)
+        extra: List[str] = []
+        model = profile.get("model", "")
+        if model:
+            extra.extend(["--model", model])
+        sp = profile.get("system_prompt", "").strip()
+        if sp:
+            extra.extend(["--prompt", sp])
+        for flag in profile.get("flags", []):
+            extra.append(flag)
+        if profile.get("custom_args", "").strip():
+            extra.extend(shlex.split(profile["custom_args"].strip()))
+        return extra
+
+    def delete_session_files(self, session: Session) -> None:
+        conn = self._get_db()
+        if not conn:
+            return
+        try:
+            session_tbl, msg_tbl = self._discover_tables(conn)
+            if msg_tbl:
+                sid_col = "session_id"
+                cols = {row[1] for row in conn.execute(f"PRAGMA table_info({msg_tbl})").fetchall()}
+                if "session_id" not in cols and "sessionId" in cols:
+                    sid_col = "sessionId"
+                conn.execute(f"DELETE FROM {msg_tbl} WHERE {sid_col} = ?", (session.id,))
+            if session_tbl:
+                conn.execute(f"DELETE FROM {session_tbl} WHERE id = ?", (session.id,))
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def session_file_exists(self, session_id: str) -> bool:
+        conn = self._get_db()
+        if not conn:
+            return False
+        try:
+            session_tbl, _ = self._discover_tables(conn)
+            if not session_tbl:
+                return False
+            row = conn.execute(f"SELECT 1 FROM {session_tbl} WHERE id = ?", (session_id,)).fetchone()
+            return row is not None
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+
+def _init_providers() -> Dict[str, CLIProvider]:
+    """Initialize all available CLI providers."""
+    providers: Dict[str, CLIProvider] = {}
+    for cls in (ClaudeProvider, CodexProvider, OpencodeProvider):
+        p = cls()
+        if p.is_available():
+            providers[p.name] = p
+    if not providers:
+        providers["claude"] = ClaudeProvider()
+    return providers
+
+
 # ── Textual Themes ────────────────────────────────────────────────────
 
 CCS_THEMES = {
@@ -1270,6 +1677,7 @@ class HeaderBox(Static):
     sort_mode = reactive("date")
     search_query = reactive("")
     hints = reactive("")
+    cli_filter = reactive("")
 
     def render(self) -> Text:
         """Build a multi-line Rich Text header.
@@ -1326,6 +1734,8 @@ class HeaderBox(Static):
         sort_label = labels.get(self.sort_mode, "Date")
         n = self.session_count
         info = f"{n} session{'s' if n != 1 else ''} \u00b7 Sort: {sort_label}"
+        if self.cli_filter:
+            info += f" \u00b7 CLI: {CLI_NAMES.get(self.cli_filter, self.cli_filter)}"
         text.append(
             info,
             style=Style(color=tc("accent-color", "#00cccc")),
@@ -1431,6 +1841,12 @@ def build_session_row(
         text.append(f"+{s.continuation_count}", style=Style(color=tc("accent-color", "#00cccc")))
     else:
         text.append("  ")
+    text.append(" ")
+
+    # CLI badge
+    badge = CLI_BADGES.get(s.cli, "[?]")
+    badge_colors = {"claude": "#00cccc", "codex": "#ff8800", "opencode": "#88ff00"}
+    text.append(badge, style=Style(color=badge_colors.get(s.cli, "#888888"), bold=True))
     text.append(" ")
 
     # Tag column — truncate long tags to [abcdefgh...]
@@ -1552,7 +1968,12 @@ def _append_session_meta(
             style=Style(color=tc("tag-color", "#00ff00"), bold=True),
         )
 
-    # Session ID (truncated) with optional pinned indicator
+    # CLI badge + Session ID (truncated) with optional pinned indicator
+    badge = CLI_BADGES.get(s.cli, "[?]")
+    badge_colors = {"claude": "#00cccc", "codex": "#ff8800", "opencode": "#88ff00"}
+    text.append(f"  CLI:     ", style=Style(color=tc("dim-color", "#888888")))
+    text.append(f"{badge} {CLI_NAMES.get(s.cli, s.cli)}\n",
+                style=Style(color=badge_colors.get(s.cli, "#888888"), bold=True))
     sid_display = s.id[:36] + ("..." if len(s.id) > 36 else "")
     text.append(
         f"  Session: {sid_display}",
@@ -2860,6 +3281,12 @@ class ProfileEditModal(ModalScreen[dict]):
         self.expert_mode = bool(profile.get("expert_args", "").strip()) if profile else False
         if profile:
             self.prof_name = profile.get("name", "")
+            self.cli_idx = 0
+            cli = profile.get("cli", "claude")
+            for i, (_, cid) in enumerate(CLI_CHOICES):
+                if cid == cli:
+                    self.cli_idx = i
+                    break
             self.model_idx = 0
             model = profile.get("model", "")
             for i, (_, mid) in enumerate(MODELS):
@@ -2884,6 +3311,7 @@ class ProfileEditModal(ModalScreen[dict]):
             self.use_tmux = profile.get("tmux", True)
         else:
             self.prof_name = ""
+            self.cli_idx = 0
             self.model_idx = 0
             self.perm_idx = 0
             self.toggles = [False] * len(TOGGLE_FLAGS)
@@ -2945,6 +3373,8 @@ class ProfileEditModal(ModalScreen[dict]):
                 line = f"{prefix}Name: {self.prof_name or '(enter name)'}"
                 if not is_sel:
                     line_style = tag_style
+            elif rtype == ROW_CLI:
+                line = f"{prefix}CLI:         {CLI_CHOICES[self.cli_idx][0]}"
             elif rtype == ROW_TMUX:
                 line = f"{prefix}Launch mode:  {cb(self.use_tmux)} tmux   {cb(not self.use_tmux)} direct"
             elif rtype == ROW_EXPERT:
@@ -2989,16 +3419,18 @@ class ProfileEditModal(ModalScreen[dict]):
 
     def _to_profile_dict(self) -> dict:
         name = self.prof_name.strip()
+        cli = CLI_CHOICES[self.cli_idx][1]
         if self.expert_mode:
             return {
-                "name": name, "model": "", "permission_mode": "", "flags": [],
-                "system_prompt": "", "tools": "", "mcp_config": "",
+                "name": name, "cli": cli, "model": "", "permission_mode": "",
+                "flags": [], "system_prompt": "", "tools": "", "mcp_config": "",
                 "custom_args": "", "expert_args": self.expert_args,
                 "tmux": self.use_tmux,
             }
         flags = [TOGGLE_FLAGS[i][1] for i, v in enumerate(self.toggles) if v]
         return {
             "name": name,
+            "cli": cli,
             "model": MODELS[self.model_idx][1],
             "permission_mode": PERMISSION_MODES[self.perm_idx][1],
             "flags": flags,
@@ -3058,7 +3490,9 @@ class ProfileEditModal(ModalScreen[dict]):
         self.app.push_screen(SimpleInputModal(title, current), on_result)
 
     def _toggle_current(self, rtype, ridx):
-        if rtype == ROW_MODEL:
+        if rtype == ROW_CLI:
+            self.cli_idx = (self.cli_idx + 1) % len(CLI_CHOICES)
+        elif rtype == ROW_MODEL:
             self.model_idx = (self.model_idx + 1) % len(MODELS)
         elif rtype == ROW_PERMMODE:
             self.perm_idx = (self.perm_idx + 1) % len(PERMISSION_MODES)
@@ -3271,6 +3705,7 @@ class CCSApp(App):
         self.sessions = []
         self.filtered = []
         self.search_query = ""
+        self.cli_filter = ""
         self.sort_mode = "date"
         self.marked = set()
         self.view = "sessions"  # "sessions" | "detail"
@@ -3384,11 +3819,14 @@ class CCSApp(App):
 
     def _apply_filter(self):
         q = self.search_query.lower()
+        base = list(self.sessions)
+        if self.cli_filter:
+            base = [s for s in base if s.cli == self.cli_filter]
         if not q:
-            self.filtered = list(self.sessions)
+            self.filtered = base
         else:
             self.filtered = [
-                s for s in self.sessions
+                s for s in base
                 if q in (s.tag or "").lower()
                 or q in (s.label or "").lower()
                 or q in s.project_display.lower()
@@ -3511,6 +3949,7 @@ class CCSApp(App):
         header.total_count = len(self.sessions)
         header.sort_mode = self.sort_mode
         header.search_query = self.search_query
+        header.cli_filter = self.cli_filter
         if self.view == "detail":
             header.hints = (
                 "\u2190/Esc back \u00b7 \u2191/\u2193 scroll \u00b7 Tab switch panel \u00b7 \u2192/\u23ce resume"
@@ -3617,19 +4056,25 @@ class CCSApp(App):
     def _cleanup_gone_sessions(self, gone_sids):
         """Auto-delete ephemeral sessions whose tmux has exited."""
         meta = self.mgr._load_meta()
-        changed = False
         for sid in gone_sids:
-            is_ephemeral = meta.get(sid, {}).get("ephemeral", False)
+            sm = meta.get(sid, {})
+            is_ephemeral = sm.get("ephemeral", False)
+            cli = sm.get("cli", "claude")
             if is_ephemeral:
-                for f in glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")):
+                provider = self.mgr.get_provider(cli)
+                if provider:
+                    dummy = Session(
+                        id=sid, project_raw="", project_display="",
+                        summary="", first_msg="", first_msg_long="", last_msg="",
+                        tag="", pinned=False, mtime=0, cli=cli,
+                    )
                     try:
-                        os.remove(f)
-                    except OSError:
+                        provider.delete_session_files(dummy)
+                    except Exception:
                         pass
                 self.mgr._delete_meta(sid)
-                changed = True
                 self._set_status("Ephemeral session cleaned up")
-            elif not self._session_file_exists(sid):
+            elif not self._session_file_exists(sid, cli):
                 self.mgr._delete_meta(sid)
 
     def _poll_tmux_activity(self):
@@ -3818,8 +4263,8 @@ class CCSApp(App):
             else:
                 self._tmux_attach(tmux_name, s.id)
                 return
-        cmd_parts = ["claude", "--resume", s.id] + extra
-        # Inline env vars directly before the claude command: K1=V1 K2=V2 claude ...
+        provider = self.mgr.get_provider(s.cli) or self.mgr.get_provider("claude")
+        cmd_parts = provider.build_resume_cmd(s.id, extra)
         env_prefix = ""
         pairs = []
         if env_vars:
@@ -3861,22 +4306,12 @@ class CCSApp(App):
                     stderr=subprocess.DEVNULL,
                 )
 
-    def _session_file_exists(self, sid):
-        """Check if a Claude session .jsonl file exists for this ID."""
+    def _session_file_exists(self, sid, cli="claude"):
+        """Check if a session data file exists for this ID."""
+        provider = self.mgr.get_provider(cli)
+        if provider:
+            return provider.session_file_exists(sid)
         return bool(glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")))
-
-    def _session_is_empty(self, sid):
-        """Check if a session .jsonl has no user/assistant messages."""
-        for f in glob.glob(str(PROJECTS_DIR / "*" / f"{sid}.jsonl")):
-            try:
-                with open(f) as fh:
-                    for line in fh:
-                        d = json.loads(line)
-                        if d.get("type") in ("user", "assistant"):
-                            return False
-            except Exception:
-                pass
-        return True
 
     def _tmux_attach(self, tmux_name, session_id=None):
         try:
@@ -3888,37 +4323,35 @@ class CCSApp(App):
         if not session_id:
             self._do_refresh(force=True)
             return
-        is_ephemeral = self.mgr._get_meta(session_id).get("ephemeral", False)
+        sm = self.mgr._get_meta(session_id)
+        is_ephemeral = sm.get("ephemeral", False)
+        cli = sm.get("cli", "claude")
         tmux_alive = subprocess.run(
             ["tmux", "has-session", "-t", tmux_name],
             capture_output=True,
         ).returncode == 0
-        has_session = self._session_file_exists(session_id)
+        has_session = self._session_file_exists(session_id, cli)
         if is_ephemeral:
-            # Ephemeral: always kill tmux + delete session + clean up
             if tmux_alive:
                 subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-            for f in glob.glob(str(PROJECTS_DIR / "*" / f"{session_id}.jsonl")):
+            provider = self.mgr.get_provider(cli)
+            if provider:
+                dummy = Session(
+                    id=session_id, project_raw="", project_display="",
+                    summary="", first_msg="", first_msg_long="", last_msg="",
+                    tag="", pinned=False, mtime=0, cli=cli,
+                )
                 try:
-                    os.remove(f)
-                except OSError:
+                    provider.delete_session_files(dummy)
+                except Exception:
                     pass
             self.mgr._delete_meta(session_id)
             self._set_status("Ephemeral session cleaned up")
         elif not has_session:
-            # No session file — nothing to keep, kill tmux + clean up
             if tmux_alive:
                 subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
             self.mgr._delete_meta(session_id)
             self._set_status("No session created — tmux killed")
-        elif not tmux_alive and self._session_is_empty(session_id):
-            # Session exited with no messages — delete the empty session
-            for f in glob.glob(str(PROJECTS_DIR / "*" / f"{session_id}.jsonl")):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-            self.mgr._delete_meta(session_id)
             self._set_status("Empty session deleted")
         self._do_refresh(force=True)
 
@@ -3926,12 +4359,15 @@ class CCSApp(App):
         """Remove all metadata for a session ID."""
         self.mgr._delete_meta(sid)
 
-    def _tmux_launch_new(self, name, extra, cwd=None):
+    def _tmux_launch_new(self, name, extra, cwd=None, cli="claude"):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
         if name:
-            self.mgr._set_meta(uid, tag=name)
-        cmd_parts = ["claude", "--session-id", uid] + extra
+            self.mgr._set_meta(uid, tag=name, cli=cli)
+        else:
+            self.mgr._set_meta(uid, cli=cli)
+        provider = self.mgr.get_provider(cli) or self.mgr.get_provider("claude")
+        cmd_parts = provider.build_new_cmd(uid, extra)
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if cwd:
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
@@ -3945,11 +4381,12 @@ class CCSApp(App):
         )
         self._tmux_attach(tmux_name, uid)
 
-    def _tmux_launch_ephemeral(self, extra, cwd=None):
+    def _tmux_launch_ephemeral(self, extra, cwd=None, cli="claude"):
         uid = str(uuid_mod.uuid4())
         tmux_name = TMUX_PREFIX + uid
-        self.mgr._set_meta(uid, ephemeral=True)
-        cmd_parts = ["claude", "--session-id", uid] + extra
+        self.mgr._set_meta(uid, ephemeral=True, cli=cli)
+        provider = self.mgr.get_provider(cli) or self.mgr.get_provider("claude")
+        cmd_parts = provider.build_new_cmd(uid, extra)
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
         if cwd:
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
@@ -3963,21 +4400,30 @@ class CCSApp(App):
         )
         self._tmux_attach(tmux_name, uid)
 
-    def _active_profile_args(self):
+    def _active_profile(self) -> Optional[dict]:
         profiles = self.mgr.load_profiles()
-        active = next(
+        return next(
             (p for p in profiles if p.get("name") == self.active_profile_name),
             None,
         )
-        return build_args_from_profile(active) if active else []
+
+    def _active_profile_cli(self) -> str:
+        p = self._active_profile()
+        return p.get("cli", "claude") if p else "claude"
+
+    def _active_profile_args(self, cli: Optional[str] = None):
+        p = self._active_profile()
+        if not p:
+            return []
+        cli = cli or p.get("cli", "claude")
+        provider = self.mgr.get_provider(cli)
+        if provider:
+            return provider.build_args_from_profile(p)
+        return build_args_from_profile(p)
 
     def _get_use_tmux(self):
-        profiles = self.mgr.load_profiles()
-        active = next(
-            (p for p in profiles if p.get("name") == self.active_profile_name),
-            None,
-        )
-        return active.get("tmux", True) if active else True
+        p = self._active_profile()
+        return p.get("tmux", True) if p else True
 
     # -- View switching ----------------------------------------------------
 
@@ -4196,6 +4642,7 @@ class CCSApp(App):
                 ("i   Send Input", "send_input"),
                 ("", "---"),
                 ("s   Cycle Sort", "sort"),
+                ("F   Filter CLI", "cli_filter"),
                 ("/   Search", "search"),
                 ("r   Refresh", "refresh"),
                 ("S   Rescan All Sessions", "rescan"),
@@ -4228,6 +4675,7 @@ class CCSApp(App):
                 "kill_all_tmux": self.action_kill_all_tmux,
                 "send_input": self.action_send_input,
                 "sort": self.action_cycle_sort,
+                "cli_filter": self.action_cycle_cli_filter,
                 "search": self.action_search,
                 "refresh": self.action_refresh,
                 "rescan": self.action_rescan,
@@ -4372,6 +4820,8 @@ class CCSApp(App):
             self.action_ephemeral_session()
         elif key == "s":
             self.action_cycle_sort()
+        elif key == "F":
+            self.action_cycle_cli_filter()
         elif key == "i":
             self.action_send_input()
         elif key == "slash":
@@ -4592,7 +5042,7 @@ class CCSApp(App):
                 )
             elif choice == "terminal":
                 proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
-                self.exit_action = ("resume", s.id, extra, proj_dir)
+                self.exit_action = ("resume", s.id, extra, proj_dir, s.cli)
                 self.exit()
 
         self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
@@ -4878,6 +5328,7 @@ class CCSApp(App):
     def action_new_session(self):
         if self.view != "sessions":
             return
+        cli = self._active_profile_cli()
 
         def on_path(path, name):
             path = path.strip() if path else ""
@@ -4891,10 +5342,10 @@ class CCSApp(App):
                     return
                 extra = self._active_profile_args()
                 cwd = os.path.expanduser(path) if path else None
-                self._tmux_launch_new(name, extra, cwd=cwd)
+                self._tmux_launch_new(name, extra, cwd=cwd, cli=cli)
                 self._do_refresh()
             else:
-                self.exit_action = ("new", name)
+                self.exit_action = ("new", name, cli)
                 self.exit()
 
         def on_name(name):
@@ -4907,7 +5358,7 @@ class CCSApp(App):
                     lambda path: on_path(path, name),
                 )
             else:
-                self.exit_action = ("new", name)
+                self.exit_action = ("new", name, cli)
                 self.exit()
 
         self.push_screen(
@@ -4918,9 +5369,10 @@ class CCSApp(App):
     def action_ephemeral_session(self):
         if self.view != "sessions":
             return
+        cli = self._active_profile_cli()
         use_tmux = self._get_use_tmux()
         if not use_tmux:
-            self.exit_action = ("tmp",)
+            self.exit_action = ("tmp", cli)
             self.exit()
             return
         if not HAS_TMUX:
@@ -4934,7 +5386,7 @@ class CCSApp(App):
                 return
             extra = self._active_profile_args()
             cwd = os.path.expanduser(path) if path else None
-            self._tmux_launch_ephemeral(extra, cwd=cwd)
+            self._tmux_launch_ephemeral(extra, cwd=cwd, cli=cli)
             self._do_refresh()
 
         self.push_screen(
@@ -4982,6 +5434,20 @@ class CCSApp(App):
             "tmux": "Tmux",
         }
         self._set_status(f"Sort: {labels[self.sort_mode]}")
+
+    def action_cycle_cli_filter(self):
+        if self.view != "sessions":
+            return
+        available = [""] + sorted(self.mgr.providers.keys())
+        idx = available.index(self.cli_filter) if self.cli_filter in available else 0
+        self.cli_filter = available[(idx + 1) % len(available)]
+        self._apply_filter()
+        self._render_session_list()
+        self._update_header()
+        if self.cli_filter:
+            self._set_status(f"CLI filter: {CLI_NAMES.get(self.cli_filter, self.cli_filter)}")
+        else:
+            self._set_status("CLI filter: All")
 
     def action_send_input(self):
         if self.view != "detail":
@@ -5054,6 +5520,10 @@ def _get_profile_extra(mgr: SessionManager, profile_name: Optional[str] = None) 
     name = profile_name or mgr.load_active_profile_name()
     prof = next((p for p in profiles if p.get("name") == name), None)
     if prof:
+        cli = prof.get("cli", "claude")
+        provider = mgr.get_provider(cli)
+        if provider:
+            return provider.build_args_from_profile(prof)
         return build_args_from_profile(prof)
     return []
 
@@ -5061,17 +5531,31 @@ def _get_profile_extra(mgr: SessionManager, profile_name: Optional[str] = None) 
 # ── CLI commands ─────────────────────────────────────────────────────
 
 
+def cmd_providers(mgr: SessionManager):
+    """List available CLI providers and their status."""
+    print(f"\033[1;36m◆\033[0m CLI Providers\n")
+    for name in ("claude", "codex", "opencode"):
+        provider = mgr.get_provider(name)
+        if provider:
+            binary = provider.binary
+            has_bin = shutil.which(binary) is not None
+            status = "\033[1;32mavailable\033[0m" if has_bin else "\033[1;33msessions only\033[0m"
+            print(f"  {CLI_BADGES[name]} {provider.display_name:<12s} binary={binary:<12s} {status}")
+        else:
+            print(f"  {CLI_BADGES[name]} {CLI_NAMES[name]:<12s} \033[2mnot detected\033[0m")
+
+
 def cmd_help():
     print("""\033[1;36m◆ ccs — Claude Code Session Manager\033[0m
 
 \033[1mUsage:\033[0m
   ccs                                    Interactive TUI
-  ccs list                               List all sessions
-  ccs scan [-n|--dry-run]                Rescan all Claude sessions
+  ccs list                               List all sessions (Claude, Codex, opencode)
+  ccs scan [-n|--dry-run]                Rescan all sessions
   ccs resume <id|tag> [-p <profile>]     Resume session
-  ccs resume <id|tag> --claude <opts>    Resume with raw claude options
-  ccs new <name>                         New named session
-  ccs new -e [name]                      Ephemeral session (auto-deleted on exit)
+  ccs resume <id|tag> --claude <opts>    Resume with raw CLI options
+  ccs new <name> [--cli <cli>]           New named session (default: claude)
+  ccs new -e [name] [--cli <cli>]        Ephemeral session (auto-deleted on exit)
   ccs pin <id|tag>                       Pin a session
   ccs unpin <id|tag>                     Unpin a session
   ccs tag <id|tag> <tag>                 Set tag on session
@@ -5082,6 +5566,7 @@ def cmd_help():
   ccs info <id|tag>                      Show session details
   ccs search <query>                     Search sessions by text
   ccs export <id|tag>                    Export session as markdown
+  ccs providers                          List available CLI providers
   ccs profile list                       List profiles
   ccs profile info <name>                Show profile details
   ccs profile set <name>                 Set active profile
@@ -5094,6 +5579,9 @@ def cmd_help():
   ccs tmux kill <name>                   Kill a tmux session
   ccs tmux kill --all                    Kill all tmux sessions
   ccs help                               Show this help
+
+\033[1mCLI options for 'new':\033[0m
+  --cli claude|codex|opencode            Choose CLI (default: claude)
 
 \033[1mProfile creation flags:\033[0m
   --model <model>                        Model name
@@ -5108,7 +5596,8 @@ def cmd_help():
   --tools <tools>                        Tools
   --mcp-config <path>                    MCP config path
 
-\033[2mPress ? in the TUI for keybindings help.\033[0m""")
+\033[2mSupported CLIs: [C] Claude, [X] Codex, [O] opencode
+Press ? in the TUI for keybindings help.\033[0m""")
 
 
 def cmd_scan(mgr: SessionManager, dry_run: bool = False):
@@ -5137,76 +5626,40 @@ def cmd_scan(mgr: SessionManager, dry_run: bool = False):
 
 def cmd_scan_dry_run(mgr: SessionManager):
     """Show what scan would find and clean up, without making changes."""
-    meta = mgr._load_meta()
-    proj_paths = mgr._load_project_paths()
-    pattern = str(PROJECTS_DIR / "*" / "*.jsonl")
-    seen_sids = set()
+    sessions = mgr.scan(force=True)
     keep = []
     delete_empty = []
     delete_missing_proj = []
 
-    for jp in glob.glob(pattern):
-        sid = os.path.basename(jp).replace(".jsonl", "")
-        seen_sids.add(sid)
-        praw = os.path.basename(os.path.dirname(jp))
-        pdisp = proj_paths.get(sid) or mgr._decode_proj_fallback(praw, mgr.user)
-        proj_path = os.path.expanduser(pdisp) if pdisp else ""
+    for s in sessions:
+        badge = CLI_BADGES.get(s.cli, "[?]")
+        label = s.tag or s.summary or s.first_msg or s.id[:12]
+        proj = s.project_display
+        proj_path = os.path.expanduser(proj) if proj else ""
 
-        # Count messages
-        msg_count = 0
-        summary = ""
-        fm = ""
-        try:
-            with open(jp, "r", errors="replace") as f:
-                for ln in f:
-                    try:
-                        d = json.loads(ln)
-                    except Exception:
-                        continue
-                    t = d.get("type")
-                    if t == "summary":
-                        summary = d.get("summary", "") or summary
-                    elif t in ("user", "assistant"):
-                        msg_count += 1
-                        if t == "user" and not fm:
-                            fm = mgr._extract_text(d.get("message", {}))[:80]
-        except Exception:
-            pass
-
-        tag = meta.get(sid, {}).get("tag", "")
-        label = tag or summary or fm or sid[:12]
-
-        if msg_count == 0:
-            delete_empty.append((sid, pdisp, label))
+        if not s.first_msg and not s.summary:
+            delete_empty.append((s.id, proj, label, badge))
         elif proj_path and not os.path.isdir(proj_path):
-            delete_missing_proj.append((sid, pdisp, label))
+            delete_missing_proj.append((s.id, proj, label, badge))
         else:
-            keep.append((sid, pdisp, label, msg_count))
-
-    orphaned_meta = [sid for sid in meta if sid not in seen_sids]
+            keep.append((s.id, proj, label, s.msg_count, badge))
 
     print(f"\033[1;36m◆\033[0m Dry run — no changes made\n")
     print(f"  \033[1;32mKeep:\033[0m {len(keep)} sessions")
-    for sid, pdisp, label, mc in keep:
-        print(f"    {sid[:12]}  {pdisp[:30]:<30s}  {mc:>4d}m  {label[:40]}")
+    for sid, proj, label, mc, badge in keep:
+        print(f"    {badge} {sid[:12]}  {proj[:30]:<30s}  {mc:>4d}m  {label[:40]}")
 
     if delete_empty:
         print(f"\n  \033[1;31mDelete (empty):\033[0m {len(delete_empty)} sessions")
-        for sid, pdisp, label in delete_empty:
-            print(f"    {sid[:12]}  {pdisp[:30]:<30s}  {label[:40]}")
+        for sid, proj, label, badge in delete_empty:
+            print(f"    {badge} {sid[:12]}  {proj[:30]:<30s}  {label[:40]}")
 
     if delete_missing_proj:
         print(f"\n  \033[1;31mDelete (missing project dir):\033[0m {len(delete_missing_proj)} sessions")
-        for sid, pdisp, label in delete_missing_proj:
-            print(f"    {sid[:12]}  {pdisp[:30]:<30s}  {label[:40]}")
+        for sid, proj, label, badge in delete_missing_proj:
+            print(f"    {badge} {sid[:12]}  {proj[:30]:<30s}  {label[:40]}")
 
-    if orphaned_meta:
-        print(f"\n  \033[1;33mOrphaned metadata:\033[0m {len(orphaned_meta)} entries")
-        for sid in orphaned_meta:
-            tag = meta[sid].get("tag", "")
-            print(f"    {sid[:12]}  {tag or '-'}")
-
-    if not delete_empty and not delete_missing_proj and not orphaned_meta:
+    if not delete_empty and not delete_missing_proj:
         print("\n  Nothing to clean up.")
 
 
@@ -5222,13 +5675,14 @@ def cmd_list(mgr: SessionManager):
             if tw > max_tag_w:
                 max_tag_w = tw
     tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
-    print(f"  \033[2m  {tag_hdr}{'Modified':<18s}{'ID':<14s}{'Project':<24s}  Description\033[0m")
+    print(f"  \033[2m     {tag_hdr}{'Modified':<18s}{'ID':<14s}{'Project':<24s}  Description\033[0m")
     for s in sessions:
+        badge = CLI_BADGES.get(s.cli, "[?]")
         pin = "★ " if s.pinned else "  "
         tag = f"[{s.tag}]" if s.tag else ""
         tag_col = f"{tag:<{max_tag_w}}" if max_tag_w else ""
         label = s.label[:60]
-        print(f"  {pin}{tag_col}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
+        print(f"  {badge}{pin}{tag_col}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
 
 
 def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
@@ -5238,23 +5692,28 @@ def cmd_resume(mgr: SessionManager, query: str, profile_name: Optional[str],
         extra = claude_args
     else:
         extra = _get_profile_extra(mgr, profile_name)
+    provider = mgr.get_provider(s.cli) or mgr.get_provider("claude")
+    cmd = provider.build_resume_cmd(s.id, extra)
     opts = f" {' '.join(extra)}" if extra else ""
-    print(f"\033[1;36m◆\033[0m Resuming session \033[2m({s.id[:8]}…)\033[0m{opts}")
+    cli_name = CLI_NAMES.get(s.cli, s.cli)
+    print(f"\033[1;36m◆\033[0m Resuming {cli_name} session \033[2m({s.id[:8]}…)\033[0m{opts}")
     proj_dir = os.path.expanduser(s.project_display) if s.project_display else ""
     if proj_dir and os.path.isdir(proj_dir):
         os.chdir(proj_dir)
-    cmd = ["claude", "--resume", s.id] + extra
-    os.execvp("claude", cmd)
+    os.execvp(cmd[0], cmd)
 
 
-def cmd_new(mgr: SessionManager, name: str, extra: List[str], ephemeral: bool = False):
+def cmd_new(mgr: SessionManager, name: str, extra: List[str],
+            ephemeral: bool = False, cli: str = "claude"):
     uid = str(uuid_mod.uuid4())
+    provider = mgr.get_provider(cli) or mgr.get_provider("claude")
+    cli_name = CLI_NAMES.get(cli, cli)
     if ephemeral:
-        mgr._set_meta(uid, ephemeral=True)
+        mgr._set_meta(uid, ephemeral=True, cli=cli)
         if name:
-            mgr._set_meta(uid, tag=name, ephemeral=True)
-        print(f"\033[1;36m◆\033[0m Starting ephemeral session \033[2m({uid[:8]}…)\033[0m")
-        cmd = ["claude", "--session-id", uid] + extra
+            mgr._set_meta(uid, tag=name, ephemeral=True, cli=cli)
+        print(f"\033[1;36m◆\033[0m Starting ephemeral {cli_name} session \033[2m({uid[:8]}…)\033[0m")
+        cmd = provider.build_new_cmd(uid, extra)
         try:
             subprocess.run(cmd)
         except KeyboardInterrupt:
@@ -5262,11 +5721,11 @@ def cmd_new(mgr: SessionManager, name: str, extra: List[str], ephemeral: bool = 
         finally:
             mgr.purge_ephemeral()
     else:
-        mgr._set_meta(uid, tag=name)
-        print(f"\033[1;36m◆\033[0m Starting named session: "
+        mgr._set_meta(uid, tag=name, cli=cli)
+        print(f"\033[1;36m◆\033[0m Starting named {cli_name} session: "
               f"\033[1;32m{name}\033[0m \033[2m({uid[:8]}…)\033[0m")
-        cmd = ["claude", "--session-id", uid] + extra
-        os.execvp("claude", cmd)
+        cmd = provider.build_new_cmd(uid, extra)
+        os.execvp(cmd[0], cmd)
 
 
 def cmd_pin(mgr: SessionManager, query: str):
@@ -5383,13 +5842,14 @@ def cmd_search(mgr: SessionManager, query: str):
             if tw > max_tag_w:
                 max_tag_w = tw
     tag_hdr = f"{'Tag':<{max_tag_w}}" if max_tag_w else ""
-    print(f"  \033[2m  {tag_hdr}{'Modified':<18s}{'ID':<14s}{'Project':<24s}  Description\033[0m")
+    print(f"  \033[2m     {tag_hdr}{'Modified':<18s}{'ID':<14s}{'Project':<24s}  Description\033[0m")
     for s in matches:
+        badge = CLI_BADGES.get(s.cli, "[?]")
         pin = "★ " if s.pinned else "  "
         tag = f"[{s.tag}]" if s.tag else ""
         tag_col = f"{tag:<{max_tag_w}}" if max_tag_w else ""
         label = s.label[:60]
-        print(f"  {pin}{tag_col}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
+        print(f"  {badge}{pin}{tag_col}{s.ts}  {s.id[:12]}  {s.project_display[:24]:<24s}  {label}")
 
 
 def cmd_profile_list(mgr: SessionManager):
@@ -5417,7 +5877,7 @@ def cmd_profile_set(mgr: SessionManager, name: str):
 def cmd_profile_new(mgr: SessionManager, name: str, cli_args: List[str]):
     """Create a profile from CLI flags."""
     profile = {
-        "name": name, "model": "", "permission_mode": "",
+        "name": name, "cli": "claude", "model": "", "permission_mode": "",
         "flags": [], "system_prompt": "", "tools": "",
         "mcp_config": "", "custom_args": "", "tmux": True,
     }
@@ -5425,7 +5885,10 @@ def cmd_profile_new(mgr: SessionManager, name: str, cli_args: List[str]):
     flags_list = []
     while i < len(cli_args):
         a = cli_args[i]
-        if a == "--model" and i + 1 < len(cli_args):
+        if a == "--cli" and i + 1 < len(cli_args):
+            profile["cli"] = cli_args[i + 1]
+            i += 2
+        elif a == "--model" and i + 1 < len(cli_args):
             profile["model"] = cli_args[i + 1]
             i += 2
         elif a == "--permission-mode" and i + 1 < len(cli_args):
@@ -5464,7 +5927,10 @@ def cmd_profile_info(mgr: SessionManager, name: str):
         sys.exit(1)
     active = mgr.load_active_profile_name()
     active_str = " (active)" if name == active else ""
+    cli = profile.get("cli", "claude")
+    cli_name = CLI_NAMES.get(cli, cli)
     print(f"\033[1;36m◆\033[0m Profile: \033[1m{name}\033[0m{active_str}")
+    print(f"  CLI:             {cli_name}")
     print(f"  Mode:            {'tmux' if profile.get('tmux', True) else 'terminal'}")
     model = profile.get("model", "") or "default"
     for display_name, mid in MODELS:
@@ -5493,9 +5959,13 @@ def cmd_profile_info(mgr: SessionManager, name: str):
     expert = profile.get("expert_args", "").strip()
     if expert:
         print(f"  Expert args:     {expert}")
-    args = build_args_from_profile(profile)
+    provider = mgr.get_provider(cli)
+    if provider:
+        args = provider.build_args_from_profile(profile)
+    else:
+        args = build_args_from_profile(profile)
     if args:
-        print(f"  \033[2mCLI: claude {' '.join(args)}\033[0m")
+        print(f"  \033[2mCLI: {cli} {' '.join(args)}\033[0m")
 
 
 def cmd_profile_delete(mgr: SessionManager, name: str):
@@ -5532,7 +6002,9 @@ def cmd_info(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
     ts = datetime.datetime.fromtimestamp(s.mtime).strftime("%Y-%m-%d %H:%M")
     pinned_str = " (pinned)" if s.pinned else ""
+    cli_name = CLI_NAMES.get(s.cli, s.cli)
     print(f"\033[1;36m◆\033[0m Session: \033[1m{s.id}\033[0m{pinned_str}")
+    print(f"  CLI:             {cli_name}")
     if s.tag:
         print(f"  Tag:             {s.tag}")
     print(f"  Project:         {s.project_display}")
@@ -5550,8 +6022,10 @@ def cmd_info(mgr: SessionManager, query: str):
 def cmd_export(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
     ts = datetime.datetime.fromtimestamp(s.mtime).strftime("%Y-%m-%d %H:%M")
+    cli_name = CLI_NAMES.get(s.cli, s.cli)
     print(f"# Session: {s.label}")
     print(f"- **ID:** `{s.id}`")
+    print(f"- **CLI:** {cli_name}")
     if s.tag:
         print(f"- **Tag:** {s.tag}")
     print(f"- **Project:** {s.project_display}")
@@ -5561,23 +6035,16 @@ def cmd_export(mgr: SessionManager, query: str):
     print(f"- **Messages:** {s.msg_count}")
     print()
     try:
-        with open(s.path, "r", errors="replace") as f:
-            for ln in f:
-                try:
-                    d = json.loads(ln)
-                except Exception:
-                    continue
-                msg_type = d.get("type")
-                if msg_type == "user":
-                    txt = SessionManager._extract_text(d.get("message", {}))
-                    if txt:
-                        print(f"## User\n\n{txt}\n")
-                elif msg_type == "assistant":
-                    txt = SessionManager._extract_text(d.get("message", {}))
-                    if txt:
-                        print(f"## Assistant\n\n{txt}\n")
+        messages = mgr.read_messages(s)
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user" and content:
+                print(f"## User\n\n{content}\n")
+            elif role == "assistant" and content:
+                print(f"## Assistant\n\n{content}\n")
     except Exception as e:
-        print(f"\n*Error reading session file: {e}*")
+        print(f"\n*Error reading session: {e}*")
 
 
 def _list_ccs_tmux_names():
@@ -5671,20 +6138,24 @@ def main():
             return
 
         if action[0] == "resume":
-            _, sid, extra, proj_dir = action
-            cmd = ["claude", "--resume", sid] + extra
+            _, sid, extra, proj_dir, cli = (*action, "claude")[0:5]
+            provider = mgr.get_provider(cli) or mgr.get_provider("claude")
+            cmd = provider.build_resume_cmd(sid, extra)
             opts = f" {' '.join(extra)}" if extra else ""
-            print(f"\033[1;36m◆\033[0m Resuming session \033[2m({sid[:8]}…)\033[0m{opts}")
+            cli_name = CLI_NAMES.get(cli, cli)
+            print(f"\033[1;36m◆\033[0m Resuming {cli_name} session \033[2m({sid[:8]}…)\033[0m{opts}")
             if proj_dir and os.path.isdir(proj_dir):
                 os.chdir(proj_dir)
-            os.execvp("claude", cmd)
+            os.execvp(cmd[0], cmd)
 
         elif action[0] == "new":
-            _, name = action
-            cmd_new(mgr, name, [])
+            _, name = action[0:2]
+            cli = action[2] if len(action) > 2 else "claude"
+            cmd_new(mgr, name, [], cli=cli)
 
         elif action[0] == "tmp":
-            cmd_new(mgr, "", [], ephemeral=True)
+            cli = action[1] if len(action) > 1 else "claude"
+            cmd_new(mgr, "", [], ephemeral=True, cli=cli)
 
         return
 
@@ -5721,6 +6192,7 @@ def main():
 
     elif verb == "new":
         ephemeral = False
+        cli = "claude"
         rest = args[1:]
         if "-e" in rest:
             ephemeral = True
@@ -5728,11 +6200,18 @@ def main():
         if "--ephemeral" in rest:
             ephemeral = True
             rest.remove("--ephemeral")
+        if "--cli" in rest:
+            ci = rest.index("--cli")
+            if ci + 1 < len(rest):
+                cli = rest[ci + 1]
+                rest = rest[:ci] + rest[ci + 2:]
+            else:
+                rest = rest[:ci]
         if not rest and not ephemeral:
-            print("\033[31mUsage: ccs new <name> | ccs new -e [name]\033[0m")
+            print("\033[31mUsage: ccs new <name> [--cli claude|codex|opencode] | ccs new -e [name]\033[0m")
             sys.exit(1)
         name = rest[0] if rest else ""
-        cmd_new(mgr, name, rest[1:], ephemeral=ephemeral)
+        cmd_new(mgr, name, rest[1:], ephemeral=ephemeral, cli=cli)
 
     elif verb == "pin":
         if len(args) < 2:
@@ -5837,6 +6316,9 @@ def main():
         else:
             print(f"\033[31mUnknown theme command: {sub}\033[0m")
             sys.exit(1)
+
+    elif verb == "providers":
+        cmd_providers(mgr)
 
     elif verb == "tmux":
         if not HAS_TMUX:
