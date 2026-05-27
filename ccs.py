@@ -5015,24 +5015,18 @@ class CCSApp(App):
         s = self._current_session()
         if not s:
             return
-        extra = self._active_profile_args()
         label = s.tag or s.label[:40] or s.id[:12]
 
-        def on_env_result(env_text):
-            if env_text is None:
-                return
-            self._tmux_launch(s, extra, env_vars=env_text.strip())
-            self._do_refresh()
-
-        def on_result(choice):
-            if choice is None:
-                return
-            if choice == "view":
-                self._switch_to_detail()
-            elif choice == "tmux":
+        def _do_launch(extra, choice):
+            if choice == "tmux":
                 self._tmux_launch(s, extra)
                 self._do_refresh()
             elif choice == "tmux_expert":
+                def on_env_result(env_text):
+                    if env_text is None:
+                        return
+                    self._tmux_launch(s, extra, env_vars=env_text.strip())
+                    self._do_refresh()
                 self.push_screen(
                     InputModal(
                         target_name="Environment Variables",
@@ -5045,6 +5039,14 @@ class CCSApp(App):
                 self.exit_action = ("resume", s.id, extra, proj_dir, s.cli)
                 self.exit()
 
+        def on_result(choice):
+            if choice is None:
+                return
+            if choice == "view":
+                self._switch_to_detail()
+                return
+            self._pick_profile_for_cli(s.cli, lambda extra: _do_launch(extra, choice))
+
         self.push_screen(LaunchModal(label, show_view=(self.view != "detail")), on_result)
 
     def _action_tmux_expert(self):
@@ -5052,21 +5054,23 @@ class CCSApp(App):
         s = self._current_session()
         if not s:
             return
-        extra = self._active_profile_args()
 
-        def on_env_result(env_text):
-            if env_text is None:
-                return
-            self._tmux_launch(s, extra, env_vars=env_text.strip())
-            self._do_refresh()
+        def _do_expert(extra):
+            def on_env_result(env_text):
+                if env_text is None:
+                    return
+                self._tmux_launch(s, extra, env_vars=env_text.strip())
+                self._do_refresh()
 
-        self.push_screen(
-            InputModal(
-                target_name="Environment Variables",
-                subtitle="One per line: KEY=VALUE (Esc to cancel)\nNot stored anywhere \u2014 lives only in this tmux session.\nWarning: detaching will kill the tmux session to avoid preserving env vars.",
-            ),
-            on_env_result,
-        )
+            self.push_screen(
+                InputModal(
+                    target_name="Environment Variables",
+                    subtitle="One per line: KEY=VALUE (Esc to cancel)\nNot stored anywhere \u2014 lives only in this tmux session.\nWarning: detaching will kill the tmux session to avoid preserving env vars.",
+                ),
+                on_env_result,
+            )
+
+        self._pick_profile_for_cli(s.cli, _do_expert)
 
     def action_mark(self):
         if self.view != "sessions":
@@ -5325,6 +5329,48 @@ class CCSApp(App):
             on_result,
         )
 
+    def _pick_profile_for_cli(self, cli: str, callback):
+        """If active profile matches cli, call callback(profile_args) immediately.
+        Otherwise show a picker of profiles for that CLI. callback receives extra args list."""
+        active = self._active_profile()
+        if active and active.get("cli", "claude") == cli:
+            provider = self.mgr.get_provider(cli)
+            if provider:
+                callback(provider.build_args_from_profile(active))
+            else:
+                callback(build_args_from_profile(active))
+            return
+        profiles = self.mgr.load_profiles()
+        matching = [p for p in profiles if p.get("cli", "claude") == cli]
+        if not matching:
+            callback([])
+            return
+        items = [("No profile (defaults)", "__none__")]
+        for p in matching:
+            name = p.get("name", "?")
+            summary = profile_summary(p)
+            items.append((f"{name}  {summary}", name))
+
+        def on_pick(choice):
+            if choice is None:
+                return
+            if choice == "__none__":
+                callback([])
+                return
+            prof = next((p for p in matching if p.get("name") == choice), None)
+            if prof:
+                provider = self.mgr.get_provider(cli)
+                if provider:
+                    callback(provider.build_args_from_profile(prof))
+                else:
+                    callback(build_args_from_profile(prof))
+            else:
+                callback([])
+
+        cli_name = CLI_NAMES.get(cli, cli)
+        self.push_screen(
+            ContextMenuModal(f"Profile for {cli_name}", items), on_pick)
+
     def _cli_choice_items(self) -> list:
         """Build CLI choice items from available providers."""
         items = []
@@ -5338,23 +5384,25 @@ class CCSApp(App):
             return
 
         def _start_new(cli):
-            def on_path(path, name):
-                path = path.strip() if path else ""
-                if path and not os.path.isdir(os.path.expanduser(path)):
-                    self._set_status(f"Directory not found: {path}")
-                    return
+            def _launch_with_args(extra, name, cwd):
                 use_tmux = self._get_use_tmux()
                 if use_tmux:
                     if not HAS_TMUX:
                         self._set_status("tmux is not installed")
                         return
-                    extra = self._active_profile_args(cli=cli)
-                    cwd = os.path.expanduser(path) if path else None
                     self._tmux_launch_new(name, extra, cwd=cwd, cli=cli)
                     self._do_refresh()
                 else:
                     self.exit_action = ("new", name, cli)
                     self.exit()
+
+            def on_path(path, name):
+                path = path.strip() if path else ""
+                if path and not os.path.isdir(os.path.expanduser(path)):
+                    self._set_status(f"Directory not found: {path}")
+                    return
+                cwd = os.path.expanduser(path) if path else None
+                self._pick_profile_for_cli(cli, lambda extra: _launch_with_args(extra, name, cwd))
 
             def on_name(name):
                 if name is None:
@@ -5366,8 +5414,7 @@ class CCSApp(App):
                         lambda path: on_path(path, name),
                     )
                 else:
-                    self.exit_action = ("new", name, cli)
-                    self.exit()
+                    self._pick_profile_for_cli(cli, lambda extra: _launch_with_args(extra, name, None))
 
             self.push_screen(
                 SimpleInputModal("New Session Name", "", "Enter session name (optional)"),
@@ -5402,10 +5449,13 @@ class CCSApp(App):
                 if path and not os.path.isdir(os.path.expanduser(path)):
                     self._set_status(f"Directory not found: {path}")
                     return
-                extra = self._active_profile_args(cli=cli)
                 cwd = os.path.expanduser(path) if path else None
-                self._tmux_launch_ephemeral(extra, cwd=cwd, cli=cli)
-                self._do_refresh()
+
+                def _launch(extra):
+                    self._tmux_launch_ephemeral(extra, cwd=cwd, cli=cli)
+                    self._do_refresh()
+
+                self._pick_profile_for_cli(cli, _launch)
 
             self.push_screen(
                 PathInputModal("Project Path", os.getcwd(), "Path (Tab to autocomplete)"),
