@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-ccs — Claude Code Session Manager
-A terminal UI and CLI for browsing, managing, and resuming Claude Code sessions.
+ccs — Coding CLI Session Manager
+A terminal UI and CLI for browsing, managing, and resuming coding CLI sessions (Claude, Codex, opencode).
 
 Usage:
     ccs                                    Interactive TUI
     ccs list                               List all sessions
-    ccs scan [-n|--dry-run]                Rescan all Claude sessions
+    ccs scan [-n|--dry-run]                Rescan all sessions
     ccs resume <id|tag> [-p <profile>]     Resume session
     ccs resume <id|tag> --claude <opts>    Resume with raw claude options
     ccs new <name>                         New named session
@@ -2406,12 +2406,12 @@ class HelpModal(ModalScreen):
             text.append("  i              Send text to tmux (Ctrl+D to send)\n")
             text.append("  p              Toggle pin\n")
             text.append("  t / T          Set / remove tag\n")
-            text.append("  d              Delete Claude session\n\n")
+            text.append("  d              Delete session\n\n")
             text.append("Other\n", style=hdr)
             text.append("  P              Profile picker / manager\n")
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
-            text.append("  S              Rescan all Claude sessions\n")
+            text.append("  S              Rescan all sessions\n")
             text.append("  Esc / \u2190        Back to Sessions list\n")
             text.append("  Ctrl-C         Quit\n")
         else:
@@ -2443,7 +2443,7 @@ class HelpModal(ModalScreen):
             text.append("Other\n", style=hdr)
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
-            text.append("  S              Rescan all Claude sessions\n")
+            text.append("  S              Rescan all sessions\n")
             text.append("  Esc            Quit\n")
             text.append("  Ctrl-C         Quit\n")
 
@@ -3793,7 +3793,7 @@ class ContextMenuModal(ModalScreen[str]):
 
 
 class CCSApp(App):
-    """Textual TUI for Claude Code Session Manager."""
+    """Textual TUI for Coding CLI Session Manager."""
 
     CSS = DEFAULT_CSS  # from part2.py
 
@@ -3863,7 +3863,7 @@ class CCSApp(App):
             with info_scroll:
                 yield InfoPane(id="info-pane")
             tmux_pane = TmuxPane(id="tmux-pane")
-            tmux_pane.border_title = "Claude Preview"
+            tmux_pane.border_title = "Session Preview"
             yield tmux_pane
         yield FooterBar(id="footer")
 
@@ -5037,7 +5037,7 @@ class CCSApp(App):
         self._set_status("Refreshed session list")
 
     def action_rescan(self):
-        """Full rescan: clear caches and rediscover all Claude sessions."""
+        """Full rescan: clear caches and rediscover all sessions."""
         def on_result(text):
             if text and text.strip() == "SCAN":
                 prev_count = len(self.sessions)
@@ -5068,7 +5068,7 @@ class CCSApp(App):
 
         self.push_screen(
             SimpleInputModal(
-                "Rescan all Claude sessions?\n\n"
+                "Rescan all sessions?\n\n"
                 "This will clear all caches and re-read every session file.\n"
                 "Empty sessions will be deleted.\n"
                 "Type SCAN to confirm:",
@@ -5279,7 +5279,7 @@ class CCSApp(App):
             self.push_screen(
                 SimpleInputModal(
                     f"Delete {count} marked sessions?\n\n"
-                    "WARNING: This permanently deletes the Claude session data.\n"
+                    "WARNING: This permanently deletes the session data.\n"
                     "Type DELETE to confirm:",
                     placeholder="Type DELETE to confirm",
                 ),
@@ -5309,7 +5309,7 @@ class CCSApp(App):
         self.push_screen(
             SimpleInputModal(
                 f"Delete '{label}'?\n\n"
-                "WARNING: This permanently deletes the Claude session data.\n"
+                "WARNING: This permanently deletes the session data.\n"
                 "This cannot be recovered." + tmux_warning + "\n"
                 "Type DELETE to confirm:",
                 placeholder="Type DELETE to confirm",
@@ -5405,7 +5405,7 @@ class CCSApp(App):
             ConfirmModal(
                 "Kill Tmux",
                 f"Kill tmux session for '{label}'?",
-                "The Claude session data is preserved and can be resumed later.",
+                "The session data is preserved and can be resumed later.",
                 color_style="warning",
             ),
             on_result,
@@ -5739,7 +5739,7 @@ def cmd_providers(mgr: SessionManager):
 
 
 def cmd_help():
-    print("""\033[1;36m◆ ccs — Claude Code Session Manager\033[0m
+    print("""\033[1;36m◆ ccs — Coding CLI Session Manager\033[0m
 
 \033[1mUsage:\033[0m
   ccs                                    Interactive TUI
@@ -5794,7 +5794,7 @@ Press ? in the TUI for keybindings help.\033[0m""")
 
 
 def cmd_scan(mgr: SessionManager, dry_run: bool = False):
-    """Full rescan: clear caches and rediscover all Claude sessions."""
+    """Full rescan: clear caches and rediscover all sessions."""
     if dry_run:
         cmd_scan_dry_run(mgr)
         return
@@ -5979,7 +5979,7 @@ def cmd_delete_session(mgr: SessionManager, query: str):
     s = _find_session(mgr, query)
     label = s.tag or s.label[:40] or s.id[:12]
     print(f"\033[1;31mDelete '{label}'?\033[0m")
-    print("\033[33mWARNING: This permanently deletes the Claude session data and cannot be recovered.\033[0m")
+    print("\033[33mWARNING: This permanently deletes the session data and cannot be recovered.\033[0m")
     print("Type DELETE to confirm: ", end="", flush=True)
     try:
         answer = input().strip()
