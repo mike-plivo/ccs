@@ -727,6 +727,9 @@ class CLIProvider(abc.ABC):
     def build_args_from_profile(self, profile: dict) -> list:
         """Build CLI args from a profile dict."""
 
+    def resolve_binary(self) -> str:
+        return shutil.which(self.binary) or self.binary
+
     @abc.abstractmethod
     def delete_session_files(self, session: Session) -> None:
         """Delete the session's data files."""
@@ -1027,8 +1030,17 @@ class OpencodeProvider(CLIProvider):
     display_name = "opencode"
     binary = "opencode"
 
+    def resolve_binary(self) -> str:
+        found = shutil.which(self.binary)
+        if found:
+            return found
+        candidate = Path.home() / ".opencode" / "bin" / "opencode"
+        if candidate.exists():
+            return str(candidate)
+        return self.binary
+
     def is_available(self) -> bool:
-        return OPENCODE_DB.exists() or shutil.which("opencode") is not None
+        return OPENCODE_DB.exists() or self.resolve_binary() != self.binary
 
     def _get_db(self) -> Optional[sqlite3.Connection]:
         if not OPENCODE_DB.exists():
@@ -1139,10 +1151,10 @@ class OpencodeProvider(CLIProvider):
         return msgs
 
     def build_resume_cmd(self, session_id: str, extra_args: list) -> list:
-        return ["opencode", "-s", session_id] + extra_args
+        return [self.resolve_binary(), "-s", session_id] + extra_args
 
     def build_new_cmd(self, session_id: str, extra_args: list) -> list:
-        return ["opencode"] + extra_args
+        return [self.resolve_binary()] + extra_args
 
     def build_args_from_profile(self, profile: dict) -> list:
         expert = profile.get("expert_args", "").strip()
@@ -5623,10 +5635,10 @@ def cmd_providers(mgr: SessionManager):
     for name in ("claude", "codex", "opencode"):
         provider = mgr.get_provider(name)
         if provider:
-            binary = provider.binary
-            has_bin = shutil.which(binary) is not None
+            resolved = provider.resolve_binary()
+            has_bin = resolved != provider.binary or shutil.which(provider.binary) is not None
             status = "\033[1;32mavailable\033[0m" if has_bin else "\033[1;33msessions only\033[0m"
-            print(f"  {CLI_BADGES[name]} {provider.display_name:<12s} binary={binary:<12s} {status}")
+            print(f"  {CLI_BADGES[name]} {provider.display_name:<12s} binary={resolved:<30s} {status}")
         else:
             print(f"  {CLI_BADGES[name]} {CLI_NAMES[name]:<12s} \033[2mnot detected\033[0m")
 
