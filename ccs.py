@@ -5331,74 +5331,101 @@ class CCSApp(App):
             on_result,
         )
 
+    def _cli_choice_items(self) -> list:
+        """Build CLI choice items from available providers."""
+        items = []
+        for cid, prov in sorted(self.mgr.providers.items()):
+            badge = CLI_BADGES.get(cid, "[?]")
+            items.append((f"{badge} {prov.display_name}", cid))
+        return items
+
     def action_new_session(self):
         if self.view != "sessions":
             return
-        cli = self._active_profile_cli()
 
-        def on_path(path, name):
-            path = path.strip() if path else ""
-            if path and not os.path.isdir(os.path.expanduser(path)):
-                self._set_status(f"Directory not found: {path}")
-                return
-            use_tmux = self._get_use_tmux()
-            if use_tmux:
-                if not HAS_TMUX:
-                    self._set_status("tmux is not installed")
+        def _start_new(cli):
+            def on_path(path, name):
+                path = path.strip() if path else ""
+                if path and not os.path.isdir(os.path.expanduser(path)):
+                    self._set_status(f"Directory not found: {path}")
                     return
-                extra = self._active_profile_args()
-                cwd = os.path.expanduser(path) if path else None
-                self._tmux_launch_new(name, extra, cwd=cwd, cli=cli)
-                self._do_refresh()
-            else:
-                self.exit_action = ("new", name, cli)
-                self.exit()
+                use_tmux = self._get_use_tmux()
+                if use_tmux:
+                    if not HAS_TMUX:
+                        self._set_status("tmux is not installed")
+                        return
+                    extra = self._active_profile_args(cli=cli)
+                    cwd = os.path.expanduser(path) if path else None
+                    self._tmux_launch_new(name, extra, cwd=cwd, cli=cli)
+                    self._do_refresh()
+                else:
+                    self.exit_action = ("new", name, cli)
+                    self.exit()
 
-        def on_name(name):
-            if name is None:
-                return
-            name = name.strip()
-            if self._get_use_tmux():
-                self.push_screen(
-                    PathInputModal("Project Path", os.getcwd(), "Path (Tab to autocomplete)"),
-                    lambda path: on_path(path, name),
-                )
-            else:
-                self.exit_action = ("new", name, cli)
-                self.exit()
+            def on_name(name):
+                if name is None:
+                    return
+                name = name.strip()
+                if self._get_use_tmux():
+                    self.push_screen(
+                        PathInputModal("Project Path", os.getcwd(), "Path (Tab to autocomplete)"),
+                        lambda path: on_path(path, name),
+                    )
+                else:
+                    self.exit_action = ("new", name, cli)
+                    self.exit()
 
-        self.push_screen(
-            SimpleInputModal("New Session Name", "", "Enter session name (optional)"),
-            on_name,
-        )
+            self.push_screen(
+                SimpleInputModal("New Session Name", "", "Enter session name (optional)"),
+                on_name,
+            )
+
+        items = self._cli_choice_items()
+        if len(items) <= 1:
+            _start_new(items[0][1] if items else "claude")
+        else:
+            def on_cli(cli):
+                if cli:
+                    _start_new(cli)
+            self.push_screen(ContextMenuModal("New Session — Choose CLI", items), on_cli)
 
     def action_ephemeral_session(self):
         if self.view != "sessions":
             return
-        cli = self._active_profile_cli()
-        use_tmux = self._get_use_tmux()
-        if not use_tmux:
-            self.exit_action = ("tmp", cli)
-            self.exit()
-            return
-        if not HAS_TMUX:
-            self._set_status("tmux is not installed")
-            return
 
-        def on_path(path):
-            path = path.strip() if path else ""
-            if path and not os.path.isdir(os.path.expanduser(path)):
-                self._set_status(f"Directory not found: {path}")
+        def _start_ephemeral(cli):
+            use_tmux = self._get_use_tmux()
+            if not use_tmux:
+                self.exit_action = ("tmp", cli)
+                self.exit()
                 return
-            extra = self._active_profile_args()
-            cwd = os.path.expanduser(path) if path else None
-            self._tmux_launch_ephemeral(extra, cwd=cwd, cli=cli)
-            self._do_refresh()
+            if not HAS_TMUX:
+                self._set_status("tmux is not installed")
+                return
 
-        self.push_screen(
-            PathInputModal("Project Path", os.getcwd(), "Path (Tab to autocomplete)"),
-            on_path,
-        )
+            def on_path(path):
+                path = path.strip() if path else ""
+                if path and not os.path.isdir(os.path.expanduser(path)):
+                    self._set_status(f"Directory not found: {path}")
+                    return
+                extra = self._active_profile_args(cli=cli)
+                cwd = os.path.expanduser(path) if path else None
+                self._tmux_launch_ephemeral(extra, cwd=cwd, cli=cli)
+                self._do_refresh()
+
+            self.push_screen(
+                PathInputModal("Project Path", os.getcwd(), "Path (Tab to autocomplete)"),
+                on_path,
+            )
+
+        items = self._cli_choice_items()
+        if len(items) <= 1:
+            _start_ephemeral(items[0][1] if items else "claude")
+        else:
+            def on_cli(cli):
+                if cli:
+                    _start_ephemeral(cli)
+            self.push_screen(ContextMenuModal("Ephemeral Session — Choose CLI", items), on_cli)
 
     def action_search(self):
         if self.view != "sessions":
