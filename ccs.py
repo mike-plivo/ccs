@@ -67,7 +67,7 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.4.0"
+VERSION = "1.4.4"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -1786,7 +1786,7 @@ class HeaderBox(Static):
         text = Text()
 
         # Line 1 -- title
-        title = f" \u25c6 CCS v{VERSION} \u2014 Claude Code Session Manager "
+        title = f" \u25c6 CCS v{VERSION} \u2014 Coding CLI Session Manager "
         text.append(title, style=Style(color=tc("header-color", "#00ffff"), bold=True))
         text.append("\n")
 
