@@ -481,11 +481,24 @@ async def _pty_client_loop(ws):
 
 # ── Synchronous wrappers (for use from ccs.py) ──────────────────────────
 
+# asyncio.run() fails when called from within a running event loop (e.g. the
+# Textual TUI).  Using new_event_loop() + run_until_complete() works from both
+# CLI (no existing loop) and TUI (inside Textual's loop) contexts.
+
+
+def _run_coro(coro):
+    """Run a coroutine from sync context, safe even inside an existing event loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
 
 def sync_scan_all_remotes() -> dict:
     """Synchronous wrapper for scan_all_remotes."""
     try:
-        return asyncio.run(scan_all_remotes())
+        return _run_coro(scan_all_remotes())
     except Exception:
         return {}
 
@@ -493,20 +506,20 @@ def sync_scan_all_remotes() -> dict:
 def sync_scan_remote(remote: dict) -> list:
     """Synchronous wrapper for scan_remote."""
     try:
-        return asyncio.run(scan_remote(remote))
+        return _run_coro(scan_remote(remote))
     except Exception:
         return []
 
 
 def sync_pair_remote(host: str, port: int, code: str, name: str = "") -> dict:
     """Synchronous wrapper for pair_remote."""
-    return asyncio.run(pair_remote(host, port, code, name))
+    return _run_coro(pair_remote(host, port, code, name))
 
 
 def sync_ping_remote(remote: dict) -> bool:
     """Synchronous wrapper for ping_remote."""
     try:
-        return asyncio.run(ping_remote(remote))
+        return _run_coro(ping_remote(remote))
     except Exception:
         return False
 
@@ -514,25 +527,25 @@ def sync_ping_remote(remote: dict) -> bool:
 def sync_kill_remote_session(remote: dict, session_id: str) -> bool:
     """Synchronous wrapper for kill_remote_session."""
     try:
-        return asyncio.run(kill_remote_session(remote, session_id))
+        return _run_coro(kill_remote_session(remote, session_id))
     except Exception:
         return False
 
 
 def sync_attach_remote(remote: dict, session_id: str) -> None:
     """Synchronous wrapper for attach_remote_session."""
-    asyncio.run(attach_remote_session(remote, session_id))
+    _run_coro(attach_remote_session(remote, session_id))
 
 
 def sync_new_remote(remote: dict, cli: str = "claude",
                      args: list = None, cwd: str = None) -> None:
     """Synchronous wrapper for new_remote_session."""
-    asyncio.run(new_remote_session(remote, cli, args, cwd))
+    _run_coro(new_remote_session(remote, cli, args, cwd))
 
 
 def sync_get_session_info(remote: dict, session_id: str, cli: str = "claude") -> list:
     """Synchronous wrapper for get_session_info."""
     try:
-        return asyncio.run(get_session_info(remote, session_id, cli))
+        return _run_coro(get_session_info(remote, session_id, cli))
     except Exception:
         return []
