@@ -77,7 +77,7 @@ except ImportError as e:
     print("Install with: ./install.sh  (or: uv tool install .[remote])")
     sys.exit(1)
 
-VERSION = "1.5.5"
+VERSION = "1.6.0"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
