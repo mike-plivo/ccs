@@ -445,7 +445,7 @@ class SessionManager:
                         remote=rname,
                         remote_host=host_port,
                         msg_count=sd.get("msg_count", 0),
-                        is_subagent=sid.startswith("agent-"),
+                        kind=sd.get("kind", "subagent" if sid.startswith("agent-") else "primary"),
                     ))
                     seen_sids.add(meta_key)
                     # Had sessions, so not offline — remove from offline list
