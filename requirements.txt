@@ -1,3 +1,0 @@
-# ccs - Claude Code Session Manager
-rich
-textual

@@ -35,35 +35,37 @@ CCS auto-detects installed CLIs and their sessions. Each session shows a badge i
 ## Requirements
 
 - Python 3.9+
+- [uv](https://docs.astral.sh/uv/) (Python package manager)
 - At least one supported CLI installed: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), or [opencode](https://github.com/nicholasgriffintn/opencode)
 - Optional: [tmux](https://github.com/tmux/tmux) (for background session management)
 - Optional: [git](https://git-scm.com/) (for repository info in session details)
-- Optional (remote): `websockets`, `PyJWT`, `bcrypt` (for remote server features)
 
 ## Install
 
 ```bash
-# Install dependencies
-pip install textual rich
-
-# Optional: install remote server dependencies
-pip install websockets PyJWT bcrypt
-
-# Clone and install
 git clone https://github.com/mike-plivo/ccs.git
 cd ccs
 ./install.sh
 ```
 
-The install script copies `ccs.py` and the remote modules to `~/.local/bin/` and adds a shell alias. After install, restart your terminal or run `source ~/.zshrc` (or `~/.bashrc`).
+The install script uses `uv tool install` to create an isolated virtualenv with all dependencies (including remote server support). The `ccs` command is added to your PATH automatically.
+
+```bash
+# Minimal install (no remote server dependencies)
+./install.sh --minimal
+
+# Upgrade after git pull
+git pull && ./install.sh
+
+# Uninstall
+uv tool uninstall ccs
+```
 
 ### Manual install
 
 ```bash
-pip install textual rich
-cp ccs.py ccs_protocol.py ccs_remote.py ccs_serve.py ~/.local/bin/
-chmod +x ~/.local/bin/ccs.py
-alias ccs='python3 ~/.local/bin/ccs.py'
+uv tool install .[remote]     # Full install with remote support
+uv tool install .             # Minimal (no remote server deps)
 ```
 
 ## Usage

@@ -74,10 +74,10 @@ try:
     from rich.style import Style
 except ImportError as e:
     print(f"\033[31mError: Missing required dependency: {e}\033[0m")
-    print("Install with: pip install textual rich")
+    print("Install with: ./install.sh  (or: uv tool install .[remote])")
     sys.exit(1)
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
