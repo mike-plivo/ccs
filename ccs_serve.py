@@ -792,7 +792,10 @@ async def handle_connection(ws):
                 await ws.send(json.dumps(ok_msg(pty=True)))
                 await pty_relay(ws, ["tmux", "attach-session", "-t", tmux_name])
                 log(f"\033[33m■ detach\033[0m  {peer}  {sid[:12]}")
-                # After PTY relay ends, connection is still open for more commands
+                # pty_relay cancels its ws recv task, leaving the WebSocket
+                # in a state where the outer loop can't call recv again.
+                # Break out — the client reconnects for new commands.
+                break
 
             elif cmd == CMD_NEW:
                 cli = msg.get("cli", "claude")
@@ -835,7 +838,7 @@ async def handle_connection(ws):
                     await ws.send(json.dumps(ok_msg(pty=True, id=uid)))
                     await pty_relay(ws, ["tmux", "attach-session", "-t", tmux_name])
                     log(f"\033[33m■ detach\033[0m  {peer}  {uid[:12]}")
-                    continue
+                    break  # WebSocket recv state is consumed by pty_relay
                 # If we broke out of the for loop (bad arg), skip to next message
                 continue
 
