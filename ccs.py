@@ -180,6 +180,7 @@ class Session:
     continuation_count: int = 0
     hide_when_collapsed: bool = False
     chain_root: str = ""
+    is_subagent: bool = False
 
     @property
     def meta_key(self) -> str:
@@ -447,6 +448,7 @@ class SessionManager:
                         remote=rname,
                         remote_host=host_port,
                         msg_count=sd.get("msg_count", 0),
+                        is_subagent=sid.startswith("agent-"),
                     ))
                     seen_sids.add(meta_key)
                     # Had sessions, so not offline — remove from offline list
@@ -916,6 +918,7 @@ class ClaudeProvider(CLIProvider):
                 mtime=file_mtime, cli="claude", summaries=sums, path=jp,
                 msg_count=msg_count,
                 is_continuation=is_cont, parent_id=cont_parent,
+                is_subagent=sid.startswith("agent-"),
             ))
         return out
 
@@ -1845,6 +1848,7 @@ class HeaderBox(Static):
     profile_name = reactive("default")
     session_count = reactive(0)
     total_count = reactive(0)
+    hidden_subagents = reactive(0)
     sort_mode = reactive("date")
     search_query = reactive("")
     hints = reactive("")
@@ -1911,6 +1915,11 @@ class HeaderBox(Static):
             info,
             style=Style(color=tc("accent-color", "#00cccc")),
         )
+        if self.hidden_subagents > 0:
+            text.append(
+                f"  (+{self.hidden_subagents} subagent hidden, A to show)",
+                style=Style(color=tc("dim-color", "#888888")),
+            )
         if self.search_query:
             text.append("  \u00b7 Filter: ", style=Style(color=tc("dim-color", "#888888")))
             text.append(
@@ -2572,6 +2581,7 @@ class HelpModal(ModalScreen):
             text.append("  d              Delete session (bulk if marked)\n")
             text.append("  D              Delete all empty sessions\n")
             text.append("  C              Toggle continuations\n")
+            text.append("  A              Toggle subagent sessions\n")
             text.append("  k              Kill tmux session\n")
             text.append("  K              Kill all tmux sessions\n\n")
             text.append("Bulk & Sort\n", style=hdr)
@@ -4179,6 +4189,7 @@ class CCSApp(App):
         self._last_click_idx = -1
         self._last_preview_click = 0.0
         self.show_continuations = False
+        self.show_subagents = False
 
     def compose(self) -> ComposeResult:
         with Container(id="header"):
@@ -4309,6 +4320,9 @@ class CCSApp(App):
             for children in chain_children.values():
                 result.extend(children)
             self.filtered = result
+        # Hide subagent sessions unless toggled on (search always shows all)
+        if not self.show_subagents and not q:
+            self.filtered = [s for s in self.filtered if not s.is_subagent]
 
     def _rebuild_list(self):
         sl = self.query_one("#session-list", SessionListWidget)
@@ -4407,6 +4421,10 @@ class CCSApp(App):
         header.profile_name = self.active_profile_name
         header.session_count = len(self.filtered)
         header.total_count = len(self.sessions)
+        if not self.show_subagents:
+            header.hidden_subagents = sum(1 for s in self.sessions if s.is_subagent)
+        else:
+            header.hidden_subagents = 0
         header.sort_mode = self.sort_mode
         header.search_query = self.search_query
         header.cli_filter = self.cli_filter
@@ -5157,6 +5175,7 @@ class CCSApp(App):
                 ("d   Delete Session", "delete"),
                 ("D   Delete All Empty", "delete_empty"),
                 ("C   Toggle Continuations", "toggle_cont"),
+                ("A   Toggle Subagents", "toggle_subagents"),
                 ("    Archive Continuations", "archive_cont"),
             ]
             if has_tmux:
@@ -5195,6 +5214,7 @@ class CCSApp(App):
                 "delete": self.action_delete_session,
                 "delete_empty": self.action_delete_empty,
                 "toggle_cont": self.action_toggle_continuations,
+                "toggle_subagents": self.action_toggle_subagents,
                 "archive_cont": self.action_archive_continuations,
                 "kill_tmux": self.action_kill_tmux,
                 "kill_all_tmux": self.action_kill_all_tmux,
@@ -5365,6 +5385,8 @@ class CCSApp(App):
             self.action_delete_empty()
         elif key == "C":
             self.action_toggle_continuations()
+        elif key == "A":
+            self.action_toggle_subagents()
         elif key == "k":
             self.action_kill_tmux()
         elif key == "K":
@@ -5810,6 +5832,16 @@ class CCSApp(App):
         self.show_continuations = not self.show_continuations
         label = "shown" if self.show_continuations else "hidden"
         self._set_status(f"Continuations {label}")
+        self._apply_filter()
+        self._rebuild_list()
+
+    def action_toggle_subagents(self):
+        if self.view != "sessions":
+            return
+        self.show_subagents = not self.show_subagents
+        label = "shown" if self.show_subagents else "hidden"
+        total = sum(1 for s in self.sessions if s.is_subagent)
+        self._set_status(f"Subagent sessions {label} ({total} total)")
         self._apply_filter()
         self._rebuild_list()
         self._update_preview()
