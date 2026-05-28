@@ -898,6 +898,17 @@ class ClaudeProvider(CLIProvider):
                 pass
             is_cont = bool(has_cont_text and first_entry_sid and first_entry_sid != sid)
             cont_parent = first_entry_sid if is_cont else ""
+            # Classify session kind (priority: subagent > worktree > continuation > primary)
+            is_subagent = sid.startswith("agent-") or "/subagents/" in str(jp)
+            is_worktree = "--claude-worktrees-" in praw
+            if is_subagent:
+                kind = "subagent"
+            elif is_worktree and not is_cont:
+                kind = "worktree"
+            elif is_cont:
+                kind = "continuation"
+            else:
+                kind = "primary"
             if msg_count == 0:
                 try:
                     age = time.time() - os.path.getmtime(jp)
@@ -914,8 +925,7 @@ class ClaudeProvider(CLIProvider):
                 tag=tag, pinned=pinned,
                 mtime=file_mtime, cli="claude", summaries=sums, path=jp,
                 msg_count=msg_count,
-                is_continuation=is_cont, parent_id=cont_parent,
-                is_subagent=sid.startswith("agent-"),
+                kind=kind, parent_id=cont_parent,
             ))
         return out
 
