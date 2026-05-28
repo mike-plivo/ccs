@@ -26,6 +26,16 @@ Usage:
     ccs tmux attach <name>                 Attach to tmux session
     ccs tmux kill <name>                   Kill a tmux session
     ccs tmux kill --all                    Kill all tmux sessions
+    ccs remote add <name> <host:port> --pair <code>   Pair with remote server
+    ccs remote list                        List configured remotes
+    ccs remote remove <name>               Remove a remote
+    ccs remote test <name>                 Test remote connectivity
+    ccs remote enable/disable <name>       Toggle remote
+    ccs remote repin <name>                Re-pin TLS fingerprint
+    ccs serve [--port 7433] [--bind 0.0.0.0]   Start remote server
+    ccs serve pair                         Generate new pairing code
+    ccs serve clients                      List paired clients
+    ccs serve revoke <client_id|--all>     Revoke client(s)
     ccs help                               Show help
 """
 
@@ -67,7 +77,7 @@ except ImportError as e:
     print("Install with: pip install textual rich")
     sys.exit(1)
 
-VERSION = "1.4.7"
+VERSION = "1.5.0"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -160,6 +170,8 @@ class Session:
     pinned: bool
     mtime: float
     cli: str = "claude"
+    remote: str = ""          # empty for local, "dev1" for remote
+    remote_host: str = ""     # "host:port" for connection
     summaries: List[str] = field(default_factory=list)
     path: str = ""
     msg_count: int = 0
@@ -168,6 +180,11 @@ class Session:
     continuation_count: int = 0
     hide_when_collapsed: bool = False
     chain_root: str = ""
+
+    @property
+    def meta_key(self) -> str:
+        """Key used in sessions.json metadata. Prefixed with remote name for remote sessions."""
+        return f"{self.remote}:{self.id}" if self.remote else self.id
 
     @property
     def ts(self) -> str:
@@ -399,14 +416,65 @@ class SessionManager:
                     out.append(s)
             except Exception:
                 pass
+        # Scan remote servers
+        self._offline_remotes: List[str] = []
+        try:
+            from ccs_remote import sync_scan_all_remotes, load_remotes
+            remote_results = sync_scan_all_remotes()
+            remotes_cfg = {r["name"]: r for r in load_remotes()}
+            for rname, sessions_data in remote_results.items():
+                if not sessions_data:
+                    # Could be offline or just no sessions — track as potentially offline
+                    self._offline_remotes.append(rname)
+                rcfg = remotes_cfg.get(rname, {})
+                host_port = f"{rcfg.get('host', '')}:{rcfg.get('port', '')}"
+                for sd in sessions_data:
+                    sid = sd.get("id", "")
+                    meta_key = f"{rname}:{sid}"
+                    sm = meta.get(meta_key, {})
+                    out.append(Session(
+                        id=sid,
+                        project_raw=sd.get("project", ""),
+                        project_display=sd.get("project", ""),
+                        summary=sd.get("summary", ""),
+                        first_msg=sd.get("first_msg", ""),
+                        first_msg_long=sd.get("first_msg", ""),
+                        last_msg=sd.get("last_msg", ""),
+                        tag=sm.get("tag", ""),
+                        pinned=sm.get("pinned", False),
+                        mtime=sd.get("mtime", 0),
+                        cli=sd.get("cli", "claude"),
+                        remote=rname,
+                        remote_host=host_port,
+                        msg_count=sd.get("msg_count", 0),
+                    ))
+                    seen_sids.add(meta_key)
+                    # Had sessions, so not offline — remove from offline list
+                    if rname in self._offline_remotes:
+                        self._offline_remotes.remove(rname)
+        except ImportError:
+            pass
+        except Exception:
+            pass
         # Prune metadata entries for sessions no longer on disk
         orphaned = [sid for sid in meta if sid not in seen_sids]
         if orphaned:
             for sid in orphaned:
                 meta.pop(sid)
             self._save_meta(meta)
-        out.sort(key=lambda s: s.get_sort_key(sort_mode))
-        return out
+        # Sort: local first, then remote grouped by host name, within each group by sort_mode
+        local = [s for s in out if not s.remote]
+        remote_by_host: Dict[str, List[Session]] = {}
+        for s in out:
+            if s.remote:
+                remote_by_host.setdefault(s.remote, []).append(s)
+        local.sort(key=lambda s: s.get_sort_key(sort_mode))
+        result = list(local)
+        for rname in sorted(remote_by_host.keys()):
+            group = remote_by_host[rname]
+            group.sort(key=lambda s: s.get_sort_key(sort_mode))
+            result.extend(group)
+        return result
 
     @staticmethod
     def build_continuation_chains(sessions: List["Session"]) -> None:
@@ -1898,6 +1966,26 @@ def _age_style(app, mtime: float) -> Style:
     return Style(color=tc("age-old", "#666666"), dim=True)
 
 
+def _build_remote_separator(app, remote_name: str, offline: bool = False) -> Text:
+    """Build a separator row for a remote host group in the session list."""
+    tc = lambda role, fb="": _tc(app, role, fb)
+    text = Text()
+    label = f" {remote_name} "
+    if offline:
+        label = f" {remote_name} (offline) "
+    sep_char = "─"
+    pad_left = 2
+    pad_right = max(0, 80 - pad_left - len(label))
+    sep_style = Style(color=tc("dim-color", "#555555"))
+    label_style = Style(color=tc("header-color", "#00ffff"), bold=True)
+    if offline:
+        label_style = Style(color=tc("dim-color", "#888888"), bold=True)
+    text.append(sep_char * pad_left, style=sep_style)
+    text.append(label, style=label_style)
+    text.append(sep_char * pad_right, style=sep_style)
+    return text
+
+
 def build_session_row(
     app,
     s: Session,
@@ -2009,6 +2097,25 @@ class SessionListWidget(OptionList):
     # Disable built-in OptionList bindings — all key routing done in CCSApp.on_key
     BINDINGS = []
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Maps OptionList index → index into self.filtered (sessions list)
+        self._opt_to_session: Dict[int, int] = {}
+        # Maps session index → OptionList index
+        self._session_to_opt: Dict[int, int] = {}
+
+    def session_index_for_highlighted(self) -> Optional[int]:
+        """Return the session-list index for the currently highlighted option."""
+        if self.highlighted is None:
+            return None
+        return self._opt_to_session.get(self.highlighted)
+
+    def highlight_session_index(self, session_idx: int):
+        """Highlight the OptionList row corresponding to a session index."""
+        opt_idx = self._session_to_opt.get(session_idx)
+        if opt_idx is not None:
+            self.highlighted = opt_idx
+
     def rebuild(
         self,
         sessions: list,
@@ -2017,6 +2124,7 @@ class SessionListWidget(OptionList):
         tmux_claude_state: dict,
         marked: set,
         show_continuations: bool = False,
+        offline_remotes: list = None,
     ):
         """Clear and rebuild the option list from *sessions*."""
         # Compute tag column width (widest displayed tag + padding)
@@ -2031,7 +2139,22 @@ class SessionListWidget(OptionList):
                     max_tag_w = tw
 
         self.clear_options()
-        for s in sessions:
+        self._opt_to_session = {}
+        self._session_to_opt = {}
+        opt_idx = 0
+        # Track current remote group for separator rows
+        current_remote = None  # None = not started, "" = local
+        seen_remotes = set()
+        for si, s in enumerate(sessions):
+            # Insert separator row when remote group changes
+            if s.remote != current_remote:
+                if s.remote:
+                    # Remote separator: ── dev1 ──
+                    sep = _build_remote_separator(self.app, s.remote)
+                    self.add_option(Option(sep, id=f"__sep_{s.remote}__", disabled=True))
+                    opt_idx += 1
+                    seen_remotes.add(s.remote)
+                current_remote = s.remote
             has_tmux = s.id in tmux_sids
             is_idle = s.id in tmux_idle
             tmux_state = tmux_claude_state.get(s.id)
@@ -2041,6 +2164,16 @@ class SessionListWidget(OptionList):
                 is_marked, max_tag_w, show_continuations,
             )
             self.add_option(Option(row, id=s.id))
+            self._opt_to_session[opt_idx] = si
+            self._session_to_opt[si] = opt_idx
+            opt_idx += 1
+        # Add offline remote separators at the end
+        if offline_remotes:
+            for rname in sorted(offline_remotes):
+                if rname not in seen_remotes:
+                    sep = _build_remote_separator(self.app, rname, offline=True)
+                    self.add_option(Option(sep, id=f"__sep_{rname}__", disabled=True))
+                    opt_idx += 1
 
 
 # ── Session metadata helper ──────────────────────────────────────────
@@ -2094,6 +2227,13 @@ def _append_session_meta(
         f"  Project: {s.project_display}\n",
         style=Style(color=tc("project-color", "#cc00cc")),
     )
+
+    # Remote host
+    if s.remote:
+        text.append(
+            f"  Remote:  {s.remote} ({s.remote_host})\n",
+            style=Style(color=tc("header-color", "#00ffff"), bold=True),
+        )
 
     # Modified timestamp with age coloring
     if app:
@@ -2436,10 +2576,14 @@ class HelpModal(ModalScreen):
             text.append("  Space          Mark / unmark session\n")
             text.append("  u              Unmark all\n")
             text.append("  s              Cycle sort mode\n")
-            text.append("  /              Search / filter sessions\n\n")
+            text.append("  F              Cycle CLI filter\n")
+            text.append("  /              Search / filter sessions\n")
+            text.append("                 @host filter (e.g. @dev1, @local)\n\n")
             text.append("Sessions\n", style=hdr)
             text.append("  n              Create a new named session\n")
             text.append("  e              Start an ephemeral session\n\n")
+            text.append("Remote\n", style=hdr)
+            text.append("  R              Manage remote servers\n\n")
             text.append("Other\n", style=hdr)
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
@@ -3355,6 +3499,194 @@ class ProfilesModal(ModalScreen[str]):
                 self._refresh_display()
 
 
+class RemotesModal(ModalScreen[str]):
+    """Remote server manager modal — list, toggle, test, remove remotes."""
+
+    DEFAULT_CSS = """
+    RemotesModal {
+        align: center middle;
+        background: $background 25%;
+    }
+    #remotes-box {
+        width: 76;
+        height: auto;
+        max-height: 80%;
+        border: heavy $accent;
+        background: $surface;
+        padding: 2 3;
+    }
+    #remotes-title { text-align: center; }
+    #remotes-list-text { height: auto; }
+    #remotes-hints { margin-top: 1; }
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.cur = 0
+        self._delete_pending = False
+        self._testing = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="remotes-box"):
+            yield Static(id="remotes-title")
+            yield Static(id="remotes-list-text")
+            yield Static(id="remotes-hints")
+
+    def on_mount(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        title = Text("Remote Servers", style=Style(color=tc("header-color", "#00ffff"), bold=True))
+        self.query_one("#remotes-title", Static).update(title)
+        self._refresh_display()
+
+    def _get_remotes(self) -> list:
+        try:
+            from ccs_remote import load_remotes
+            return load_remotes()
+        except ImportError:
+            return []
+
+    def _refresh_display(self):
+        tc = lambda role, fb="": _tc(self.app, role, fb)
+        sel_style = Style(color=tc("header-color", "#00ffff"), bold=True, reverse=True)
+        dim_style = Style(color=tc("dim-color", "#888888"))
+        ok_style = Style(color=tc("tag-color", "#00ff00"), bold=True)
+        off_style = Style(color=tc("warn-color", "#ff4444"))
+        warn_style = Style(color=tc("warn-color", "#ff4444"), bold=True)
+
+        remotes = self._get_remotes()
+        text = Text()
+        if not remotes:
+            text.append("No remote servers configured.\n", style=dim_style)
+            text.append("Use 'ccs remote add <name> <host:port> --pair <code>' to add one.", style=dim_style)
+        else:
+            for i, r in enumerate(remotes):
+                name = r.get("name", "?")
+                host = r.get("host", "?")
+                port = r.get("port", 7433)
+                enabled = r.get("enabled", True)
+                is_sel = (i == self.cur)
+
+                prefix = " ▸ " if is_sel else "   "
+                status = "✓ enabled" if enabled else "✗ disabled"
+                status_sty = ok_style if enabled else off_style
+                line_info = f"{host}:{port}"
+
+                if is_sel:
+                    full = f"{prefix}{name:<16s} {line_info:<24s} {status}"
+                    text.append(full, style=sel_style)
+                else:
+                    text.append(prefix)
+                    text.append(f"{name:<16s} ", style=ok_style)
+                    text.append(f"{line_info:<24s} ", style=dim_style)
+                    text.append(status, style=status_sty)
+                if i < len(remotes) - 1:
+                    text.append("\n")
+
+        self.query_one("#remotes-list-text", Static).update(text)
+
+        # Hints
+        if self._delete_pending:
+            rname = remotes[self.cur].get("name", "?") if remotes and self.cur < len(remotes) else "?"
+            hints = Text(f"Remove '{rname}'? y/N", style=warn_style, justify="center")
+        elif self._testing:
+            hints = Text("Testing connection...", style=dim_style, justify="center")
+        else:
+            hints = Text("⏎ Toggle  t Test  d Remove  Esc Back",
+                         style=dim_style, justify="center")
+        self.query_one("#remotes-hints", Static).update(hints)
+
+    def on_click(self, event):
+        if self._delete_pending:
+            return
+        try:
+            box = self.query_one("#remotes-box")
+            if not box.region.contains(event.screen_x, event.screen_y):
+                self.dismiss(None)
+        except Exception:
+            self.dismiss(None)
+
+    def on_key(self, event):
+        key = event.key
+        event.stop()
+        event.prevent_default()
+        remotes = self._get_remotes()
+        n = len(remotes)
+
+        if self._delete_pending:
+            if key in ("y", "Y"):
+                name = remotes[self.cur].get("name", "") if self.cur < n else ""
+                if name:
+                    try:
+                        from ccs_remote import remove_remote
+                        remove_remote(name)
+                    except Exception:
+                        pass
+                self._delete_pending = False
+                if self.cur >= len(self._get_remotes()):
+                    self.cur = max(0, self.cur - 1)
+                self._refresh_display()
+                self.dismiss("refresh")
+            elif key in ("n", "N", "escape"):
+                self._delete_pending = False
+                self._refresh_display()
+            return
+
+        if key in ("escape",):
+            self.dismiss(None)
+        elif key == "down":
+            if self.cur < n - 1:
+                self.cur += 1
+                self._refresh_display()
+        elif key == "up":
+            if self.cur > 0:
+                self.cur -= 1
+                self._refresh_display()
+        elif key in ("enter", "return"):
+            # Toggle enabled/disabled
+            if self.cur < n:
+                name = remotes[self.cur].get("name", "")
+                enabled = remotes[self.cur].get("enabled", True)
+                if name:
+                    try:
+                        from ccs_remote import set_remote_enabled
+                        set_remote_enabled(name, not enabled)
+                    except Exception:
+                        pass
+                    self._refresh_display()
+                    self.dismiss("refresh")
+        elif key == "t":
+            # Test connectivity
+            if self.cur < n:
+                self._testing = True
+                self._refresh_display()
+                remote = remotes[self.cur]
+                try:
+                    from ccs_remote import sync_ping_remote
+                    ok = sync_ping_remote(remote)
+                except Exception:
+                    ok = False
+                self._testing = False
+                if ok:
+                    # Show success in hints briefly
+                    tc = lambda role, fb="": _tc(self.app, role, fb)
+                    self.query_one("#remotes-hints", Static).update(
+                        Text(f"✓ {remote.get('name', '?')} is reachable",
+                             style=Style(color=tc("tag-color", "#00ff00"), bold=True),
+                             justify="center")
+                    )
+                else:
+                    tc = lambda role, fb="": _tc(self.app, role, fb)
+                    self.query_one("#remotes-hints", Static).update(
+                        Text(f"✗ {remote.get('name', '?')} is unreachable",
+                             style=Style(color=tc("warn-color", "#ff4444"), bold=True),
+                             justify="center")
+                    )
+        elif key == "d":
+            if self.cur < n:
+                self._delete_pending = True
+                self._refresh_display()
+
+
 class ProfileEditModal(ModalScreen[dict]):
     """Profile editor with text-based rendering and full key navigation."""
 
@@ -3931,15 +4263,28 @@ class CCSApp(App):
         base = list(self.sessions)
         if self.cli_filter:
             base = [s for s in base if s.cli == self.cli_filter]
-        if not q:
+        # Handle @host filter
+        host_filter = ""
+        text_q = q
+        if q.startswith("@"):
+            parts = q.split(None, 1)
+            host_filter = parts[0][1:]  # Remove @
+            text_q = parts[1] if len(parts) > 1 else ""
+        if host_filter:
+            if host_filter == "local":
+                base = [s for s in base if not s.remote]
+            else:
+                base = [s for s in base if s.remote.lower() == host_filter]
+        if not text_q:
             self.filtered = base
         else:
             self.filtered = [
                 s for s in base
-                if q in (s.tag or "").lower()
-                or q in (s.label or "").lower()
-                or q in s.project_display.lower()
-                or q in s.id.lower()
+                if text_q in (s.tag or "").lower()
+                or text_q in (s.label or "").lower()
+                or text_q in s.project_display.lower()
+                or text_q in s.id.lower()
+                or text_q in s.remote.lower()
             ]
         # Hide chain members unless toggled on (search always shows all)
         if not self.show_continuations and not q:
@@ -3966,8 +4311,9 @@ class CCSApp(App):
         sl = self.query_one("#session-list", SessionListWidget)
         # Preserve current selection across rebuild
         prev_id = None
-        if sl.highlighted is not None and sl.highlighted < len(self.filtered):
-            prev_id = self.filtered[sl.highlighted].id
+        si = sl.session_index_for_highlighted()
+        if si is not None and si < len(self.filtered):
+            prev_id = self.filtered[si].id
         elif sl.highlighted is not None:
             # Try to get the option ID from the OptionList
             try:
@@ -3975,6 +4321,7 @@ class CCSApp(App):
                 prev_id = opt.id
             except Exception:
                 pass
+        offline = getattr(self.mgr, '_offline_remotes', [])
         sl.rebuild(
             self.filtered,
             self.tmux_sids,
@@ -3982,6 +4329,7 @@ class CCSApp(App):
             self.tmux_claude_state,
             self.marked,
             self.show_continuations,
+            offline_remotes=offline,
         )
         # Update column header
         max_tag_w = 0
@@ -4001,14 +4349,14 @@ class CCSApp(App):
         if prev_id is not None:
             for i, s in enumerate(self.filtered):
                 if s.id == prev_id:
-                    sl.highlighted = i
+                    sl.highlight_session_index(i)
                     break
             else:
                 # Session no longer in list; select first if available
                 if self.filtered:
-                    sl.highlighted = 0
+                    sl.highlight_session_index(0)
         elif self.filtered:
-            sl.highlighted = 0
+            sl.highlight_session_index(0)
         self._update_footer()
 
     def _update_preview(self):
@@ -4081,8 +4429,9 @@ class CCSApp(App):
 
     def _current_session(self):
         sl = self.query_one("#session-list", SessionListWidget)
-        if sl.highlighted is not None and sl.highlighted < len(self.filtered):
-            return self.filtered[sl.highlighted]
+        si = sl.session_index_for_highlighted()
+        if si is not None and si < len(self.filtered):
+            return self.filtered[si]
         return None
 
     def _set_status(self, msg, ttl=5):
@@ -4509,6 +4858,62 @@ class CCSApp(App):
         )
         self._tmux_attach(tmux_name, uid)
 
+    # -- Remote session operations -----------------------------------------
+
+    def _get_remote_cfg(self, remote_name: str) -> Optional[dict]:
+        """Look up remote config by name."""
+        try:
+            from ccs_remote import get_remote
+            return get_remote(remote_name)
+        except ImportError:
+            return None
+
+    def _remote_attach(self, s: Session):
+        """Attach to a remote session via WebSocket PTY relay."""
+        remote = self._get_remote_cfg(s.remote)
+        if not remote:
+            self._set_status(f"Remote '{s.remote}' not found in config")
+            return
+        try:
+            from ccs_remote import sync_attach_remote
+            with self.suspend():
+                sync_attach_remote(remote, s.id)
+        except Exception as e:
+            self._set_status(f"Remote attach failed: {e}")
+        self._do_refresh(force=True)
+
+    def _remote_new_session(self, remote_name: str, cli: str = "claude",
+                            args: list = None, cwd: str = None):
+        """Create a new session on a remote server and attach."""
+        remote = self._get_remote_cfg(remote_name)
+        if not remote:
+            self._set_status(f"Remote '{remote_name}' not found in config")
+            return
+        try:
+            from ccs_remote import sync_new_remote
+            with self.suspend():
+                sync_new_remote(remote, cli=cli, args=args, cwd=cwd)
+        except Exception as e:
+            self._set_status(f"Remote new session failed: {e}")
+        self._do_refresh(force=True)
+
+    def _remote_kill(self, s: Session):
+        """Kill a remote tmux session."""
+        remote = self._get_remote_cfg(s.remote)
+        if not remote:
+            self._set_status(f"Remote '{s.remote}' not found in config")
+            return
+        try:
+            from ccs_remote import sync_kill_remote_session
+            ok = sync_kill_remote_session(remote, s.id)
+            if ok:
+                self._set_status(f"Killed remote session on {s.remote}")
+            else:
+                self._set_status(f"Failed to kill remote session on {s.remote}")
+        except Exception as e:
+            self._set_status(f"Remote kill failed: {e}")
+        self._do_refresh(force=True)
+
     def _active_profile(self) -> Optional[dict]:
         profiles = self.mgr.load_profiles()
         return next(
@@ -4603,9 +5008,12 @@ class CCSApp(App):
             ("Toggle Pin", "pin"),
             ("Set Tag", "tag"),
         ]
-        if s.id in self.tmux_sids:
+        if s.remote:
+            items.append(("Kill Remote Session", "kill_tmux"))
+        elif s.id in self.tmux_sids:
             items.append(("Kill Tmux", "kill_tmux"))
-        items.append(("Delete Session", "delete"))
+        if not s.remote:
+            items.append(("Delete Session", "delete"))
 
         def on_result(action):
             if action == "launch":
@@ -4886,24 +5294,53 @@ class CCSApp(App):
             return
 
         # ── Sessions view keys ───────────────────────────────────
+        def _skip_disabled(idx, direction=1):
+            """Skip disabled (separator) options in the given direction."""
+            n = sl.option_count
+            while 0 <= idx < n:
+                try:
+                    opt = sl.get_option_at_index(idx)
+                    if not opt.disabled:
+                        return idx
+                except Exception:
+                    return idx
+                idx += direction
+            return None
+
         if key == "up":
             if sl.highlighted is not None and sl.highlighted > 0:
-                sl.highlighted -= 1
+                target = _skip_disabled(sl.highlighted - 1, -1)
+                if target is not None:
+                    sl.highlighted = target
         elif key == "down":
             if sl.highlighted is not None and sl.highlighted < sl.option_count - 1:
-                sl.highlighted += 1
+                target = _skip_disabled(sl.highlighted + 1, 1)
+                if target is not None:
+                    sl.highlighted = target
         elif key == "g":
             if sl.option_count > 0:
-                sl.highlighted = 0
+                target = _skip_disabled(0, 1)
+                if target is not None:
+                    sl.highlighted = target
         elif key == "G":
             if sl.option_count > 0:
-                sl.highlighted = sl.option_count - 1
+                target = _skip_disabled(sl.option_count - 1, -1)
+                if target is not None:
+                    sl.highlighted = target
         elif key == "pageup":
             if sl.highlighted is not None:
-                sl.highlighted = max(0, sl.highlighted - 20)
+                target = _skip_disabled(max(0, sl.highlighted - 20), -1)
+                if target is None:
+                    target = _skip_disabled(max(0, sl.highlighted - 20), 1)
+                if target is not None:
+                    sl.highlighted = target
         elif key == "pagedown":
             if sl.highlighted is not None:
-                sl.highlighted = min(sl.option_count - 1, sl.highlighted + 20)
+                target = _skip_disabled(min(sl.option_count - 1, sl.highlighted + 20), 1)
+                if target is None:
+                    target = _skip_disabled(min(sl.option_count - 1, sl.highlighted + 20), -1)
+                if target is not None:
+                    sl.highlighted = target
         elif key == "enter":
             self.action_launch()
         elif key == "space":
@@ -4934,6 +5371,8 @@ class CCSApp(App):
             self.action_cycle_sort()
         elif key == "F":
             self.action_cycle_cli_filter()
+        elif key == "R":
+            self.action_remotes()
         elif key == "i":
             self.action_send_input()
         elif key == "slash":
@@ -4985,6 +5424,14 @@ class CCSApp(App):
         self.push_screen(
             ProfilesModal(self.mgr, self.active_profile_name), on_result
         )
+
+    def action_remotes(self):
+        if self.view != "sessions":
+            return
+        def on_result(result):
+            if result == "refresh":
+                self._do_refresh(force=True)
+        self.push_screen(RemotesModal(), on_result)
 
     def _open_profile_editor(self, profile):
         def on_result(result):
@@ -5129,6 +5576,11 @@ class CCSApp(App):
             return
         label = s.tag or s.label[:40] or s.id[:12]
 
+        # Remote session \u2014 attach via WebSocket
+        if s.remote:
+            self._remote_attach(s)
+            return
+
         def _do_launch(extra, choice):
             if choice == "tmux":
                 self._tmux_launch(s, extra)
@@ -5217,7 +5669,7 @@ class CCSApp(App):
             return
         s = self._current_session()
         if s:
-            pinned = self.mgr.toggle_pin(s.id)
+            pinned = self.mgr.toggle_pin(s.meta_key)
             icon = "\u2605 Pinned" if pinned else "Unpinned"
             self._set_status(f"{icon}: {s.tag or s.id[:12]}")
             self._do_refresh()
@@ -5229,7 +5681,7 @@ class CCSApp(App):
 
         def on_result(tag):
             if tag:
-                self.mgr.set_tag(s.id, tag)
+                self.mgr.set_tag(s.meta_key, tag)
                 self._set_status(f"Tagged: [{tag[:10]}]")
                 self._do_refresh()
 
@@ -5243,7 +5695,7 @@ class CCSApp(App):
         if not s:
             return
         if s.tag:
-            self.mgr.remove_tag(s.id)
+            self.mgr.remove_tag(s.meta_key)
             self._set_status(f"Removed tag from: {s.id[:12]}")
             self._do_refresh()
         else:
@@ -5266,6 +5718,8 @@ class CCSApp(App):
                     deleted = 0
                     for s in list(self.sessions):
                         if s.id in self.marked:
+                            if s.remote:
+                                continue  # Can't delete remote sessions
                             self._kill_tmux_for_session(s.id)
                             self.mgr.delete(s)
                             self._remove_ephemeral_id(s.id)
@@ -5288,6 +5742,9 @@ class CCSApp(App):
             return
         s = self._current_session()
         if not s:
+            return
+        if s.remote:
+            self._set_status("Use 'k' to kill remote sessions")
             return
         label = s.tag or s.label[:40] or s.id[:12]
 
@@ -5382,6 +5839,24 @@ class CCSApp(App):
         s = self._current_session()
         if not s:
             return
+        label = s.tag or s.id[:12]
+
+        # Remote session kill
+        if s.remote:
+            def on_remote_kill(confirmed):
+                if confirmed:
+                    self._remote_kill(s)
+            self.push_screen(
+                ConfirmModal(
+                    "Kill Remote Session",
+                    f"Kill session '{label}' on {s.remote}?",
+                    "The session will be terminated on the remote server.",
+                    color_style="warning",
+                ),
+                on_remote_kill,
+            )
+            return
+
         if not HAS_TMUX:
             self._set_status("tmux is not installed")
             return
@@ -5389,7 +5864,6 @@ class CCSApp(App):
             self._set_status("No active tmux session for this session")
             return
         tmux_name = TMUX_PREFIX + s.id
-        label = s.tag or s.id[:12]
 
         def on_result(confirmed):
             if confirmed:
@@ -5495,7 +5969,19 @@ class CCSApp(App):
         if self.view != "sessions":
             return
 
-        def _start_new(cli):
+        def _start_new(cli, remote_name=None):
+            if remote_name:
+                # Remote new session — just need optional cwd
+                def on_remote_path(path):
+                    path = path.strip() if path else ""
+                    cwd = path if path else None
+                    self._remote_new_session(remote_name, cli=cli, cwd=cwd)
+                self.push_screen(
+                    PathInputModal("Remote Project Path", "", "Remote path (optional)"),
+                    on_remote_path,
+                )
+                return
+
             def _launch_with_args(extra, name, cwd):
                 use_tmux = self._get_use_tmux()
                 if use_tmux:
@@ -5533,13 +6019,37 @@ class CCSApp(App):
                 on_name,
             )
 
+        def _pick_target(cli):
+            """Choose where to create: local or a remote server."""
+            try:
+                from ccs_remote import load_remotes
+                remotes = [r for r in load_remotes() if r.get("enabled", True)]
+            except ImportError:
+                remotes = []
+            if not remotes:
+                _start_new(cli)
+                return
+            items = [("Local", "__local__")]
+            for r in remotes:
+                items.append((f"Remote: {r['name']}", r["name"]))
+
+            def on_target(target):
+                if target is None:
+                    return
+                if target == "__local__":
+                    _start_new(cli)
+                else:
+                    _start_new(cli, remote_name=target)
+
+            self.push_screen(ContextMenuModal("Where to create?", items, centered=True), on_target)
+
         items = self._cli_choice_items()
         if len(items) <= 1:
-            _start_new(items[0][1] if items else "claude")
+            _pick_target(items[0][1] if items else "claude")
         else:
             def on_cli(cli):
                 if cli:
-                    _start_new(cli)
+                    _pick_target(cli)
             self.push_screen(ContextMenuModal("New Session — Choose CLI", items, centered=True), on_cli)
 
     def action_ephemeral_session(self):
@@ -5631,7 +6141,7 @@ class CCSApp(App):
         idx = available.index(self.cli_filter) if self.cli_filter in available else 0
         self.cli_filter = available[(idx + 1) % len(available)]
         self._apply_filter()
-        self._render_session_list()
+        self._rebuild_list()
         self._update_header()
         if self.cli_filter:
             self._set_status(f"CLI filter: {CLI_NAMES.get(self.cli_filter, self.cli_filter)}")
@@ -5771,6 +6281,18 @@ def cmd_help():
   ccs tmux attach <name>                 Attach to tmux session
   ccs tmux kill <name>                   Kill a tmux session
   ccs tmux kill --all                    Kill all tmux sessions
+
+\033[1mRemote:\033[0m
+  ccs remote add <name> <host:port> --pair <code>   Pair with remote server
+  ccs remote list                        List configured remotes
+  ccs remote remove <name>               Remove a remote
+  ccs remote test <name>                 Test remote connectivity
+  ccs remote enable/disable <name>       Toggle remote on/off
+  ccs remote repin <name>                Re-pin TLS fingerprint
+  ccs serve [--port N] [--bind addr]     Start remote server
+  ccs serve pair                         Generate new pairing code
+  ccs serve clients                      List paired clients
+  ccs serve revoke <id|--all>            Revoke client(s)
   ccs help                               Show this help
 
 \033[1mCLI options for 'new':\033[0m
@@ -6312,6 +6834,184 @@ def cmd_tmux_kill_all(mgr: SessionManager):
     print(f"Killed {len(names)} tmux session{'s' if len(names) != 1 else ''}.")
 
 
+# ── Remote CLI commands ───────────────────────────────────────────────
+
+
+def cmd_remote_add(name: str, host_port: str, code: str):
+    """Pair with a remote ccs server."""
+    if ":" in host_port:
+        host, port_str = host_port.rsplit(":", 1)
+        try:
+            port = int(port_str)
+        except ValueError:
+            print(f"\033[31mInvalid port: {port_str}\033[0m")
+            sys.exit(1)
+    else:
+        host = host_port
+        from ccs_protocol import DEFAULT_PORT
+        port = DEFAULT_PORT
+
+    try:
+        from ccs_remote import sync_pair_remote, add_remote
+    except ImportError:
+        print("\033[31mRemote support requires: pip install websockets PyJWT\033[0m")
+        sys.exit(1)
+
+    print(f"Pairing with {host}:{port} ...")
+    try:
+        result = sync_pair_remote(host, port, code, name)
+    except Exception as e:
+        print(f"\033[31mPairing failed: {e}\033[0m")
+        sys.exit(1)
+
+    add_remote(
+        name=name,
+        host=host,
+        port=port,
+        token=result["token"],
+        refresh_token=result["refresh_token"],
+        client_id=result["client_id"],
+        fingerprint=result.get("fingerprint", ""),
+    )
+    print(f"\033[32m✓ Paired with {name} ({host}:{port})\033[0m")
+    fp = result.get("fingerprint", "")
+    if fp:
+        print(f"  Fingerprint: {fp}")
+
+
+def cmd_remote_list():
+    """List all configured remotes."""
+    try:
+        from ccs_remote import load_remotes
+    except ImportError:
+        print("\033[31mRemote support requires: pip install websockets PyJWT\033[0m")
+        sys.exit(1)
+
+    remotes = load_remotes()
+    if not remotes:
+        print("No remote servers configured.")
+        print("Add one with: ccs remote add <name> <host:port> --pair <code>")
+        return
+
+    for r in remotes:
+        name = r.get("name", "?")
+        host = r.get("host", "?")
+        port = r.get("port", 7433)
+        enabled = r.get("enabled", True)
+        status = "\033[32menabled\033[0m" if enabled else "\033[31mdisabled\033[0m"
+        print(f"  {name:<16s} {host}:{port:<6d} {status}")
+
+
+def cmd_remote_remove(name: str):
+    """Remove a remote configuration."""
+    try:
+        from ccs_remote import remove_remote
+    except ImportError:
+        print("\033[31mRemote support requires: pip install websockets PyJWT\033[0m")
+        sys.exit(1)
+
+    if remove_remote(name):
+        print(f"Removed remote: {name}")
+    else:
+        print(f"\033[31mRemote not found: {name}\033[0m")
+        sys.exit(1)
+
+
+def cmd_remote_test(name: str):
+    """Test connectivity to a remote."""
+    try:
+        from ccs_remote import get_remote, sync_ping_remote
+    except ImportError:
+        print("\033[31mRemote support requires: pip install websockets PyJWT\033[0m")
+        sys.exit(1)
+
+    remote = get_remote(name)
+    if not remote:
+        print(f"\033[31mRemote not found: {name}\033[0m")
+        sys.exit(1)
+
+    print(f"Testing {name} ({remote['host']}:{remote['port']}) ...")
+    if sync_ping_remote(remote):
+        print(f"\033[32m✓ {name} is reachable\033[0m")
+    else:
+        print(f"\033[31m✗ {name} is unreachable\033[0m")
+        sys.exit(1)
+
+
+def cmd_remote_toggle(name: str, enable: bool):
+    """Enable or disable a remote."""
+    try:
+        from ccs_remote import set_remote_enabled
+    except ImportError:
+        print("\033[31mRemote support requires: pip install websockets PyJWT\033[0m")
+        sys.exit(1)
+
+    if set_remote_enabled(name, enable):
+        state = "enabled" if enable else "disabled"
+        print(f"Remote {name} {state}")
+    else:
+        print(f"\033[31mRemote not found: {name}\033[0m")
+        sys.exit(1)
+
+
+def cmd_remote_repin(name: str):
+    """Re-pin the TLS fingerprint for a remote."""
+    try:
+        from ccs_remote import get_remote, load_remotes, save_remotes
+    except ImportError:
+        print("\033[31mRemote support requires: pip install websockets PyJWT\033[0m")
+        sys.exit(1)
+
+    remote = get_remote(name)
+    if not remote:
+        print(f"\033[31mRemote not found: {name}\033[0m")
+        sys.exit(1)
+
+    import asyncio
+    import ssl as _ssl
+    import hashlib
+
+    async def _repin():
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        import websockets
+        uri = f"wss://{remote['host']}:{remote['port']}"
+        ws = await websockets.connect(uri, ssl=ctx, max_size=2**20)
+        transport = ws.transport
+        ssl_object = transport.get_extra_info("ssl_object")
+        fp = ""
+        if ssl_object:
+            der_cert = ssl_object.getpeercert(binary_form=True)
+            if der_cert:
+                digest = hashlib.sha256(der_cert).hexdigest()
+                fp = "SHA256:" + ":".join(digest[i:i+2] for i in range(0, len(digest), 2))
+        await ws.close()
+        return fp
+
+    try:
+        fp = asyncio.run(_repin())
+    except Exception as e:
+        print(f"\033[31mFailed to connect: {e}\033[0m")
+        sys.exit(1)
+
+    if not fp:
+        print("\033[31mCould not get server fingerprint\033[0m")
+        sys.exit(1)
+
+    remotes = load_remotes()
+    for r in remotes:
+        if r["name"] == name:
+            old_fp = r.get("fingerprint", "")
+            r["fingerprint"] = fp
+            save_remotes(remotes)
+            print(f"Re-pinned {name}")
+            if old_fp:
+                print(f"  Old: {old_fp}")
+            print(f"  New: {fp}")
+            return
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 
@@ -6512,6 +7212,65 @@ def main():
 
     elif verb == "providers":
         cmd_providers(mgr)
+
+    elif verb == "remote":
+        if len(args) < 2:
+            print("\033[31mUsage: ccs remote add|list|remove|test|enable|disable|repin\033[0m")
+            sys.exit(1)
+        sub = args[1]
+        if sub == "add":
+            if len(args) < 4:
+                print("\033[31mUsage: ccs remote add <name> <host:port> --pair <code>\033[0m")
+                sys.exit(1)
+            name = args[2]
+            host_port = args[3]
+            code = ""
+            if "--pair" in args[4:]:
+                pi = args.index("--pair", 4)
+                if pi + 1 < len(args):
+                    code = args[pi + 1]
+            if not code:
+                print("\033[31mUsage: ccs remote add <name> <host:port> --pair <code>\033[0m")
+                sys.exit(1)
+            cmd_remote_add(name, host_port, code)
+        elif sub == "list":
+            cmd_remote_list()
+        elif sub == "remove":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs remote remove <name>\033[0m")
+                sys.exit(1)
+            cmd_remote_remove(args[2])
+        elif sub == "test":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs remote test <name>\033[0m")
+                sys.exit(1)
+            cmd_remote_test(args[2])
+        elif sub == "enable":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs remote enable <name>\033[0m")
+                sys.exit(1)
+            cmd_remote_toggle(args[2], True)
+        elif sub == "disable":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs remote disable <name>\033[0m")
+                sys.exit(1)
+            cmd_remote_toggle(args[2], False)
+        elif sub == "repin":
+            if len(args) < 3:
+                print("\033[31mUsage: ccs remote repin <name>\033[0m")
+                sys.exit(1)
+            cmd_remote_repin(args[2])
+        else:
+            print(f"\033[31mUnknown remote command: {sub}\033[0m")
+            sys.exit(1)
+
+    elif verb == "serve":
+        try:
+            from ccs_serve import cmd_serve
+        except ImportError:
+            print("\033[31mServe requires: pip install websockets PyJWT bcrypt\033[0m")
+            sys.exit(1)
+        cmd_serve(args[1:])
 
     elif verb == "tmux":
         if not HAS_TMUX:
