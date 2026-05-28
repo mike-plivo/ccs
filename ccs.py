@@ -2548,10 +2548,12 @@ class HelpModal(ModalScreen):
             text.append("  t / T          Set / remove tag\n")
             text.append("  d              Delete session\n\n")
             text.append("Other\n", style=hdr)
+            text.append("  R              Manage remote servers\n")
             text.append("  P              Profile picker / manager\n")
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
             text.append("  S              Rescan all sessions\n")
+            text.append("  m              Open action menu\n")
             text.append("  Esc / \u2190        Back to Sessions list\n")
             text.append("  Ctrl-C         Quit\n")
         else:
@@ -2588,6 +2590,7 @@ class HelpModal(ModalScreen):
             text.append("  H              Cycle theme\n")
             text.append("  r              Refresh session list\n")
             text.append("  S              Rescan all sessions\n")
+            text.append("  m              Open action menu\n")
             text.append("  Esc            Quit\n")
             text.append("  Ctrl-C         Quit\n")
 
