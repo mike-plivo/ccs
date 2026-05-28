@@ -4900,13 +4900,9 @@ class CCSApp(App):
         if not remote:
             self._set_status(f"Remote '{s.remote}' not found in config")
             return
-        # Resolve project path for the remote cwd
-        cwd = None
-        if s.project_display:
-            p = s.project_display
-            if p.startswith("~"):
-                p = os.path.expanduser(p)
-            cwd = p
+        # Send project path as-is (with ~) — the server expands ~ to
+        # its own home directory, not the local user's.
+        cwd = s.project_display or None
         try:
             from ccs_remote import sync_attach_remote
             with self.suspend():
