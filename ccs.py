@@ -482,22 +482,22 @@ class SessionManager:
         Orphan continuations (parent not in session list) are promoted to
         standalone sessions so they aren't hidden.
         The latest session in each chain gets the +N badge and stays visible;
-        all other chain members are hidden when collapsed.
+        all other chain members get kind='continuation'.
         """
         by_id = {s.id: s for s in sessions}
         # Promote orphan continuations (parent deleted) to standalone
         for s in sessions:
-            if s.is_continuation and s.parent_id and s.parent_id not in by_id:
-                s.is_continuation = False
+            if s.kind == "continuation" and s.parent_id and s.parent_id not in by_id:
+                s.kind = "primary"
                 s.parent_id = ""
         # Build chains: map each session to its root ancestor
         chain_members: dict = {}  # root_id -> [all sessions in chain]
         for s in sessions:
-            if not s.is_continuation or not s.parent_id:
+            if s.kind != "continuation" or not s.parent_id:
                 continue
             root = s.parent_id
             visited = {s.id}
-            while root in by_id and by_id[root].is_continuation and by_id[root].parent_id:
+            while root in by_id and by_id[root].kind == "continuation" and by_id[root].parent_id:
                 if root in visited:
                     break
                 visited.add(root)
@@ -513,11 +513,10 @@ class SessionManager:
             latest = max(all_in_chain, key=lambda s: s.mtime)
             count = len(all_in_chain) - 1  # exclude the latest from count
             latest.continuation_count = count
-            # Set chain_root and hide flags on all members
+            # Mark all non-latest as continuations
             for s in all_in_chain:
-                s.chain_root = latest.id
                 if s.id != latest.id:
-                    s.hide_when_collapsed = True
+                    s.kind = "continuation"
 
     def toggle_pin(self, sid: str) -> bool:
         current = self._get_meta(sid).get("pinned", False)
