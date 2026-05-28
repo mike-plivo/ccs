@@ -3,7 +3,7 @@
 ccs_serve — WebSocket server for remote ccs session management.
 
 Usage:
-    ccs serve [--port 7433] [--bind 0.0.0.0]
+    ccs serve [--port 7433] [--bind 0.0.0.0] [--debug]
     ccs serve pair                   # Generate a new pairing code
     ccs serve clients                # List paired clients
     ccs serve revoke <client_id>     # Revoke a client

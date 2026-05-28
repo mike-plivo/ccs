@@ -32,7 +32,7 @@ Usage:
     ccs remote test <name>                 Test remote connectivity
     ccs remote enable/disable <name>       Toggle remote
     ccs remote repin <name>                Re-pin TLS fingerprint
-    ccs serve [--port 7433] [--bind 0.0.0.0]   Start remote server
+    ccs serve [--port 7433] [--bind 0.0.0.0] [--debug]  Start remote server
     ccs serve pair                         Generate new pairing code
     ccs serve clients                      List paired clients
     ccs serve revoke <client_id|--all>     Revoke client(s)
@@ -6339,7 +6339,7 @@ def cmd_help():
   ccs remote test <name>                 Test remote connectivity
   ccs remote enable/disable <name>       Toggle remote on/off
   ccs remote repin <name>                Re-pin TLS fingerprint
-  ccs serve [--port N] [--bind addr]     Start remote server
+  ccs serve [--port N] [--bind addr] [--debug]  Start remote server
   ccs serve pair                         Generate new pairing code
   ccs serve clients                      List paired clients
   ccs serve revoke <id|--all>            Revoke client(s)
