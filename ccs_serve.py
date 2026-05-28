@@ -212,8 +212,8 @@ def scan_sessions_direct() -> list:
         if projects_dir.exists():
             for jsonl in projects_dir.rglob("*.jsonl"):
                 sid = jsonl.stem
-                # Skip non-UUID filenames
-                if len(sid) < 30:
+                # Skip non-UUID filenames and subagent sessions
+                if len(sid) < 30 or sid.startswith("agent-"):
                     continue
                 mtime = jsonl.stat().st_mtime
                 # Read first/last user messages

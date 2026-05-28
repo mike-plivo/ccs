@@ -133,6 +133,7 @@ ccs serve revoke <id|--all>            Revoke client(s)
 | `d` | Delete session |
 | `D` | Delete all empty sessions |
 | `C` | Toggle continuation sessions |
+| `A` | Toggle subagent sessions |
 | `k / K` | Kill tmux session / all |
 | `Space` | Mark / unmark session |
 | `u` | Unmark all |
@@ -170,6 +171,15 @@ When Claude Code runs out of context, it creates a new **continuation session** 
 - **Search includes all** -- searching always includes continuation sessions regardless of the toggle
 - **Orphan promotion** -- if a continuation's parent was deleted, it's promoted to a standalone session
 - **Bulk archive** -- use the menu (`m`) to delete all continuation sessions at once
+
+## Subagent Sessions
+
+Claude Code spawns **subagent sessions** for background tasks (suggestions, summaries, parallel work). These can accumulate into hundreds of entries. CCS detects them automatically (session ID starts with `agent-`) and hides them by default.
+
+- **Hidden by default** -- the header shows `(+N subagent hidden, A to show)`
+- **Toggle with `A`** -- press `A` to show/hide subagent sessions
+- **Search includes all** -- searching always includes subagent sessions regardless of the toggle
+- **Server-side filtering** -- remote servers skip subagent sessions during scan for faster transfer
 
 ## Tmux Expert Mode
 
