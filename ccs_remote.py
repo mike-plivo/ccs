@@ -445,16 +445,20 @@ async def _pty_client_loop(ws):
         async def stdin_to_ws():
             try:
                 while True:
-                    # Wait for stdin to be ready
-                    await loop.run_in_executor(
+                    # Use a timeout so the executor thread can be joined
+                    # during asyncio.run() shutdown after task cancellation.
+                    ready = await loop.run_in_executor(
                         None,
-                        lambda: select.select([sys.stdin], [], [], None)
+                        lambda: select.select([sys.stdin], [], [], 0.5)
                     )
+                    if not ready[0]:
+                        continue  # timeout — loop back to check cancellation
                     data = os.read(sys.stdin.fileno(), 4096)
                     if not data:
                         break
                     await ws.send(data)
-            except (OSError, websockets.exceptions.ConnectionClosed):
+            except (OSError, websockets.exceptions.ConnectionClosed,
+                    asyncio.CancelledError):
                 pass
 
         # Read from server → write to stdout
