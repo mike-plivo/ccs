@@ -2041,7 +2041,7 @@ def build_session_row(
         text.append("   ")
 
     # Continuation badge on parent, ↳ prefix on continuations
-    if show_continuations and s.hide_when_collapsed:
+    if show_continuations and s.kind == "continuation":
         text.append("\u21b3", style=Style(dim=True))
     elif s.continuation_count > 0:
         text.append(f"+{s.continuation_count}", style=Style(color=tc("accent-color", "#00cccc")))
@@ -2053,6 +2053,8 @@ def build_session_row(
     badge = CLI_BADGES.get(s.cli, "[?]")
     badge_colors = {"claude": "#00cccc", "codex": "#ff8800", "opencode": "#88ff00"}
     text.append(badge, style=Style(color=badge_colors.get(s.cli, "#888888"), bold=True))
+    if s.kind == "worktree":
+        text.append("[W]", style=Style(color="#ff00ff", bold=True))
     text.append(" ")
 
     # Tag column — truncate long tags to [abcdefgh...]
@@ -2095,7 +2097,7 @@ def build_session_row(
     desc = s.label
     if len(desc) > 50:
         desc = desc[:49] + "\u2026"
-    if show_continuations and s.hide_when_collapsed:
+    if show_continuations and s.kind == "continuation":
         text.append(desc, style=Style(dim=True))
     else:
         text.append(desc)
@@ -4306,29 +4308,33 @@ class CCSApp(App):
                 or text_q in s.id.lower()
                 or text_q in s.remote.lower()
             ]
-        # Hide chain members unless toggled on (search always shows all)
+        # Hide continuations unless toggled on (search always shows all)
         if not self.show_continuations and not q:
-            self.filtered = [s for s in self.filtered if not s.hide_when_collapsed]
+            self.filtered = [s for s in self.filtered if s.kind != "continuation"]
         elif self.show_continuations and not q:
-            # Group chain members under the latest session (badge holder)
-            visible = [s for s in self.filtered if not s.hide_when_collapsed]
+            # Group continuations under their chain head (session with +N badge)
+            visible = [s for s in self.filtered if s.kind != "continuation"]
             chain_children: dict = {}
             for s in self.filtered:
-                if s.hide_when_collapsed and s.chain_root:
-                    chain_children.setdefault(s.chain_root, []).append(s)
+                if s.kind == "continuation" and s.parent_id:
+                    chain_children.setdefault(s.parent_id, []).append(s)
             for children in chain_children.values():
                 children.sort(key=lambda s: -s.mtime)
             result = []
+            seen_parents = set()
             for s in visible:
                 result.append(s)
+                # Check if this session or any session with continuation_count > 0 has children
                 if s.id in chain_children:
                     result.extend(chain_children.pop(s.id))
+                    seen_parents.add(s.id)
+            # Append any orphan continuations
             for children in chain_children.values():
                 result.extend(children)
             self.filtered = result
         # Hide subagent sessions unless toggled on (search always shows all)
         if not self.show_subagents and not q:
-            self.filtered = [s for s in self.filtered if not s.is_subagent]
+            self.filtered = [s for s in self.filtered if s.kind != "subagent"]
 
     def _rebuild_list(self):
         sl = self.query_one("#session-list", SessionListWidget)
@@ -4428,7 +4434,7 @@ class CCSApp(App):
         header.session_count = len(self.filtered)
         header.total_count = len(self.sessions)
         if not self.show_subagents:
-            header.hidden_subagents = sum(1 for s in self.sessions if s.is_subagent)
+            header.hidden_subagents = sum(1 for s in self.sessions if s.kind == "subagent")
         else:
             header.hidden_subagents = 0
         header.sort_mode = self.sort_mode
@@ -5854,7 +5860,7 @@ class CCSApp(App):
             return
         self.show_subagents = not self.show_subagents
         label = "shown" if self.show_subagents else "hidden"
-        total = sum(1 for s in self.sessions if s.is_subagent)
+        total = sum(1 for s in self.sessions if s.kind == "subagent")
         self._set_status(f"Subagent sessions {label} ({total} total)")
         self._apply_filter()
         self._rebuild_list()
@@ -5864,7 +5870,7 @@ class CCSApp(App):
         """Delete all continuation sessions."""
         if self.view != "sessions":
             return
-        cont_sessions = [s for s in self.sessions if s.hide_when_collapsed]
+        cont_sessions = [s for s in self.sessions if s.kind == "continuation"]
         if not cont_sessions:
             self._set_status("No continuation sessions to archive")
             return
