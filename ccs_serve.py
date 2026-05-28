@@ -11,6 +11,7 @@ Usage:
 """
 
 import asyncio
+import datetime
 import fcntl
 import json
 import os
@@ -39,6 +40,26 @@ from ccs_protocol import (
     create_refresh_token, verify_access_token, load_or_create_secret,
     ensure_tls_certs, cert_fingerprint, error_msg, ok_msg,
 )
+
+# ── Logging ──────────────────────────────────────────────────────────────
+
+_debug = False  # Set via --debug flag
+
+
+def _ts() -> str:
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+def log(msg: str):
+    """Always-on activity log (connections, auth, commands)."""
+    print(f"  \033[2m{_ts()}\033[0m  {msg}")
+
+
+def debug(msg: str):
+    """Verbose log, only shown with --debug."""
+    if _debug:
+        print(f"  \033[2m{_ts()}\033[0m  \033[2m{msg}\033[0m")
+
 
 # ── Pairing state ────────────────────────────────────────────────────────
 
@@ -488,6 +509,18 @@ def read_session_messages(session_id: str, cli: str) -> list:
 TMUX_PREFIX = "ccs-"
 
 
+def _resolve_cli_binary(cli: str) -> str:
+    """Find the binary path for a CLI provider."""
+    import shutil
+    if cli == "opencode":
+        candidate = Path.home() / ".opencode" / "bin" / "opencode"
+        return str(candidate) if candidate.exists() else (shutil.which("opencode") or "opencode")
+    elif cli == "codex":
+        return shutil.which("codex") or "codex"
+    else:
+        return shutil.which("claude") or "claude"
+
+
 def tmux_session_exists(session_id: str) -> bool:
     """Check if a ccs tmux session exists."""
     name = TMUX_PREFIX + session_id
@@ -615,6 +648,8 @@ async def handle_connection(ws):
     """Handle a single WebSocket client connection."""
     secret = load_or_create_secret()
     authenticated_client: Optional[str] = None
+    peer = ws.remote_address[0] if ws.remote_address else "?"
+    log(f"\033[33m→ connect\033[0m  {peer}")
 
     try:
         async for message in ws:
@@ -629,10 +664,13 @@ async def handle_connection(ws):
 
             cmd = msg.get("cmd", "")
 
+            debug(f"cmd={cmd} from {peer}")
+
             # ── Pairing (no auth required) ──
             if cmd == CMD_PAIR:
                 code = msg.get("code", "")
                 if not validate_pair_code(code):
+                    log(f"\033[31m✗ pair\033[0m     {peer}  invalid code")
                     await ws.send(json.dumps(error_msg("Invalid or expired pairing code")))
                     continue
                 client_id = generate_client_id()
@@ -645,6 +683,7 @@ async def handle_connection(ws):
                     client_id=client_id,
                 )))
                 authenticated_client = client_id
+                log(f"\033[32m✓ pair\033[0m     {peer}  client={client_id[:8]} name={msg.get('name', '')}")
                 continue
 
             # ── Token refresh (needs refresh token, not access token) ──
@@ -652,11 +691,13 @@ async def handle_connection(ws):
                 client_id = msg.get("client_id", "")
                 refresh_token = msg.get("refresh_token", "")
                 if not verify_refresh(client_id, refresh_token):
+                    log(f"\033[31m✗ refresh\033[0m  {peer}  invalid token")
                     await ws.send(json.dumps(error_msg("Invalid refresh token")))
                     continue
                 access_token = create_access_token(client_id, secret)
                 await ws.send(json.dumps(ok_msg(access_token=access_token)))
                 authenticated_client = client_id
+                log(f"\033[32m✓ refresh\033[0m  {peer}  client={client_id[:8]}")
                 continue
 
             # ── Auth ──
@@ -664,9 +705,11 @@ async def handle_connection(ws):
                 token = msg.get("token", "")
                 client_id = verify_access_token(token, secret)
                 if not client_id:
+                    debug(f"auth failed from {peer}")
                     await ws.send(json.dumps(error_msg("Invalid or expired token")))
                     continue
                 authenticated_client = client_id
+                debug(f"auth ok for {client_id[:8]} from {peer}")
                 await ws.send(json.dumps(ok_msg()))
                 continue
 
@@ -676,50 +719,69 @@ async def handle_connection(ws):
                 continue
 
             if cmd == CMD_PING:
+                debug(f"ping from {peer}")
                 await ws.send(json.dumps(ok_msg(pong=True)))
 
             elif cmd == CMD_SCAN:
+                t0 = time.time()
                 sessions = scan_sessions_direct()
+                elapsed = time.time() - t0
+                log(f"\033[36mscan\033[0m      {peer}  {len(sessions)} sessions ({elapsed:.1f}s)")
                 await ws.send(json.dumps(ok_msg(sessions=sessions)))
 
             elif cmd == CMD_INFO:
                 sid = msg.get("id", "")
                 cli = msg.get("cli", "claude")
+                debug(f"info {sid[:12]} from {peer}")
                 messages = read_session_messages(sid, cli)
                 await ws.send(json.dumps(ok_msg(messages=messages)))
 
             elif cmd == CMD_KILL:
                 sid = msg.get("id", "")
                 if tmux_kill(sid):
+                    log(f"\033[31m✗ kill\033[0m    {peer}  {sid[:12]}")
                     await ws.send(json.dumps(ok_msg()))
                 else:
+                    log(f"\033[31m✗ kill\033[0m    {peer}  {sid[:12]}  not found")
                     await ws.send(json.dumps(error_msg("Session not found or already dead")))
 
             elif cmd == CMD_ATTACH:
                 sid = msg.get("id", "")
+                cli = msg.get("cli", "claude")
+                cwd = msg.get("cwd")
                 tmux_name = TMUX_PREFIX + sid
+                # Expand ~ to remote user's home
+                if cwd and cwd.startswith("~"):
+                    cwd = str(Path.home()) + cwd[1:]
+                if cwd and not os.path.isdir(cwd):
+                    cwd = None  # Don't use a non-existent dir
                 if not tmux_session_exists(sid):
-                    await ws.send(json.dumps(error_msg("tmux session not found")))
-                    continue
+                    # Auto-launch: create a tmux session that resumes the
+                    # CLI session, so the user doesn't have to do it manually.
+                    binary = _resolve_cli_binary(cli)
+                    resume_cmd = f"{binary} --resume {sid}"
+                    full_cmd = (
+                        f"{resume_cmd}; echo ''; echo 'Session ended.';"
+                        f" sleep 1; tmux kill-session -t {tmux_name}"
+                        f" 2>/dev/null || true"
+                    )
+                    subprocess.run([
+                        "tmux", "new-session", "-d", "-s", tmux_name,
+                        "-x", "200", "-y", "50",
+                    ] + (["-c", cwd] if cwd else []) + [full_cmd])
+                    log(f"\033[32m▶ resume\033[0m  {peer}  {sid[:12]} cli={cli}")
+                else:
+                    log(f"\033[32m▶ attach\033[0m  {peer}  {sid[:12]}")
                 await ws.send(json.dumps(ok_msg(pty=True)))
                 await pty_relay(ws, ["tmux", "attach-session", "-t", tmux_name])
+                log(f"\033[33m■ detach\033[0m  {peer}  {sid[:12]}")
                 # After PTY relay ends, connection is still open for more commands
 
             elif cmd == CMD_NEW:
                 cli = msg.get("cli", "claude")
                 args = msg.get("args", [])
                 cwd = msg.get("cwd")
-
-                # Resolve CLI binary
-                import shutil
-                binary = cli
-                if cli == "opencode":
-                    candidate = Path.home() / ".opencode" / "bin" / "opencode"
-                    binary = str(candidate) if candidate.exists() else (shutil.which("opencode") or "opencode")
-                elif cli == "codex":
-                    binary = shutil.which("codex") or "codex"
-                else:
-                    binary = shutil.which("claude") or "claude"
+                binary = _resolve_cli_binary(cli)
 
                 uid = generate_client_id()  # Reuse for session naming
                 tmux_name = TMUX_PREFIX + uid
@@ -733,14 +795,16 @@ async def handle_connection(ws):
                     "-x", "200", "-y", "50",
                 ] + (["-c", cwd] if cwd else []) + [full_cmd])
 
+                log(f"\033[32m+ new\033[0m     {peer}  cli={cli} id={uid[:12]}")
                 await ws.send(json.dumps(ok_msg(pty=True, id=uid)))
                 await pty_relay(ws, ["tmux", "attach-session", "-t", tmux_name])
+                log(f"\033[33m■ detach\033[0m  {peer}  {uid[:12]}")
 
             else:
                 await ws.send(json.dumps(error_msg(f"Unknown command: {cmd}")))
 
     except websockets.exceptions.ConnectionClosed:
-        pass
+        log(f"\033[33m← disconnect\033[0m {peer}")
 
 
 # ── Server startup ───────────────────────────────────────────────────────
@@ -815,7 +879,8 @@ def cmd_serve(args: list):
             print("Usage: ccs serve revoke <client_id> | --all")
         return
 
-    # Parse --port and --bind
+    # Parse --port, --bind, --debug
+    global _debug
     port = DEFAULT_PORT
     bind = "0.0.0.0"
     i = 0
@@ -826,6 +891,9 @@ def cmd_serve(args: list):
         elif args[i] == "--bind" and i + 1 < len(args):
             bind = args[i + 1]
             i += 2
+        elif args[i] == "--debug":
+            _debug = True
+            i += 1
         else:
             i += 1
 

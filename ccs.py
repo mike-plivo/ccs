@@ -77,7 +77,7 @@ except ImportError as e:
     print("Install with: ./install.sh  (or: uv tool install .[remote])")
     sys.exit(1)
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -4890,15 +4890,27 @@ class CCSApp(App):
             return None
 
     def _remote_attach(self, s: Session):
-        """Attach to a remote session via WebSocket PTY relay."""
+        """Attach to a remote session via WebSocket PTY relay.
+
+        If no tmux session exists on the remote, the server auto-launches
+        one with ``<cli> --resume <id>`` so the user gets a seamless
+        resume experience.
+        """
         remote = self._get_remote_cfg(s.remote)
         if not remote:
             self._set_status(f"Remote '{s.remote}' not found in config")
             return
+        # Resolve project path for the remote cwd
+        cwd = None
+        if s.project_display:
+            p = s.project_display
+            if p.startswith("~"):
+                p = os.path.expanduser(p)
+            cwd = p
         try:
             from ccs_remote import sync_attach_remote
             with self.suspend():
-                sync_attach_remote(remote, s.id)
+                sync_attach_remote(remote, s.id, cli=s.cli, cwd=cwd)
         except Exception as e:
             self._set_status(f"Remote attach failed: {e}")
         self._do_refresh(force=True)

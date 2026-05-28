@@ -339,9 +339,11 @@ async def ping_remote(remote: dict) -> bool:
             pass
 
 
-async def attach_remote_session(remote: dict, session_id: str) -> None:
+async def attach_remote_session(remote: dict, session_id: str,
+                                cli: str = "claude", cwd: str = None) -> None:
     """
     Attach to a remote tmux session interactively.
+    If no tmux session exists, the server auto-launches one with --resume.
     Takes over the terminal — raw mode, bidirectional PTY relay.
     """
     ws = await _connect(remote["host"], remote["port"], remote.get("fingerprint"))
@@ -349,7 +351,10 @@ async def attach_remote_session(remote: dict, session_id: str) -> None:
         if not await _authenticate(ws, remote):
             raise Exception("Authentication failed")
 
-        resp = await _send_cmd(ws, {"cmd": CMD_ATTACH, "id": session_id})
+        attach_msg = {"cmd": CMD_ATTACH, "id": session_id, "cli": cli}
+        if cwd:
+            attach_msg["cwd"] = cwd
+        resp = await _send_cmd(ws, attach_msg)
         if not resp.get("ok"):
             raise Exception(resp.get("error", "Attach failed"))
 
@@ -547,9 +552,10 @@ def sync_kill_remote_session(remote: dict, session_id: str) -> bool:
         return False
 
 
-def sync_attach_remote(remote: dict, session_id: str) -> None:
+def sync_attach_remote(remote: dict, session_id: str,
+                       cli: str = "claude", cwd: str = None) -> None:
     """Synchronous wrapper for attach_remote_session."""
-    _run_coro(attach_remote_session(remote, session_id))
+    _run_coro(attach_remote_session(remote, session_id, cli=cli, cwd=cwd))
 
 
 def sync_new_remote(remote: dict, cli: str = "claude",
