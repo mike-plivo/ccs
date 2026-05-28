@@ -16,6 +16,8 @@ import fcntl
 import json
 import os
 import pty
+import re
+import shlex
 import signal
 import ssl
 import struct
@@ -59,6 +61,49 @@ def debug(msg: str):
     """Verbose log, only shown with --debug."""
     if _debug:
         print(f"  \033[2m{_ts()}\033[0m  \033[2m{msg}\033[0m")
+
+
+# ── Input validation ─────────────────────────────────────────────────────
+
+# Session IDs are UUIDs (hex + dashes) or opencode numeric IDs.
+_SAFE_SID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,200}$')
+
+# CLI args: letters, digits, dashes, dots, underscores, colons, equals,
+# slashes, tildes, @, plus, commas.  No shell metacharacters (; | & $ ` etc).
+_SAFE_ARG_RE = re.compile(r'^[a-zA-Z0-9_./:=~@+,-]+$')
+
+# Allowed CLI names — reject anything else.
+_ALLOWED_CLIS = frozenset({"claude", "codex", "opencode"})
+
+
+def _valid_session_id(sid) -> bool:
+    """Validate session ID: alphanumeric, dashes, underscores only."""
+    return isinstance(sid, str) and bool(_SAFE_SID_RE.match(sid))
+
+
+def _valid_cli(cli: str) -> bool:
+    """Validate CLI name against the allowlist."""
+    return cli in _ALLOWED_CLIS
+
+
+def _sanitize_cwd(cwd: Optional[str]) -> Optional[str]:
+    """Validate and resolve cwd, restricting to real directories under $HOME."""
+    if not cwd:
+        return None
+    # Expand ~ to the server user's home
+    if cwd.startswith("~"):
+        cwd = str(Path.home()) + cwd[1:]
+    try:
+        resolved = Path(cwd).resolve(strict=False)
+    except (ValueError, OSError):
+        return None
+    home = Path.home().resolve()
+    # Must be under $HOME
+    if resolved != home and home not in resolved.parents:
+        return None
+    if not resolved.is_dir():
+        return None
+    return str(resolved)
 
 
 # ── Pairing state ────────────────────────────────────────────────────────
@@ -161,56 +206,6 @@ def list_clients() -> list:
 
 
 # ── Session scanning (reuses ccs SessionManager) ────────────────────────
-
-def _scan_sessions_json() -> list:
-    """Run a session scan using ccs internals and return JSON-serializable list."""
-    # Import ccs here to avoid circular imports at module level
-    try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        import importlib
-        # Use subprocess to avoid textual import issues
-        result = subprocess.run(
-            [sys.executable, "-c", """
-import sys, json, os
-sys.path.insert(0, os.path.dirname(os.path.abspath("{}")))
-
-# Minimal scan without importing textual
-import sqlite3, glob, time, getpass, dataclasses
-from pathlib import Path
-
-# We re-use ccs's scanning logic via its CLI
-# Run 'ccs list --json' if available, otherwise do manual scan
-result = subprocess.run(
-    [sys.executable, os.path.join(os.path.dirname(os.path.abspath("{}")), "ccs.py"), "list", "--json"],
-    capture_output=True, text=True, timeout=30,
-)
-if result.returncode == 0 and result.stdout.strip():
-    print(result.stdout.strip())
-else:
-    # Fallback: output empty list
-    print("[]")
-""".format(__file__, __file__)],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout.strip())
-    except Exception:
-        pass
-
-    # Direct scan fallback — use subprocess to call ccs list
-    try:
-        ccs_path = Path(__file__).parent / "ccs.py"
-        result = subprocess.run(
-            [sys.executable, str(ccs_path), "list", "--json"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout.strip())
-    except Exception:
-        pass
-
-    return []
-
 
 def scan_sessions_direct() -> list:
     """Scan sessions directly using SessionManager without textual."""
@@ -384,6 +379,9 @@ def scan_sessions_direct() -> list:
 
 def read_session_messages(session_id: str, cli: str) -> list:
     """Read messages for a session. Returns list of {role, content, timestamp}."""
+    # Defense-in-depth: reject session IDs with glob/path metacharacters.
+    if not _SAFE_SID_RE.match(session_id):
+        return []
     msgs = []
     home = Path.home()
 
@@ -596,8 +594,14 @@ async def pty_relay(ws, cmd: list, cwd: Optional[str] = None):
                         msg = json.loads(message)
                         cmd_type = msg.get("cmd")
                         if cmd_type == CMD_RESIZE:
-                            new_cols = msg.get("cols", cols)
-                            new_rows = msg.get("rows", rows)
+                            try:
+                                new_cols = int(msg.get("cols", cols))
+                                new_rows = int(msg.get("rows", rows))
+                                # Clamp to valid terminal size range
+                                new_cols = max(1, min(new_cols, 500))
+                                new_rows = max(1, min(new_rows, 500))
+                            except (TypeError, ValueError):
+                                continue
                             fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
                                         struct.pack("HHHH", new_rows, new_cols, 0, 0))
                             # Signal the process group
@@ -732,12 +736,21 @@ async def handle_connection(ws):
             elif cmd == CMD_INFO:
                 sid = msg.get("id", "")
                 cli = msg.get("cli", "claude")
+                if not _valid_session_id(sid):
+                    await ws.send(json.dumps(error_msg("Invalid session ID")))
+                    continue
+                if not _valid_cli(cli):
+                    await ws.send(json.dumps(error_msg("Invalid CLI")))
+                    continue
                 debug(f"info {sid[:12]} from {peer}")
                 messages = read_session_messages(sid, cli)
                 await ws.send(json.dumps(ok_msg(messages=messages)))
 
             elif cmd == CMD_KILL:
                 sid = msg.get("id", "")
+                if not _valid_session_id(sid):
+                    await ws.send(json.dumps(error_msg("Invalid session ID")))
+                    continue
                 if tmux_kill(sid):
                     log(f"\033[31m✗ kill\033[0m    {peer}  {sid[:12]}")
                     await ws.send(json.dumps(ok_msg()))
@@ -749,21 +762,25 @@ async def handle_connection(ws):
                 sid = msg.get("id", "")
                 cli = msg.get("cli", "claude")
                 cwd = msg.get("cwd")
+                if not _valid_session_id(sid):
+                    await ws.send(json.dumps(error_msg("Invalid session ID")))
+                    continue
+                if not _valid_cli(cli):
+                    await ws.send(json.dumps(error_msg("Invalid CLI")))
+                    continue
+                cwd = _sanitize_cwd(cwd)
                 tmux_name = TMUX_PREFIX + sid
-                # Expand ~ to remote user's home
-                if cwd and cwd.startswith("~"):
-                    cwd = str(Path.home()) + cwd[1:]
-                if cwd and not os.path.isdir(cwd):
-                    cwd = None  # Don't use a non-existent dir
                 if not tmux_session_exists(sid):
                     # Auto-launch: create a tmux session that resumes the
                     # CLI session, so the user doesn't have to do it manually.
                     binary = _resolve_cli_binary(cli)
-                    resume_cmd = f"{binary} --resume {sid}"
+                    resume_cmd = (
+                        f"{shlex.quote(binary)} --resume {shlex.quote(sid)}"
+                    )
                     full_cmd = (
                         f"{resume_cmd}; echo ''; echo 'Session ended.';"
-                        f" sleep 1; tmux kill-session -t {tmux_name}"
-                        f" 2>/dev/null || true"
+                        f" sleep 1; tmux kill-session -t"
+                        f" {shlex.quote(tmux_name)} 2>/dev/null || true"
                     )
                     subprocess.run([
                         "tmux", "new-session", "-d", "-s", tmux_name,
@@ -781,24 +798,46 @@ async def handle_connection(ws):
                 cli = msg.get("cli", "claude")
                 args = msg.get("args", [])
                 cwd = msg.get("cwd")
-                binary = _resolve_cli_binary(cli)
+                if not _valid_cli(cli):
+                    await ws.send(json.dumps(error_msg("Invalid CLI")))
+                    continue
+                if not isinstance(args, list):
+                    await ws.send(json.dumps(error_msg("Invalid args")))
+                    continue
+                # Reject args containing shell metacharacters.
+                for a in args:
+                    if not isinstance(a, str) or not _SAFE_ARG_RE.match(a):
+                        await ws.send(json.dumps(
+                            error_msg(f"Invalid argument: {str(a)[:40]}")
+                        ))
+                        break
+                else:
+                    # All args passed validation — proceed
+                    cwd = _sanitize_cwd(cwd)
+                    binary = _resolve_cli_binary(cli)
 
-                uid = generate_client_id()  # Reuse for session naming
-                tmux_name = TMUX_PREFIX + uid
+                    uid = generate_client_id()  # Reuse for session naming
+                    tmux_name = TMUX_PREFIX + uid
 
-                cmd_parts = [binary] + args
-                cmd_str = " ".join(cmd_parts)
-                # Wrap in tmux
-                full_cmd = f"{cmd_str}; echo ''; echo 'Session ended.'; sleep 1; tmux kill-session -t {tmux_name} 2>/dev/null || true"
-                subprocess.run([
-                    "tmux", "new-session", "-d", "-s", tmux_name,
-                    "-x", "200", "-y", "50",
-                ] + (["-c", cwd] if cwd else []) + [full_cmd])
+                    cmd_parts = [binary] + args
+                    cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
+                    full_cmd = (
+                        f"{cmd_str}; echo ''; echo 'Session ended.';"
+                        f" sleep 1; tmux kill-session -t"
+                        f" {shlex.quote(tmux_name)} 2>/dev/null || true"
+                    )
+                    subprocess.run([
+                        "tmux", "new-session", "-d", "-s", tmux_name,
+                        "-x", "200", "-y", "50",
+                    ] + (["-c", cwd] if cwd else []) + [full_cmd])
 
-                log(f"\033[32m+ new\033[0m     {peer}  cli={cli} id={uid[:12]}")
-                await ws.send(json.dumps(ok_msg(pty=True, id=uid)))
-                await pty_relay(ws, ["tmux", "attach-session", "-t", tmux_name])
-                log(f"\033[33m■ detach\033[0m  {peer}  {uid[:12]}")
+                    log(f"\033[32m+ new\033[0m     {peer}  cli={cli} id={uid[:12]}")
+                    await ws.send(json.dumps(ok_msg(pty=True, id=uid)))
+                    await pty_relay(ws, ["tmux", "attach-session", "-t", tmux_name])
+                    log(f"\033[33m■ detach\033[0m  {peer}  {uid[:12]}")
+                    continue
+                # If we broke out of the for loop (bad arg), skip to next message
+                continue
 
             else:
                 await ws.send(json.dumps(error_msg(f"Unknown command: {cmd}")))
