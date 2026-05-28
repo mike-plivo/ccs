@@ -426,7 +426,15 @@ async def _pty_client_loop(ws):
             except Exception:
                 pass
 
-        loop.add_signal_handler(signal.SIGWINCH, on_resize)
+        # Signal handlers only work on the main thread.  When called from a
+        # worker thread (e.g. TUI context) we skip — terminal resize won't be
+        # forwarded but the session is otherwise fully functional.
+        _has_sigwinch = False
+        try:
+            loop.add_signal_handler(signal.SIGWINCH, on_resize)
+            _has_sigwinch = True
+        except (ValueError, RuntimeError):
+            pass
 
         # Read stdin → send to server
         async def stdin_to_ws():
@@ -473,26 +481,33 @@ async def _pty_client_loop(ws):
     finally:
         # Restore terminal
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
-        try:
-            loop.remove_signal_handler(signal.SIGWINCH)
-        except Exception:
-            pass
+        if _has_sigwinch:
+            try:
+                loop.remove_signal_handler(signal.SIGWINCH)
+            except Exception:
+                pass
 
 
 # ── Synchronous wrappers (for use from ccs.py) ──────────────────────────
 
 # asyncio.run() fails when called from within a running event loop (e.g. the
-# Textual TUI).  Using new_event_loop() + run_until_complete() works from both
-# CLI (no existing loop) and TUI (inside Textual's loop) contexts.
+# Textual TUI).  On Python 3.12+ even new_event_loop().run_until_complete()
+# checks for a running loop.  The reliable fix: detect an existing loop and
+# run the coroutine in a worker thread where asyncio.run() gets its own loop.
+
+import concurrent.futures
 
 
 def _run_coro(coro):
     """Run a coroutine from sync context, safe even inside an existing event loop."""
-    loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+        asyncio.get_running_loop()
+        # Inside an existing event loop — run in a thread with its own loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        # No running event loop — safe to use asyncio.run directly
+        return asyncio.run(coro)
 
 
 def sync_scan_all_remotes() -> dict:
