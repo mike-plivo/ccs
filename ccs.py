@@ -2163,7 +2163,7 @@ class SessionListWidget(OptionList):
                 self.app, s, has_tmux, is_idle, tmux_state,
                 is_marked, max_tag_w, show_continuations,
             )
-            self.add_option(Option(row, id=s.id))
+            self.add_option(Option(row, id=s.meta_key))
             self._opt_to_session[opt_idx] = si
             self._session_to_opt[si] = opt_idx
             opt_idx += 1
@@ -4351,7 +4351,7 @@ class CCSApp(App):
         # Restore selection
         if prev_id is not None:
             for i, s in enumerate(self.filtered):
-                if s.id == prev_id:
+                if s.meta_key == prev_id:
                     sl.highlight_session_index(i)
                     break
             else:
