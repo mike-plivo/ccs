@@ -262,6 +262,10 @@ def scan_sessions_direct() -> list:
                 if proj_display.startswith("/"):
                     proj_display = proj_display.replace(str(home), "~", 1)
 
+                # Classify session kind
+                is_worktree = "--claude-worktrees-" in str(jsonl.parent.name)
+                kind = "worktree" if is_worktree else "primary"
+
                 sessions.append({
                     "id": sid,
                     "cli": "claude",
@@ -270,6 +274,7 @@ def scan_sessions_direct() -> list:
                     "last_msg": last_msg,
                     "project": proj_display,
                     "mtime": mtime,
+                    "kind": kind,
                 })
 
         # Codex sessions
@@ -297,6 +302,7 @@ def scan_sessions_direct() -> list:
                         "last_msg": fm,
                         "project": pdisp,
                         "mtime": row["updated_at"] or 0,
+                        "kind": "primary",
                     })
                 conn.close()
             except Exception:
@@ -364,6 +370,7 @@ def scan_sessions_direct() -> list:
                             "last_msg": fm,
                             "project": pdisp,
                             "mtime": mtime,
+                            "kind": "primary",
                         })
                 conn.close()
             except Exception:
