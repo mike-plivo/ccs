@@ -175,12 +175,9 @@ class Session:
     summaries: List[str] = field(default_factory=list)
     path: str = ""
     msg_count: int = 0
-    is_continuation: bool = False
+    kind: str = "primary"          # primary | continuation | subagent | worktree
     parent_id: str = ""
     continuation_count: int = 0
-    hide_when_collapsed: bool = False
-    chain_root: str = ""
-    is_subagent: bool = False
 
     @property
     def meta_key(self) -> str:
