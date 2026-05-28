@@ -1,10 +1,10 @@
 # CCS - Coding CLI Session Manager
 
-A terminal UI and CLI for browsing, managing, and resuming sessions across multiple coding assistants: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), and [opencode](https://github.com/nicholasgriffintn/opencode).
+A terminal UI and CLI for browsing, managing, and resuming sessions across multiple coding assistants: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), and [opencode](https://github.com/nicholasgriffintn/opencode) -- locally and on remote servers.
 
 **Original idea and first version created by: Varun Wahi**
 
-CCS provides a unified interface for all your coding CLI sessions with session previews, tmux integration, profiles, themes, and bulk operations.
+CCS provides a unified interface for all your coding CLI sessions with session previews, tmux integration, profiles, themes, bulk operations, and remote server management over a secure WebSocket protocol.
 
 ### Sessions List
 <img src="img/ccs-main.png" width="700">
@@ -38,6 +38,7 @@ CCS auto-detects installed CLIs and their sessions. Each session shows a badge i
 - At least one supported CLI installed: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), or [opencode](https://github.com/nicholasgriffintn/opencode)
 - Optional: [tmux](https://github.com/tmux/tmux) (for background session management)
 - Optional: [git](https://git-scm.com/) (for repository info in session details)
+- Optional (remote): `websockets`, `PyJWT`, `bcrypt` (for remote server features)
 
 ## Install
 
@@ -45,19 +46,22 @@ CCS auto-detects installed CLIs and their sessions. Each session shows a badge i
 # Install dependencies
 pip install textual rich
 
+# Optional: install remote server dependencies
+pip install websockets PyJWT bcrypt
+
 # Clone and install
 git clone https://github.com/mike-plivo/ccs.git
 cd ccs
 ./install.sh
 ```
 
-The install script copies `ccs.py` to `~/.local/bin/` and adds a shell alias. After install, restart your terminal or run `source ~/.zshrc` (or `~/.bashrc`).
+The install script copies `ccs.py` and the remote modules to `~/.local/bin/` and adds a shell alias. After install, restart your terminal or run `source ~/.zshrc` (or `~/.bashrc`).
 
 ### Manual install
 
 ```bash
 pip install textual rich
-cp ccs.py ~/.local/bin/ccs.py
+cp ccs.py ccs_protocol.py ccs_remote.py ccs_serve.py ~/.local/bin/
 chmod +x ~/.local/bin/ccs.py
 alias ccs='python3 ~/.local/bin/ccs.py'
 ```
@@ -97,6 +101,16 @@ ccs tmux list                          List running tmux sessions
 ccs tmux attach <name>                 Attach to tmux session
 ccs tmux kill <name>                   Kill a tmux session
 ccs tmux kill --all                    Kill all ccs tmux sessions
+ccs remote add <name> <host:port> --pair <code>   Pair with remote server
+ccs remote list                        List configured remotes
+ccs remote remove <name>               Remove a remote
+ccs remote test <name>                 Test remote connectivity
+ccs remote enable/disable <name>       Toggle remote on/off
+ccs remote repin <name>                Re-pin TLS fingerprint
+ccs serve [--port N] [--bind addr]     Start remote server
+ccs serve pair                         Generate new pairing code
+ccs serve clients                      List paired clients
+ccs serve revoke <id|--all>            Revoke client(s)
 ```
 
 ## TUI Keyboard Shortcuts
@@ -121,9 +135,11 @@ ccs tmux kill --all                    Kill all ccs tmux sessions
 | `Space` | Mark / unmark session |
 | `u` | Unmark all |
 | `s` | Cycle sort mode |
-| `/` | Search / filter |
+| `F` | Cycle CLI filter |
+| `/` | Search / filter (`@host` to filter by remote) |
 | `S` | Rescan all sessions |
 | `r` | Refresh |
+| `R` | Remote server manager |
 | `P` | Profile manager |
 | `H` | Change theme |
 | `m` | Open menu |
@@ -178,6 +194,54 @@ ccs profile new <name>     # Create new profile
 ccs profile delete <name>  # Delete a profile
 ```
 
+## Remote Server Management
+
+CCS can connect to remote servers running `ccs serve` to list, manage, and attach to coding CLI sessions over a secure WebSocket protocol. No SSH dependency required.
+
+### How it works
+
+1. **Start the server** on the remote machine:
+   ```bash
+   ccs serve --port 7433
+   ```
+   On first run, it generates a TLS certificate and displays a one-time pairing code.
+
+2. **Pair from your local machine:**
+   ```bash
+   ccs remote add dev1 192.168.1.50:7433 --pair ABCD1234
+   ```
+
+3. **Use CCS normally** -- remote sessions appear grouped by host in the TUI, separated by `── dev1 ──` lines. All operations work: browse, attach, create new sessions, kill, tag, pin, and search with `@dev1` filter.
+
+### Security
+
+- **TLS encryption** with self-signed certificates and fingerprint pinning (trust-on-first-use)
+- **JWT access tokens** (1-hour expiry) with automatic refresh
+- **Refresh tokens** (90-day expiry) hashed with bcrypt server-side
+- **One-time pairing codes** (5-minute expiry, single use)
+- **Client management** -- list and revoke paired clients at any time
+
+### Managing remotes
+
+Press `R` in the TUI to open the Remotes modal, or use CLI commands:
+
+```bash
+ccs remote list              # List all configured remotes
+ccs remote test dev1         # Test connectivity
+ccs remote enable/disable dev1   # Toggle without removing
+ccs remote remove dev1       # Remove a remote
+ccs remote repin dev1        # Re-pin TLS fingerprint after cert change
+```
+
+### Server administration
+
+```bash
+ccs serve pair               # Generate a new pairing code
+ccs serve clients            # List all paired clients
+ccs serve revoke <id>        # Revoke a specific client
+ccs serve revoke --all       # Revoke all clients
+```
+
 ## Configuration
 
 All CCS data is stored in `~/.config/ccs/`:
@@ -189,6 +253,10 @@ All CCS data is stored in `~/.config/ccs/`:
 | `ccs_profiles.json` | Profile configurations |
 | `ccs_active_profile.txt` | Currently active profile |
 | `ccs_theme.txt` | Selected theme |
+| `remotes.json` | Remote server configurations (tokens, fingerprints) |
+| `clients.json` | Paired clients (server-side only) |
+| `serve_secret` | JWT signing secret (server-side only) |
+| `tls/server.crt`, `tls/server.key` | TLS certificate and key (server-side only) |
 
 CCS reads session data from each CLI's storage location (see Supported CLIs above). CCS metadata (tags, pins, profiles) is stored separately and does not affect any CLI's configuration.
 
